@@ -24,6 +24,7 @@ use crate::modals::{
     ProgressBarStyle, RowDensity, SettingsTab, SignalPathDisplay, TagEditorState, TagWorkerEvent,
     TrackInfoAction, pill_button,
 };
+use crate::platform::{FILE_MANAGER_NAME, MOD_SHORT, reveal_in_file_manager};
 use crate::plugins::{EqPreset, PianoEngineId, PluginConfig, ToolHealth};
 use crate::theme::{self, Palette, ThemeId};
 use crate::visualizer::{VisualizerMode, VisualizerState};
@@ -337,6 +338,10 @@ pub struct TxPlayerApp {
     dialog_open: bool,
     status: Option<(String, Instant)>,
     last_frame: Instant,
+    screenshot_out: Option<PathBuf>,
+    screenshot_frames: u32,
+    demo_piano_lock: bool,
+    ephemeral_session: bool,
 }
 
 impl TxPlayerApp {
@@ -490,9 +495,63 @@ impl TxPlayerApp {
             dialog_open: false,
             status: None,
             last_frame: Instant::now(),
+            screenshot_out: None,
+            screenshot_frames: 0,
+            demo_piano_lock: false,
+            ephemeral_session: false,
         };
 
         let arguments: Vec<String> = std::env::args().collect();
+        if let Some(index) = arguments.iter().position(|a| a == "--theme")
+            && let Some(val) = arguments.get(index + 1)
+            && let Some(tid) = ThemeId::ALL.iter().copied().find(|t| {
+                t.name()
+                    .to_lowercase()
+                    .replace(' ', "-")
+                    == val.to_lowercase()
+            })
+        {
+            app.theme_id = tid;
+            app.palette = theme::apply(&context.egui_ctx, tid);
+        }
+        if let Some(index) = arguments.iter().position(|a| a == "--vis-mode")
+            && let Some(val) = arguments.get(index + 1)
+        {
+            app.show_concert_visualizer = true;
+            match val.to_lowercase().as_str() {
+                "piano" => app.visualizer.mode = VisualizerMode::PianoHarmonic,
+                "roll" => app.visualizer.mode = VisualizerMode::PianoRoll,
+                "spectrum" => app.visualizer.mode = VisualizerMode::ConcertSpectrum,
+                "scope" => app.visualizer.mode = VisualizerMode::StereoScope,
+                "vu" => app.visualizer.mode = VisualizerMode::MasteringVu,
+                _ => {}
+            }
+        }
+        if let Some(index) = arguments.iter().position(|a| a == "--open-settings")
+            && let Some(val) = arguments.get(index + 1)
+        {
+            app.show_settings = true;
+            app.settings_tab = match val.to_lowercase().as_str() {
+                "appearance" => SettingsTab::Appearance,
+                "visualizer" => SettingsTab::Visualizer,
+                "audio" | "dsp" => SettingsTab::Audio,
+                "plugins" => SettingsTab::Plugins,
+                "library" | "tags" => SettingsTab::LibraryTags,
+                _ => SettingsTab::Plugins,
+            };
+        }
+        if arguments.iter().any(|a| a == "--demo-piano") {
+            app.show_concert_visualizer = true;
+            app.visualizer.show_piano_keys = true;
+            app.visualizer.seed_demo_piano_state();
+            app.demo_piano_lock = true;
+        }
+        if let Some(index) = arguments.iter().position(|a| a == "--screenshot")
+            && let Some(path) = arguments.get(index + 1)
+        {
+            app.screenshot_out = Some(PathBuf::from(path));
+            app.ephemeral_session = true;
+        }
         if let Some(index) = arguments.iter().position(|argument| argument == "--play")
             && let Some(path) = arguments.get(index + 1).map(PathBuf::from)
         {
@@ -2541,10 +2600,16 @@ impl TxPlayerApp {
                     self.show_concert_visualizer = !self.show_concert_visualizer;
                 }
 
-                // Quick Cmd+K Command Palette pill
-                if pill_button(ui, "⌘K", Some(Icon::Search), PillStyle::Secondary, &p)
-                    .on_hover_text("Quick Command Palette (Cmd+K)")
-                    .clicked()
+                // Quick Command Palette pill
+                if pill_button(
+                    ui,
+                    &format!("{MOD_SHORT}K"),
+                    Some(Icon::Search),
+                    PillStyle::Secondary,
+                    &p,
+                )
+                .on_hover_text(format!("Quick Command Palette ({MOD_SHORT}K)"))
+                .clicked()
                 {
                     self.command_palette.open_fresh();
                 }
@@ -3252,7 +3317,10 @@ impl TxPlayerApp {
                         ctx_action = Some(ContextMenuAction::TrackInfo(tid));
                         ui.close();
                     }
-                    if ui.button("Reveal in Finder").clicked() {
+                    if ui
+                        .button(format!("Reveal in {FILE_MANAGER_NAME}"))
+                        .clicked()
+                    {
                         ctx_action = Some(ContextMenuAction::RevealInFinder(tid));
                         ui.close();
                     }
@@ -3361,10 +3429,7 @@ impl TxPlayerApp {
             ContextMenuAction::TrackInfo(id) => self.inspect_track_id = Some(id),
             ContextMenuAction::RevealInFinder(id) => {
                 if let Some(t) = self.track(id) {
-                    let _ = std::process::Command::new("open")
-                        .arg("-R")
-                        .arg(&t.path)
-                        .spawn();
+                    reveal_in_file_manager(&t.path);
                 }
             }
             ContextMenuAction::RemoveSelected => self.remove_selected_in_current_view(visible),
@@ -4343,10 +4408,7 @@ impl TxPlayerApp {
                             self.open_tag_editor_for_ids(&[tid]);
                         }
                         TrackInfoAction::RevealInFinder => {
-                            let _ = std::process::Command::new("open")
-                                .arg("-R")
-                                .arg(&track.path)
-                                .spawn();
+                            reveal_in_file_manager(&track.path);
                         }
                         TrackInfoAction::Remove => {
                             self.remove_tracks_from_library(&[tid]);
@@ -4942,7 +5004,7 @@ impl eframe::App for TxPlayerApp {
 
         self.process_background_events(&context);
         self.process_input(&context);
-        let paused = self.current_id().is_some() && !self.playing;
+        let paused = self.demo_piano_lock || (self.current_id().is_some() && !self.playing);
         self.visualizer
             .update(&self.visual_tap, dt, &self.plugins.visualizers, paused);
 
@@ -4981,6 +5043,9 @@ impl eframe::App for TxPlayerApp {
         self.drag_overlay(&context);
         self.status_toast(&context);
 
+        #[cfg(not(target_os = "macos"))]
+        handle_borderless_resize(&context);
+
         if self.scanning
             || self.dialog_open
             || self.status.is_some()
@@ -4994,6 +5059,65 @@ impl eframe::App for TxPlayerApp {
             context.request_repaint_after(Duration::from_millis(60));
         }
 
+        // Built-in OpenGL post-render framebuffer screenshot capture (`--screenshot <path>`)
+        if let Some(out_path) = self.screenshot_out.clone() {
+            self.screenshot_frames += 1;
+            if self.screenshot_frames == 22 {
+                let rect = context.content_rect();
+                let ppp = context.pixels_per_point();
+                let w = (rect.width() * ppp).round().max(1.0) as i32;
+                let h = (rect.height() * ppp).round().max(1.0) as i32;
+                let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {
+                    use eframe::glow::{self, HasContext as _};
+                    let gl = painter.gl();
+                    let mut raw = vec![0u8; (w * h * 4) as usize];
+                    unsafe {
+                        gl.finish();
+                        gl.read_pixels(
+                            0,
+                            0,
+                            w,
+                            h,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelPackData::Slice(Some(&mut raw)),
+                        );
+                    }
+                    let row_bytes = (w * 4) as usize;
+                    let mut flipped = vec![0u8; raw.len()];
+                    for y in 0..(h as usize) {
+                        let src = (h as usize - 1 - y) * row_bytes;
+                        let dst = y * row_bytes;
+                        flipped[dst..dst + row_bytes].copy_from_slice(&raw[src..src + row_bytes]);
+                    }
+                    if let Some(parent) = out_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = image::save_buffer(
+                        &out_path,
+                        &flipped,
+                        w as u32,
+                        h as u32,
+                        image::ColorType::Rgba8,
+                    );
+                });
+                let top_painter = context.layer_painter(egui::LayerId::new(
+                    egui::Order::Debug,
+                    egui::Id::unique("screenshot_capture_layer"),
+                ));
+                top_painter.add(egui::PaintCallback {
+                    rect,
+                    callback: Arc::new(cb),
+                });
+                context.request_repaint_after(Duration::from_millis(40));
+            } else if self.screenshot_frames > 23 {
+                self.screenshot_out = None;
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                context.request_repaint_after(Duration::from_millis(25));
+            }
+        }
+
         // Guarantee standard arrow mouse cursor everywhere in the application.
         context.output_mut(|output| {
             output.cursor_icon = CursorIcon::Default;
@@ -5003,6 +5127,9 @@ impl eframe::App for TxPlayerApp {
 
 impl Drop for TxPlayerApp {
     fn drop(&mut self) {
+        if self.ephemeral_session {
+            return;
+        }
         self.store.save();
         Preferences {
             volume: self.volume,
@@ -5438,5 +5565,37 @@ fn format_library_duration(seconds: f64) -> String {
         format!("{hours} hr {mins} min")
     } else {
         format!("{mins} min")
+    }
+}
+
+/// 8-way invisible window edge/corner resize handles for borderless Windows & Linux builds.
+#[cfg(not(target_os = "macos"))]
+fn handle_borderless_resize(ctx: &egui::Context) {
+    use egui::ResizeDirection;
+    let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
+        return;
+    };
+    if !ctx.input(|i| i.pointer.primary_pressed()) {
+        return;
+    }
+    let rect = ctx.content_rect();
+    let edge = 6.0;
+    let left = pos.x <= rect.left() + edge;
+    let right = pos.x >= rect.right() - edge;
+    let top = pos.y <= rect.top() + edge;
+    let bottom = pos.y >= rect.bottom() - edge;
+    let dir = match (left, right, top, bottom) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
+    };
+    if let Some(d) = dir {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(d));
     }
 }

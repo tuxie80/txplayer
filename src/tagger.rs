@@ -223,8 +223,38 @@ pub fn detect_tool_health() -> ToolHealth {
     ToolHealth {
         ffmpeg_path: find_ffmpeg(),
         fpcalc_path: find_fpcalc(),
-        curl_available: Path::new("/usr/bin/curl").is_file(),
+        curl_available: find_curl().is_some(),
     }
+}
+
+fn find_in_path(name: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let lookup_cmd = "where";
+    #[cfg(not(target_os = "windows"))]
+    let lookup_cmd = "which";
+
+    Command::new(lookup_cmd)
+        .arg(name)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .map(|line| PathBuf::from(line.trim()))
+        })
+        .filter(|p| p.is_file())
+}
+
+fn find_curl() -> Option<PathBuf> {
+    for candidate in ["/usr/bin/curl", "/opt/homebrew/bin/curl", "/usr/local/bin/curl"] {
+        let p = PathBuf::from(candidate);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    find_in_path("curl")
 }
 
 fn find_fpcalc() -> Option<PathBuf> {
@@ -238,13 +268,7 @@ fn find_fpcalc() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    Command::new("which")
-        .arg("fpcalc")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
-        .filter(|p| p.is_file())
+    find_in_path("fpcalc")
 }
 
 fn run_fpcalc(path: &Path) -> Option<(u32, String)> {
@@ -426,7 +450,8 @@ pub fn lookup_online(
 }
 
 fn curl_get_json(url: &str) -> Result<Value> {
-    let output = Command::new("/usr/bin/curl")
+    let curl = find_curl().ok_or_else(|| anyhow!("curl not found on system"))?;
+    let output = Command::new(curl)
         .args([
             "-sS",
             "-L",
@@ -661,7 +686,8 @@ fn query_acoustid(api_key: &str, duration: u32, fingerprint: &str) -> Result<Vec
 pub fn download_cover_artwork(url: &str, track_id: u64, cover_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(cover_dir)?;
     let out_path = cover_dir.join(format!("{track_id:016x}_fetched.jpg"));
-    let output = Command::new("/usr/bin/curl")
+    let curl = find_curl().ok_or_else(|| anyhow!("curl not found on system"))?;
+    let output = Command::new(curl)
         .args(["-sS", "-L", "--max-time", "12", "-o"])
         .arg(&out_path)
         .arg(url)
@@ -757,7 +783,23 @@ pub fn write_tags_to_file(track: &Track, clear_empty_optionals: bool) -> Result<
         let _ = std::fs::remove_file(&tmp_path);
         return Err(anyhow!("ffmpeg produced an empty file"));
     }
-    std::fs::rename(&tmp_path, &track.path).context("Replacing original file with tagged file")?;
+    #[cfg(target_os = "windows")]
+    {
+        let backup = parent.join(format!(".{stem}.txplayer_tag_bak.{ext}"));
+        let _ = std::fs::remove_file(&backup);
+        std::fs::rename(&track.path, &backup)
+            .context("Preparing original file replacement")?;
+        if let Err(err) = std::fs::rename(&tmp_path, &track.path) {
+            let _ = std::fs::rename(&backup, &track.path);
+            return Err(err).context("Replacing original file with tagged file");
+        }
+        let _ = std::fs::remove_file(&backup);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::fs::rename(&tmp_path, &track.path)
+            .context("Replacing original file with tagged file")?;
+    }
     Ok(())
 }
 
@@ -772,13 +814,7 @@ fn find_ffmpeg() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    Command::new("which")
-        .arg("ffmpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
-        .filter(|p| p.is_file())
+    find_in_path("ffmpeg")
 }
 
 fn clean_filename_stem(path: &Path) -> String {

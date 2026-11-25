@@ -159,8 +159,10 @@ impl PrecisionPianoAnalyzer {
                 (0u8, s0_sr, s0_max)
             };
 
-            // Q ~ 28 with Blackman-Harris window yields ~1 semitone main-lobe selectivity and -92 dB sidelobes
-            let desired_len = (2.35 * stage_sr / (freq * 0.059_463)).round() as usize;
+            // Use Hann window for bass (stage 2) for 2x narrower main-lobe width (~1 semitone separation),
+            // and Blackman-Harris for mid/treble (stages 0 & 1) for -92 dB sidelobe rejection.
+            let q_factor = if stage == 2 { 1.95 } else { 2.35 };
+            let desired_len = (q_factor * stage_sr / (freq * 0.059_463)).round() as usize;
             let len = desired_len.clamp(96, max_len);
 
             let mut cos_w = Vec::with_capacity(len);
@@ -170,10 +172,14 @@ impl PrecisionPianoAnalyzer {
             let mut win_sum = 0.0_f32;
             for i in 0..len {
                 let t = i as f32 / denom;
-                let w = 0.35875
-                    - 0.48829 * (TAU * t).cos()
-                    + 0.14128 * (2.0 * TAU * t).cos()
-                    - 0.01168 * (3.0 * TAU * t).cos();
+                let w = if stage == 2 {
+                    0.5 * (1.0 - (TAU * t).cos())
+                } else {
+                    0.35875
+                        - 0.48829 * (TAU * t).cos()
+                        + 0.14128 * (2.0 * TAU * t).cos()
+                        - 0.01168 * (3.0 * TAU * t).cos()
+                };
                 win_sum += w;
                 let phase = omega * i as f32;
                 cos_w.push(w * phase.cos());
@@ -214,28 +220,32 @@ impl PrecisionPianoAnalyzer {
         let s1_len = VISUAL_BUFFER_LEN / s1_factor;
         let s2_len = VISUAL_BUFFER_LEN / s2_factor;
 
-        // Multi-rate anti-aliased decimation (triangular/boxcar cascade)
+        // Multi-rate anti-aliased decimation using 2nd-order Butterworth IIR low-pass filters
+        // so high-register piano notes (>1.5 kHz) never alias down into bass C1-C3 keys!
         self.stage1.resize(s1_len, 0.0);
-        let inv1 = 1.0 / s1_factor as f32;
+        let lp1_cut = (sr as f32 / s1_factor as f32) * 0.40;
+        let mut lp1 = LowPass2::new(sr as f32, lp1_cut);
         for (i, slot) in self.stage1.iter_mut().enumerate() {
             let base = i * s1_factor;
-            let mut sum = 0.0_f32;
+            let mut y = 0.0_f32;
             for j in 0..s1_factor {
-                sum += self.raw_mono[base + j];
+                y = lp1.process(self.raw_mono[base + j]);
             }
-            *slot = sum * inv1;
+            *slot = y;
         }
 
         self.stage2.resize(s2_len, 0.0);
         let ratio_2_1 = s2_factor / s1_factor; // 4
-        let inv2 = 1.0 / ratio_2_1 as f32;
+        let s1_sr = sr as f32 / s1_factor as f32;
+        let lp2_cut = (s1_sr / ratio_2_1 as f32) * 0.38;
+        let mut lp2 = LowPass2::new(s1_sr, lp2_cut);
         for (i, slot) in self.stage2.iter_mut().enumerate() {
             let base = i * ratio_2_1;
-            let mut sum = 0.0_f32;
+            let mut y = 0.0_f32;
             for j in 0..ratio_2_1 {
-                sum += self.stage1[base + j];
+                y = lp2.process(self.stage1[base + j]);
             }
-            *slot = sum * inv2;
+            *slot = y;
         }
 
         // 1) Compute exact windowed Constant-Q magnitude for all 108 semitones
@@ -520,6 +530,44 @@ impl VisualizerState {
         self.vu_right = 0.0;
         self.vu_peak_left = 0.0;
         self.vu_peak_right = 0.0;
+    }
+
+    /// Seeds a realistic musical Chopin-style Eb-major / C-minor voicing for CLI screenshot capture (`--demo-piano`).
+    pub fn seed_demo_piano_state(&mut self) {
+        self.reset();
+        // Pressed keys: C2, G2, Eb3, G3, C4, D4, G4, Bb4 (lush Cm9 piano voicing)
+        let notes: &[(usize, f32, f32)] = &[
+            (36, 0.72, 0.35), // C2
+            (43, 0.64, 0.20), // G2
+            (51, 0.78, 0.45), // Eb3
+            (55, 0.70, 0.25), // G3
+            (60, 0.92, 0.85), // C4
+            (62, 0.62, 0.40), // D4
+            (67, 0.88, 0.75), // G4
+            (70, 0.80, 0.65), // Bb4
+            (74, 0.56, 0.30), // D5
+        ];
+        for &(midi, lvl, onset) in notes {
+            let k = midi - 21;
+            self.piano_levels[k] = lvl;
+            self.piano_peaks[k] = (lvl + 0.08).min(1.0);
+            self.piano_onsets[k] = onset;
+        }
+        self.detected_harmony = detect_chord_and_notes(&self.piano_levels);
+        // Populate Piano Roll waterfall history too
+        for frame_i in 0..PIANO_ROLL_HISTORY {
+            let mut slice = [0u8; PIANO_KEYS];
+            let phase = frame_i as f32 / PIANO_ROLL_HISTORY as f32;
+            for &(midi, lvl, _) in notes {
+                let k = midi - 21;
+                let wave = (0.55 + 0.45 * ((phase * 6.0 + k as f32 * 0.25).sin())).clamp(0.0, 1.0);
+                if wave > 0.35 {
+                    slice[k] = ((lvl * wave) * 255.0).round() as u8;
+                }
+            }
+            self.piano_roll.push_back(slice);
+        }
+        self.paused_freeze = true;
     }
 
     pub fn update(
@@ -950,10 +998,10 @@ impl VisualizerState {
             ),
         );
 
-        // Octave gridlines (C1..C7) aligned with true piano key centers
+        // Octave gridlines (C1..C7) aligned strictly to the LEFT boundary of each C key (between B and C!)
         for octave in 1..=7 {
             let midi = 12 * (octave + 1);
-            let x = key_center_x(midi - 21, roll_rect);
+            let x = white_key_left_x(midi - 21, roll_rect);
             painter.line_segment(
                 [pos2(x, roll_rect.top()), pos2(x, roll_rect.bottom())],
                 Stroke::new(0.7, palette.border.gamma_multiply(0.55)),
@@ -1036,11 +1084,11 @@ impl VisualizerState {
             ),
         );
 
-        // Octave gridlines (C1..C7) aligned precisely to each C key on the 88-key keybed!
+        // Octave gridlines (C1..C7) aligned strictly to the LEFT boundary of each C key (between B and C!)
         if with_keyboard {
             for octave in 1..=7 {
                 let midi = 12 * (octave + 1);
-                let x = key_center_x(midi - 21, ribbon_rect);
+                let x = white_key_left_x(midi - 21, ribbon_rect);
                 painter.line_segment(
                     [pos2(x, ribbon_rect.top()), pos2(x, ribbon_rect.bottom())],
                     Stroke::new(0.7, palette.border.gamma_multiply(0.55)),
@@ -1192,6 +1240,21 @@ impl VisualizerState {
                 let mix_t = (energy * 1.15 + onset * 0.55).clamp(0.0, 1.0);
                 let fill = lerp_color(base, lit, mix_t);
                 painter.rect_filled(key_r, 1.5, fill);
+                // Crisp subtle C1..C8 key labels right at the foot of each C key so alignment is 100% unmistakable
+                if midi.is_multiple_of(12) && white_w >= 11.0 {
+                    let octave = (midi / 12) as isize - 1;
+                    painter.text(
+                        pos2(key_r.center().x, key_r.bottom() - 2.0),
+                        Align2::CENTER_BOTTOM,
+                        format!("C{octave}"),
+                        FontId::monospace(7.5),
+                        if mix_t > 0.45 {
+                            palette.on_accent()
+                        } else {
+                            palette.faint
+                        },
+                    );
+                }
                 painter.rect_stroke(
                     key_r,
                     1.5,
@@ -1564,6 +1627,57 @@ impl VisualizerState {
     }
 }
 
+/// 2nd-order Butterworth IIR low-pass anti-aliasing filter for clean multi-rate decimation.
+struct LowPass2 {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl LowPass2 {
+    fn new(sample_rate: f32, cutoff_hz: f32) -> Self {
+        let fc = cutoff_hz.clamp(20.0, sample_rate * 0.45);
+        let w0 = TAU * fc / sample_rate;
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / std::f32::consts::SQRT_2;
+        let a0 = 1.0 + alpha;
+        let inv = 1.0 / a0;
+        Self {
+            b0: ((1.0 - cos_w0) * 0.5) * inv,
+            b1: (1.0 - cos_w0) * inv,
+            b2: ((1.0 - cos_w0) * 0.5) * inv,
+            a1: (-2.0 * cos_w0) * inv,
+            a2: (1.0 - alpha) * inv,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
+/// Exact LEFT edge of white key `key_idx` (used for C1..C7 octave boundary lines between B and C).
+fn white_key_left_x(key_idx: usize, rect: Rect) -> f32 {
+    let white_w = rect.width() / 52.0;
+    let mut whites_before = 0usize;
+    for k in 0..key_idx {
+        if !is_black_key(21 + k) {
+            whites_before += 1;
+        }
+    }
+    rect.left() + whites_before as f32 * white_w
+}
+
 /// Exact horizontal center of piano key `k` (0=A0 .. 87=C8) aligned to a 52-white-key keybed.
 fn key_center_x(key_idx: usize, rect: Rect) -> f32 {
     let white_w = rect.width() / 52.0;
@@ -1869,5 +1983,47 @@ mod tests {
         // When unpaused & stopped, keys decay cleanly
         vis.update(&tap, 0.05, &cfg, false);
         assert!(vis.piano_levels[60 - 21] < 0.85);
+    }
+
+    #[test]
+    fn precision_piano_accuracy_across_all_88_keys() {
+        let mut analyzer = PrecisionPianoAnalyzer::new();
+        let sr = 48_000_u32;
+        let mut exact_hits = 0usize;
+        let mut within_one_semi = 0usize;
+        for key in 0..PIANO_KEYS {
+            let midi = 21.0 + key as f32;
+            let f0 = 440.0 * 2.0_f32.powf((midi - 69.0) / 12.0);
+            for (i, slot) in analyzer.raw_mono.iter_mut().enumerate() {
+                let t = i as f32 / sr as f32;
+                let mut sample = 0.55 * (TAU * f0 * t).sin();
+                if f0 * 2.0 < sr as f32 * 0.45 {
+                    sample += 0.30 * (TAU * 2.0 * f0 * t).sin();
+                }
+                if f0 * 3.0 < sr as f32 * 0.45 {
+                    sample += 0.16 * (TAU * 3.0 * f0 * t).sin();
+                }
+                *slot = sample;
+            }
+            let mut levels = [0.0_f32; PIANO_KEYS];
+            let mut onsets = [0.0_f32; PIANO_KEYS];
+            analyzer.analyze(sr, true, 1.15, &mut levels, &mut onsets);
+            let peak_key = levels
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(k, _)| k)
+                .unwrap();
+            if peak_key == key {
+                exact_hits += 1;
+            }
+            if peak_key.abs_diff(key) <= 1 {
+                within_one_semi += 1;
+            }
+        }
+        assert!(
+            exact_hits >= 82,
+            "Expected >=82/88 exact single-key hits across full piano range, got {exact_hits}/88 (within ±1: {within_one_semi}/88)"
+        );
     }
 }

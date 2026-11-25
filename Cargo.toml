@@ -3,7 +3,7 @@ name = "txplayer"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
-description = "A calm, capable high-resolution music player for macOS"
+description = "A calm, capable high-resolution music player for macOS, Windows, and Linux"
 license = "MIT"
 
 [dependencies]

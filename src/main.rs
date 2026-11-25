@@ -5,6 +5,7 @@ mod icons;
 mod library;
 mod metadata;
 mod modals;
+mod platform;
 mod plugins;
 mod tagger;
 mod theme;
@@ -33,11 +34,21 @@ fn main() -> Result<()> {
         .with_title("TxPlayer")
         .with_inner_size([1240.0, 790.0])
         .with_min_inner_size([920.0, 560.0])
-        .with_app_id("com.txplayer.player")
-        .with_fullsize_content_view(true)
-        .with_titlebar_shown(false)
-        .with_title_shown(false)
-        .with_titlebar_buttons_shown(false);
+        .with_app_id("com.txplayer.player");
+
+    #[cfg(target_os = "macos")]
+    {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_titlebar_buttons_shown(false);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        viewport = viewport.with_decorations(false);
+    }
 
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);

@@ -11,6 +11,7 @@ use crate::audio::{default_output_device_name, list_output_devices};
 use crate::icons::{self, Icon};
 use crate::library::cover_directory;
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
+use crate::platform::{AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, reveal_in_file_manager};
 use crate::plugins::{
     DspConfig, EQ_FREQ_LABELS, EqPreset, PianoEngineId, PluginConfig, TagProviderConfig,
     ToolHealth,
@@ -370,7 +371,7 @@ pub fn aligned_checkbox_row(
     label: &str,
     palette: &Palette,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width().min(280.0), 22.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width().min(540.0), 22.0), Sense::click());
     if response.clicked() {
         *checked = !*checked;
     }
@@ -566,11 +567,13 @@ pub fn show_settings_window(
     }
 
     let mut is_open = *open;
+    let center = context.content_rect().center();
     egui::Window::new("Settings")
         .open(&mut is_open)
         .collapsible(false)
         .resizable(false)
         .default_width(640.0)
+        .default_pos(pos2((center.x - 320.0).max(24.0), (center.y - 255.0).max(36.0)))
         .show(context, |ui| {
             // Top segmented tab bar
             ui.horizontal(|ui| {
@@ -898,7 +901,7 @@ pub fn show_settings_window(
                 SettingsTab::Audio => {
                     ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
                         ui.label(
-                            RichText::new("COREAUDIO OUTPUT DEVICE")
+                            RichText::new(format!("{} OUTPUT DEVICE", AUDIO_BACKEND_NAME.to_uppercase()))
                                 .size(10.0)
                                 .strong()
                                 .color(palette.faint),
@@ -1790,8 +1793,14 @@ pub fn show_track_info_window(
                 {
                     action = Some(TrackInfoAction::EditTags);
                 }
-                if pill_button(ui, "Finder", Some(Icon::External), PillStyle::Secondary, palette)
-                    .clicked()
+                if pill_button(
+                    ui,
+                    FILE_MANAGER_NAME,
+                    Some(Icon::External),
+                    PillStyle::Secondary,
+                    palette,
+                )
+                .clicked()
                 {
                     action = Some(TrackInfoAction::RevealInFinder);
                 }
@@ -1909,17 +1918,14 @@ pub fn show_folders_window(
                                         }
                                         if pill_button(
                                             ui,
-                                            "Finder",
+                                            FILE_MANAGER_NAME,
                                             Some(Icon::External),
                                             PillStyle::Secondary,
                                             palette,
                                         )
                                         .clicked()
                                         {
-                                            let _ = std::process::Command::new("open")
-                                                .arg("-R")
-                                                .arg(folder)
-                                                .spawn();
+                                            reveal_in_file_manager(folder);
                                         }
                                         if pill_button(
                                             ui,
@@ -2330,9 +2336,11 @@ pub fn show_device_picker_popover(
         palette,
         |ui| {
             ui.label(
-                RichText::new("Hot-switch CoreAudio output without interrupting playback.")
-                    .size(10.5)
-                    .color(palette.muted),
+                RichText::new(format!(
+                    "Hot-switch {AUDIO_BACKEND_NAME} output without interrupting playback."
+                ))
+                .size(10.5)
+                .color(palette.muted),
             );
             ui.add_space(6.0);
 
@@ -2526,7 +2534,7 @@ pub fn show_signal_path_popover(
                 stage_row(
                     ui,
                     "4",
-                    "CoreAudio Hardware Output",
+                    &format!("{AUDIO_BACKEND_NAME} Hardware Output"),
                     format!("{} ({})", s.device_name, format_sample_rate(s.output_rate)),
                     palette.accent_bright,
                 );
