@@ -712,8 +712,7 @@ impl VisualizerState {
                         } else {
                             let mut peak = 0.0_f32;
                             let mut sum = 0.0_f32;
-                            for k in b_lo..=b_hi {
-                                let m = self.mag_db[k];
+                            for &m in &self.mag_db[b_lo..=b_hi] {
                                 peak = peak.max(m);
                                 sum += m;
                             }
@@ -774,8 +773,7 @@ impl VisualizerState {
 
                 let mut peak = 0.0_f32;
                 let mut sum = 0.0_f32;
-                for k in b_lo..b_hi {
-                    let m = self.mag_db[k];
+                for &m in &self.mag_db[b_lo..b_hi] {
                     peak = peak.max(m);
                     sum += m;
                 }
