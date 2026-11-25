@@ -23,7 +23,7 @@ jobs:
     name: Build & Test (${{ matrix.name }})
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux audio & GUI dev libraries
         if: runner.os == 'Linux'
@@ -35,6 +35,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Run unit tests
         run: cargo test
