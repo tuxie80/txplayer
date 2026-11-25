@@ -3,11 +3,12 @@ use std::f32::consts::TAU;
 use std::time::Instant;
 
 use eframe::egui::{
-    self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, pos2, vec2,
+    self, Align2, Color32, FontId, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, pos2, vec2,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::audio::{VISUAL_BUFFER_LEN, VisualTap};
+use crate::icons::snap_px;
 use crate::plugins::{PianoEngineId, VisualizerPluginConfig};
 use crate::theme::Palette;
 
@@ -44,11 +45,11 @@ impl VisualizerMode {
 
     pub fn name(self) -> &'static str {
         match self {
-            VisualizerMode::PianoHarmonic => "Piano & Harmonic Ribbon",
-            VisualizerMode::PianoRoll => "88-Key Concert Piano Roll",
-            VisualizerMode::ConcertSpectrum => "64-Band Concert Spectrum",
-            VisualizerMode::StereoScope => "Stereo Scope & Phase",
-            VisualizerMode::MasteringVu => "Mastering VU & Correlation",
+            VisualizerMode::PianoHarmonic => "88-Key Piano Spectrum",
+            VisualizerMode::PianoRoll => "88-Key Piano Roll",
+            VisualizerMode::ConcertSpectrum => "64-Band Spectrum RTA",
+            VisualizerMode::StereoScope => "Stereo Scope & Vectorscope",
+            VisualizerMode::MasteringVu => "Mastering VU & Phase",
         }
     }
 
@@ -56,8 +57,8 @@ impl VisualizerMode {
         match self {
             VisualizerMode::PianoHarmonic => "Piano",
             VisualizerMode::PianoRoll => "Roll",
-            VisualizerMode::ConcertSpectrum => "Spectrum",
-            VisualizerMode::StereoScope => "Phase",
+            VisualizerMode::ConcertSpectrum => "RTA",
+            VisualizerMode::StereoScope => "Scope",
             VisualizerMode::MasteringVu => "VU",
         }
     }
@@ -65,19 +66,19 @@ impl VisualizerMode {
     pub fn description(self) -> &'static str {
         match self {
             VisualizerMode::PianoHarmonic => {
-                "88-key harmonic envelope spline with live depressed keybed and chord readout."
+                "88-key harmonic energy bars aligned to a live grand piano keybed with chord readout."
             }
             VisualizerMode::PianoRoll => {
-                "Scrolling real-time waterfall of detected piano notes rising from the 88-key keybed."
+                "Scrolling real-time note waterfall rising from the 88-key keybed."
             }
             VisualizerMode::ConcertSpectrum => {
-                "64-band logarithmic frequency analyzer (27.5 Hz – 18 kHz) with mirror reflection."
+                "64-band logarithmic real-time spectrum analyzer (27.5 Hz – 18 kHz) with dB scale."
             }
             VisualizerMode::StereoScope => {
-                "Zero-crossing triggered dual-channel oscilloscope paired with an M/S phase goniometer."
+                "Zero-crossing triggered stereo oscilloscope paired with an M/S vectorscope."
             }
             VisualizerMode::MasteringVu => {
-                "Broadcast-style stereo RMS/Peak VU meters with dBFS and phase correlation bar."
+                "Segmented stereo RMS/Peak VU meters with dBFS readout and phase correlation."
             }
         }
     }
@@ -1013,35 +1014,40 @@ impl VisualizerState {
             );
         }
 
-        // Render scrolling note waterfall rising upward from the keybed
+        // Render scrolling note waterfall rising upward from the keybed (pixel-snapped, crisp)
+        let ppp = painter.pixels_per_point().max(1.0);
         let rows = self.piano_roll.len();
         if rows > 0 {
             let row_h = (roll_rect.height() / PIANO_ROLL_HISTORY as f32).max(1.2);
             let white_w = roll_rect.width() / 52.0;
             for (age_idx, frame) in self.piano_roll.iter().rev().enumerate() {
-                let y_bot = roll_rect.bottom() - age_idx as f32 * row_h;
-                let y_top = (y_bot - row_h - 0.6).max(roll_rect.top());
+                let y_bot = snap_px(roll_rect.bottom() - age_idx as f32 * row_h, ppp);
+                let y_top = snap_px((y_bot - row_h - 0.5).max(roll_rect.top()), ppp);
                 if y_bot <= roll_rect.top() {
                     break;
                 }
-                let fade = 1.0 - (age_idx as f32 / PIANO_ROLL_HISTORY as f32) * 0.68;
+                let fade = 1.0 - (age_idx as f32 / PIANO_ROLL_HISTORY as f32) * 0.72;
                 for (k, &raw) in frame.iter().enumerate() {
                     if raw < 46 {
                         continue;
                     }
                     let energy = raw as f32 / 255.0;
                     let cx = key_center_x(k, roll_rect);
-                    let w = if is_black_key(21 + k) {
-                        (white_w * 0.56).max(2.0)
-                    } else {
-                        (white_w * 0.78).max(2.6)
-                    };
-                    let col = harmonic_register_color(k as f32 / (PIANO_KEYS - 1) as f32, energy, palette);
-                    let alpha = ((energy * fade * 245.0).round() as u8).clamp(35, 250);
-                    let bar = Rect::from_min_max(pos2(cx - w * 0.5, y_top), pos2(cx + w * 0.5, y_bot));
+                    let w = snap_px(
+                        if is_black_key(21 + k) {
+                            (white_w * 0.56).max(2.0)
+                        } else {
+                            (white_w * 0.78).max(2.5)
+                        },
+                        ppp,
+                    );
+                    let x0 = snap_px(cx - w * 0.5, ppp);
+                    let col = studio_meter_color(energy, 0.0, palette);
+                    let alpha = ((energy * fade * 235.0).round() as u8).clamp(32, 245);
+                    let bar = Rect::from_min_max(pos2(x0, y_top), pos2(x0 + w, y_bot));
                     painter.rect_filled(
                         bar,
-                        1.0,
+                        0.8,
                         Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), alpha),
                     );
                 }
@@ -1108,88 +1114,62 @@ impl VisualizerState {
             }
         }
 
+        let ppp = painter.pixels_per_point().max(1.0);
         let n = PIANO_KEYS;
         let white_w = ribbon_rect.width() / 52.0;
-        let mut pts = Vec::with_capacity(n);
+        let col_w = snap_px(
+            if with_keyboard {
+                (white_w * 0.54).max(2.0)
+            } else {
+                (ribbon_rect.width() / n as f32 * 0.70).max(1.5)
+            },
+            ppp,
+        );
+        let bottom_y = snap_px(ribbon_rect.bottom(), ppp);
+        let max_h = (ribbon_rect.height() - 4.0).max(4.0);
+
+        // Crisp per-key vertical harmonic bars (zero jagged tent-polyline or neon aura blur!)
         for i in 0..n {
-            // Preserve crisp single-key peaks (much lighter neighbor smoothing than before!)
-            let curr = (self.piano_levels[i] + self.piano_onsets[i] * 0.22).clamp(0.0, 1.0);
-            let prev = self.piano_levels[i.saturating_sub(1)];
-            let next = self.piano_levels[(i + 1).min(n - 1)];
-            let val = (curr * 0.88 + prev * 0.06 + next * 0.06).clamp(0.0, 1.0);
-            let x = if with_keyboard {
+            let val = (self.piano_levels[i] + self.piano_onsets[i] * 0.16).clamp(0.0, 1.0);
+            let cx = if with_keyboard {
                 key_center_x(i, ribbon_rect)
             } else {
                 ribbon_rect.left() + (i as f32 / (n - 1) as f32) * ribbon_rect.width()
             };
-            let y = ribbon_rect.bottom() - val * (ribbon_rect.height() - 2.0);
-            pts.push((pos2(x, y), val));
-        }
+            let x0 = snap_px(cx - col_w * 0.5, ppp);
 
-        let col_w = if with_keyboard {
-            (white_w * 0.48).max(1.8)
-        } else {
-            (ribbon_rect.width() / n as f32 * 0.72).max(1.2)
-        };
-        for (i, (pt, val)) in pts.iter().enumerate() {
-            if *val > 0.02 {
-                let frac = i as f32 / (n - 1) as f32;
+            if val > 0.02 {
                 let onset = self.piano_onsets[i];
-                let base_col = harmonic_register_color(frac, (*val + onset * 0.25).min(1.0), palette);
-                let stem = Rect::from_min_max(
-                    pos2(pt.x - col_w * 0.5, pt.y),
-                    pos2(pt.x + col_w * 0.5, ribbon_rect.bottom()),
-                );
-                let fill_alpha = if onset > 0.2 {
-                    125
-                } else if palette.is_light {
-                    82
-                } else {
-                    64
-                };
+                let top_y = snap_px(bottom_y - val * max_h, ppp);
+                let col = studio_meter_color(val, onset, palette);
+                let stem = Rect::from_min_max(pos2(x0, top_y), pos2(x0 + col_w, bottom_y));
+                let body_alpha = if palette.is_light { 165 } else { 145 };
                 painter.rect_filled(
                     stem,
                     0.8,
-                    Color32::from_rgba_unmultiplied(
-                        base_col.r(),
-                        base_col.g(),
-                        base_col.b(),
-                        fill_alpha,
-                    ),
+                    Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), body_alpha),
                 );
-                let tip_h = (ribbon_rect.bottom() - pt.y).min(5.5);
-                let tip = Rect::from_min_max(
-                    pos2(pt.x - col_w * 0.5, pt.y),
-                    pos2(pt.x + col_w * 0.5, pt.y + tip_h),
-                );
-                painter.rect_filled(tip, 0.8, base_col);
+                let cap_h = (bottom_y - top_y).min(snap_px(2.5, ppp));
+                let cap = Rect::from_min_max(pos2(x0, top_y), pos2(x0 + col_w, top_y + cap_h));
+                painter.rect_filled(cap, 0.5, col);
             }
 
             let pk = self.piano_peaks[i];
             if pk > 0.08 && with_keyboard {
-                let py = ribbon_rect.bottom() - pk * (ribbon_rect.height() - 2.0);
-                let dot_col = harmonic_register_color(i as f32 / (n - 1) as f32, pk, palette);
-                painter.circle_filled(pos2(pt.x, py), 1.45, dot_col);
+                let py = snap_px(bottom_y - pk * max_h, ppp);
+                let tick_h = snap_px(1.5, ppp);
+                let tick_col = if pk > 0.85 {
+                    palette.hires_gold
+                } else {
+                    palette.accent_bright
+                };
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(x0, py), pos2(x0 + col_w, py + tick_h)),
+                    0.0,
+                    tick_col,
+                );
             }
         }
-
-        let line_pts: Vec<Pos2> = pts.iter().map(|(p, _)| *p).collect();
-        painter.add(Shape::line(
-            line_pts.clone(),
-            Stroke::new(
-                if with_keyboard { 3.0 } else { 2.0 },
-                Color32::from_rgba_unmultiplied(
-                    palette.accent.r(),
-                    palette.accent.g(),
-                    palette.accent.b(),
-                    if palette.is_light { 46 } else { 60 },
-                ),
-            ),
-        ));
-        painter.add(Shape::line(
-            line_pts,
-            Stroke::new(if with_keyboard { 1.35 } else { 1.1 }, palette.accent_bright),
-        ));
 
         if with_keyboard && show_chord {
             self.paint_harmony_badge(painter, ribbon_rect, palette);
@@ -1230,11 +1210,7 @@ impl VisualizerState {
                 } else {
                     Color32::from_rgb(38, 43, 47)
                 };
-                let lit = harmonic_register_color(
-                    k as f32 / (PIANO_KEYS - 1) as f32,
-                    (energy + onset * 0.35).min(1.0),
-                    palette,
-                );
+                let lit = studio_meter_color(energy, onset, palette);
                 let mix_t = (energy * 1.15 + onset * 0.55).clamp(0.0, 1.0);
                 let fill = lerp_color(base, lit, mix_t);
                 painter.rect_filled(key_r, 1.5, fill);
@@ -1294,11 +1270,7 @@ impl VisualizerState {
                 } else {
                     Color32::from_rgb(13, 15, 17)
                 };
-                let lit = harmonic_register_color(
-                    k as f32 / (PIANO_KEYS - 1) as f32,
-                    (energy + onset * 0.4).min(1.0),
-                    palette,
-                );
+                let lit = studio_meter_color(energy, onset, palette);
                 let mix_t = (energy * 1.25 + onset * 0.6).clamp(0.0, 1.0);
                 let fill = lerp_color(base, lit, mix_t);
                 painter.rect_filled(key_r, 1.0, fill);
@@ -1323,17 +1295,29 @@ impl VisualizerState {
         palette: &Palette,
         detailed: bool,
     ) {
-        let horizon_y = if detailed {
-            inner.top() + inner.height() * 0.78
-        } else {
-            inner.bottom()
-        };
-        let top_h = (horizon_y - inner.top()).max(10.0);
-        let refl_h = (inner.bottom() - horizon_y).max(0.0);
+        let ppp = painter.pixels_per_point().max(1.0);
+        let label_h = if detailed { 14.0 } else { 0.0 };
+        let baseline_y = snap_px(inner.bottom() - label_h, ppp);
+        let top_h = (baseline_y - inner.top()).max(10.0);
 
         if detailed {
+            // Subtle mastering dB gridlines (no gimmicky mirror reflection!)
+            for (db_lbl, frac) in [("-12", 0.76_f32), ("-24", 0.52), ("-42", 0.22)] {
+                let gy = snap_px(baseline_y - top_h * frac, ppp);
+                painter.line_segment(
+                    [pos2(inner.left(), gy), pos2(inner.right(), gy)],
+                    Stroke::new(0.6, palette.border.gamma_multiply(0.45)),
+                );
+                painter.text(
+                    pos2(inner.right() - 2.0, gy - 1.5),
+                    Align2::RIGHT_BOTTOM,
+                    db_lbl,
+                    FontId::monospace(8.0),
+                    palette.faint,
+                );
+            }
             painter.line_segment(
-                [pos2(inner.left(), horizon_y), pos2(inner.right(), horizon_y)],
+                [pos2(inner.left(), baseline_y), pos2(inner.right(), baseline_y)],
                 Stroke::new(1.0, palette.border),
             );
             for (label, frac) in [
@@ -1343,9 +1327,9 @@ impl VisualizerState {
                 ("2 kHz", 0.66),
                 ("8 kHz", 0.87),
             ] {
-                let x = inner.left() + inner.width() * frac;
+                let x = snap_px(inner.left() + inner.width() * frac, ppp);
                 painter.text(
-                    pos2(x, inner.bottom() - 1.0),
+                    pos2(x, inner.bottom()),
                     Align2::CENTER_BOTTOM,
                     label,
                     FontId::monospace(8.5),
@@ -1354,45 +1338,39 @@ impl VisualizerState {
             }
         }
 
+        // Strict pixel-snapped uniform bar width + uniform gap across the full width
         let bands = if detailed { SPECTRUM_BANDS } else { 32 };
-        let gap = if detailed { 2.0 } else { 1.5 };
-        let bar_w = ((inner.width() - gap * (bands - 1) as f32) / bands as f32).max(1.5);
+        let raw_step = inner.width() / bands as f32;
+        let gap = snap_px((if detailed { 2.0_f32 } else { 1.5_f32 }).min(raw_step * 0.35), ppp).max(1.0 / ppp);
+        let bar_w = snap_px((raw_step - gap).max(1.0), ppp);
+        let pitch = bar_w + gap;
+        let total_w = bands as f32 * bar_w + (bands - 1) as f32 * gap;
+        let start_x = snap_px(inner.left() + (inner.width() - total_w) * 0.5, ppp);
 
         for i in 0..bands {
             let src_idx = if detailed { i } else { i * 2 };
             let val = self.spectrum_bands[src_idx].clamp(0.0, 1.0);
             let peak = self.spectrum_peaks[src_idx].clamp(0.0, 1.0);
-            let x = inner.left() + i as f32 * (bar_w + gap);
-            let frac = i as f32 / (bands - 1) as f32;
-            let col = harmonic_register_color(frac, val, palette);
+            let x = snap_px(start_x + i as f32 * pitch, ppp);
+            let col = studio_meter_color(val, 0.0, palette);
 
             if val > 0.01 {
-                let bh = (top_h * val).max(1.5);
-                let bar = Rect::from_min_max(pos2(x, horizon_y - bh), pos2(x + bar_w, horizon_y - 0.5));
-                painter.rect_filled(bar, 1.0, col);
-
-                if detailed && refl_h > 4.0 {
-                    let rh = (refl_h * val * 0.72).min(refl_h - 10.0).max(0.0);
-                    if rh > 1.0 {
-                        let rbar = Rect::from_min_max(
-                            pos2(x, horizon_y + 1.5),
-                            pos2(x + bar_w, horizon_y + 1.5 + rh),
-                        );
-                        painter.rect_filled(
-                            rbar,
-                            1.0,
-                            Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 44),
-                        );
-                    }
-                }
+                let bh = snap_px((top_h * val).max(1.5), ppp);
+                let bar = Rect::from_min_max(pos2(x, baseline_y - bh), pos2(x + bar_w, baseline_y));
+                painter.rect_filled(bar, 0.8, col);
             }
 
             if peak > 0.05 {
-                let py = (horizon_y - top_h * peak).clamp(inner.top(), horizon_y - 2.0);
+                let py = snap_px((baseline_y - top_h * peak).clamp(inner.top(), baseline_y - 2.0), ppp);
+                let tick_h = snap_px(1.5, ppp);
                 painter.rect_filled(
-                    Rect::from_min_max(pos2(x, py), pos2(x + bar_w, py + 1.5)),
-                    0.5,
-                    palette.accent_bright,
+                    Rect::from_min_max(pos2(x, py), pos2(x + bar_w, py + tick_h)),
+                    0.0,
+                    if peak > 0.86 {
+                        palette.hires_gold
+                    } else {
+                        palette.accent_bright
+                    },
                 );
             }
         }
@@ -1582,6 +1560,7 @@ impl VisualizerState {
         segments: usize,
         palette: &Palette,
     ) {
+        let ppp = painter.pixels_per_point().max(1.0);
         let label_w = 14.0;
         for (label, level, peak, top) in rows {
             let row_rect = Rect::from_min_max(pos2(left, *top), pos2(right, *top + row_h));
@@ -1592,20 +1571,21 @@ impl VisualizerState {
                 FontId::monospace(9.5),
                 palette.faint,
             );
-            let meter_left = row_rect.left() + label_w;
+            let meter_left = snap_px(row_rect.left() + label_w, ppp);
             let meter_w = (row_rect.right() - meter_left).max(16.0);
-            let seg_gap = 1.6;
-            let seg_w = ((meter_w - seg_gap * (segments - 1) as f32) / segments as f32).max(1.5);
+            let raw_step = meter_w / segments as f32;
+            let seg_gap = snap_px(1.5_f32.min(raw_step * 0.35), ppp).max(1.0 / ppp);
+            let seg_w = snap_px((raw_step - seg_gap).max(1.0), ppp);
+            let pitch = seg_w + seg_gap;
             let lit_count = (level.clamp(0.0, 1.0) * segments as f32).round() as usize;
             let peak_idx = ((peak.clamp(0.0, 1.0) * segments as f32).floor() as usize)
                 .min(segments.saturating_sub(1));
+            let y0 = snap_px(row_rect.top() + 1.0, ppp);
+            let y1 = snap_px(row_rect.bottom() - 1.0, ppp);
 
             for s in 0..segments {
-                let sx = meter_left + s as f32 * (seg_w + seg_gap);
-                let seg_rect = Rect::from_min_max(
-                    pos2(sx, row_rect.top() + 1.0),
-                    pos2(sx + seg_w, row_rect.bottom() - 1.0),
-                );
+                let sx = snap_px(meter_left + s as f32 * pitch, ppp);
+                let seg_rect = Rect::from_min_max(pos2(sx, y0), pos2(sx + seg_w, y1));
                 let frac = s as f32 / segments as f32;
                 let active_color = if frac >= 0.86 {
                     palette.danger
@@ -1619,7 +1599,7 @@ impl VisualizerState {
                 } else {
                     palette.surface
                 };
-                painter.rect_filled(seg_rect, 1.0, color);
+                painter.rect_filled(seg_rect, 0.8, color);
             }
         }
     }
@@ -1789,22 +1769,14 @@ fn detect_chord_and_notes(levels: &[f32; PIANO_KEYS]) -> String {
     }
 }
 
-fn harmonic_register_color(pos: f32, intensity: f32, palette: &Palette) -> Color32 {
-    let base = if pos < 0.35 {
-        lerp_color(palette.hires_gold, palette.accent, pos / 0.35)
-    } else if pos < 0.75 {
-        lerp_color(palette.accent, palette.accent_bright, (pos - 0.35) / 0.40)
+/// Disciplined single-hue mastering meter ramp: calm theme accent rising to accent_bright,
+/// reserving warm gold only for fresh transients or hot >88% peaks (zero rainbow bloat).
+fn studio_meter_color(level: f32, onset: f32, palette: &Palette) -> Color32 {
+    if onset > 0.35 || level > 0.88 {
+        let t = ((level - 0.82) / 0.18).max((onset - 0.35) / 0.65).clamp(0.0, 1.0);
+        lerp_color(palette.accent_bright, palette.hires_gold, t * 0.85)
     } else {
-        lerp_color(
-            palette.accent_bright,
-            palette.accent_secondary,
-            (pos - 0.75) / 0.25,
-        )
-    };
-    if intensity > 0.85 {
-        lerp_color(base, palette.hires_gold, (intensity - 0.85) / 0.15)
-    } else {
-        base
+        lerp_color(palette.accent, palette.accent_bright, (level * 0.85).clamp(0.0, 1.0))
     }
 }
 

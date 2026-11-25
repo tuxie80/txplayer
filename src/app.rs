@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Align2, Color32, ColorImage, CursorIcon, FontId, Frame, Layout, Margin, Rect,
-    RichText, ScrollArea, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2, pos2, vec2,
+    self, Align, Align2, Color32, ColorImage, CursorIcon, FontId, Frame, Layout, Margin, Pos2,
+    Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2, pos2, vec2,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -29,9 +29,39 @@ use crate::plugins::{EqPreset, PianoEngineId, PluginConfig, ToolHealth};
 use crate::theme::{self, Palette, ThemeId};
 use crate::visualizer::{VisualizerMode, VisualizerState};
 
-const SIDEBAR_WIDTH: f32 = 228.0;
-const TRANSPORT_HEIGHT: f32 = 104.0;
+const SIDEBAR_WIDTH: f32 = 224.0;
+const TRANSPORT_HEIGHT: f32 = 96.0;
 const WAVEFORM_BINS: usize = 160;
+
+pub const COMPACT_WIDTH: f32 = 468.0;
+pub const COMPACT_COLLAPSED_HEIGHT: f32 = 178.0;
+pub const COMPACT_EXPANDED_HEIGHT: f32 = 456.0;
+pub const COMPACT_MIN_WIDTH: f32 = 380.0;
+pub const COMPACT_MIN_HEIGHT: f32 = 164.0;
+pub const FULL_WIDTH: f32 = 1240.0;
+pub const FULL_HEIGHT: f32 = 790.0;
+pub const FULL_MIN_WIDTH: f32 = 900.0;
+pub const FULL_MIN_HEIGHT: f32 = 540.0;
+
+pub fn startup_window_layout() -> (bool, bool, bool) {
+    let args: Vec<String> = std::env::args().collect();
+    if args
+        .iter()
+        .any(|a| a == "--full" || a == "--open-settings" || a == "--vis-mode" || a == "--demo-piano")
+    {
+        return (false, true, false);
+    }
+    if args.iter().any(|a| a == "--compact") {
+        let prefs = Preferences::load();
+        return (true, true, prefs.show_concert_visualizer);
+    }
+    let prefs = Preferences::load();
+    (
+        prefs.compact_mode,
+        prefs.compact_show_playlist,
+        prefs.show_concert_visualizer,
+    )
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -72,7 +102,7 @@ struct Preferences {
     row_density: RowDensity,
     #[serde(default)]
     visualizer_mode: VisualizerMode,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     show_concert_visualizer: bool,
     #[serde(default = "default_concert_height")]
     concert_visualizer_height: f32,
@@ -86,6 +116,10 @@ struct Preferences {
     acoustid_api_key: String,
     #[serde(default)]
     plugins: PluginConfig,
+    #[serde(default = "default_true")]
+    compact_mode: bool,
+    #[serde(default = "default_true")]
+    compact_show_playlist: bool,
 }
 
 fn default_true() -> bool {
@@ -109,13 +143,15 @@ impl Default for Preferences {
             progress_style: ProgressBarStyle::AcousticWaveform,
             row_density: RowDensity::Compact,
             visualizer_mode: VisualizerMode::PianoHarmonic,
-            show_concert_visualizer: true,
+            show_concert_visualizer: false,
             concert_visualizer_height: default_concert_height(),
             show_piano_keys: true,
             visualizer_sensitivity: default_sensitivity(),
             linear_volume: false,
             acoustid_api_key: String::new(),
             plugins: PluginConfig::default(),
+            compact_mode: true,
+            compact_show_playlist: true,
         }
     }
 }
@@ -152,9 +188,8 @@ struct StreamInfo {
     device_name: String,
 }
 
-/// Deterministic column layout shared identically by table header AND every track row.
+/// Deterministic column layout shared identically by table header AND every track row (no checkboxes).
 struct TrackColumns {
-    checkbox: Rect,
     index: Rect,
     cover: Rect,
     title: Rect,
@@ -169,7 +204,7 @@ impl TrackColumns {
     fn compute(row_rect: Rect) -> Self {
         let top = row_rect.top();
         let bot = row_rect.bottom();
-        let mut x = row_rect.left() + 6.0;
+        let mut x = row_rect.left() + 8.0;
 
         let mut take_fixed = |w: f32| -> Rect {
             let r = Rect::from_min_max(pos2(x, top), pos2(x + w, bot));
@@ -177,7 +212,6 @@ impl TrackColumns {
             r
         };
 
-        let checkbox = take_fixed(26.0);
         let index = take_fixed(28.0);
         let cover = take_fixed(36.0);
         x += 6.0;
@@ -213,7 +247,6 @@ impl TrackColumns {
         let album = Rect::from_min_max(pos2(artist.right() + gap, top), pos2(flex_right, bot));
 
         Self {
-            checkbox,
             index,
             cover,
             title,
@@ -252,6 +285,8 @@ pub struct TxPlayerApp {
     row_density: RowDensity,
     show_concert_visualizer: bool,
     concert_visualizer_height: f32,
+    compact_mode: bool,
+    compact_show_playlist: bool,
     linear_volume: bool,
     acoustid_api_key: String,
 
@@ -398,9 +433,9 @@ impl TxPlayerApp {
             preferences.visualizer_sensitivity,
         );
 
-        // Unified TxPlayer app icon texture (exact same assets/AppIcon.png as macOS Dock & .icns)
+        // Unified hi-def TxPlayer app icon texture (256x256 for crisp HiDPI scaling)
         let brand_icon = image::load_from_memory(crate::APP_ICON_PNG).ok().map(|img| {
-            let thumb = img.thumbnail(128, 128).into_rgba8();
+            let thumb = img.thumbnail(256, 256).into_rgba8();
             let dims = [thumb.width() as usize, thumb.height() as usize];
             let color = ColorImage::from_rgba_unmultiplied(dims, thumb.as_raw());
             context.egui_ctx.load_texture(
@@ -424,6 +459,8 @@ impl TxPlayerApp {
             row_density: preferences.row_density,
             show_concert_visualizer: preferences.show_concert_visualizer,
             concert_visualizer_height: preferences.concert_visualizer_height,
+            compact_mode: preferences.compact_mode,
+            compact_show_playlist: preferences.compact_show_playlist,
             linear_volume: preferences.linear_volume,
             acoustid_api_key: preferences.acoustid_api_key,
             view: View::Library,
@@ -502,6 +539,13 @@ impl TxPlayerApp {
         };
 
         let arguments: Vec<String> = std::env::args().collect();
+        if arguments.iter().any(|a| a == "--compact") {
+            app.compact_mode = true;
+            app.compact_show_playlist = true;
+        }
+        if arguments.iter().any(|a| a == "--full" || a == "--open-settings" || a == "--vis-mode" || a == "--demo-piano") {
+            app.compact_mode = false;
+        }
         if let Some(index) = arguments.iter().position(|a| a == "--theme")
             && let Some(val) = arguments.get(index + 1)
             && let Some(tid) = ThemeId::ALL.iter().copied().find(|t| {
@@ -810,17 +854,6 @@ impl TxPlayerApp {
             self.selected_tracks.insert(track_id);
             self.selection_anchor = Some(row_idx);
         }
-    }
-
-    fn toggle_row_checkbox(&mut self, row_idx: usize, track_id: u64) {
-        if self.view == View::Queue {
-            if !self.selected_queue_indices.remove(&row_idx) {
-                self.selected_queue_indices.insert(row_idx);
-            }
-        } else if !self.selected_tracks.remove(&track_id) {
-            self.selected_tracks.insert(track_id);
-        }
-        self.selection_anchor = Some(row_idx);
     }
 
     fn toggle_sort(&mut self, mode: SortMode) {
@@ -1655,6 +1688,11 @@ impl TxPlayerApp {
         if !cmd && context.input(|i| i.key_pressed(egui::Key::V)) {
             self.show_concert_visualizer = !self.show_concert_visualizer;
         }
+        if cmd && context.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::M)) {
+            let next = !self.compact_mode;
+            self.set_compact_mode(context, next);
+            return;
+        }
         if !cmd && context.input(|i| i.key_pressed(egui::Key::E)) {
             self.plugins.dsp.enabled = !self.plugins.dsp.enabled;
             self.audio.update_dsp(&self.plugins.dsp);
@@ -1806,8 +1844,13 @@ impl TxPlayerApp {
                 "Zoom Window · Option+Click for Fullscreen"
             });
 
-        // Subtle Always-on-Top pin dot on top-right of sidebar chrome
-        let pin_rect = Rect::from_center_size(pos2(strip_rect.right() - 18.0, dot_y), Vec2::splat(18.0));
+        // Compact Mode toggle + Always-on-Top pin on top-right of sidebar chrome
+        let pin_rect = Rect::from_center_size(pos2(strip_rect.right() - 16.0, dot_y), Vec2::splat(18.0));
+        let compact_rect =
+            Rect::from_center_size(pos2(strip_rect.right() - 38.0, dot_y), Vec2::splat(18.0));
+        let compact_resp = ui
+            .interact(compact_rect, ui.scope_id().with("win_btn_compact"), Sense::click())
+            .on_hover_text(format!("Switch to Compact Player ({MOD_SHORT}Shift+M)"));
         let pin_resp = ui
             .interact(pin_rect, ui.scope_id().with("win_btn_pin"), Sense::click())
             .on_hover_text(if self.always_on_top {
@@ -1896,6 +1939,21 @@ impl TxPlayerApp {
         paint_dot(min_rect.center(), p.hires_gold, min_resp.hovered(), 1);
         paint_dot(zoom_rect.center(), p.accent, zoom_resp.hovered(), 2);
 
+        // Compact Mode switch button
+        if compact_resp.hovered() {
+            painter.rect_filled(compact_rect, 4.0, p.hover);
+        }
+        icons::paint_icon(
+            painter,
+            Rect::from_center_size(compact_rect.center(), Vec2::splat(12.0)),
+            Icon::Compact,
+            if compact_resp.hovered() {
+                p.accent
+            } else {
+                p.muted
+            },
+        );
+
         // Subtle Always-on-Top indicator
         if self.always_on_top || pin_resp.hovered() {
             let bg = if self.always_on_top {
@@ -1930,6 +1988,8 @@ impl TxPlayerApp {
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
             }
+        } else if compact_resp.clicked() {
+            self.set_compact_mode(ctx, true);
         } else if pin_resp.clicked() {
             self.always_on_top = !self.always_on_top;
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
@@ -1969,9 +2029,9 @@ impl TxPlayerApp {
                     ui.label(RichText::new("Player").size(16.5).strong().color(p.text));
                 });
                 ui.label(
-                    RichText::new("CONCERT HI-RES")
-                        .size(8.5)
-                        .strong()
+                    RichText::new(format!("v{}", crate::APP_VERSION))
+                        .size(9.5)
+                        .monospace()
                         .color(p.faint),
                 );
             });
@@ -2572,7 +2632,10 @@ impl TxPlayerApp {
                     .map(|pl| pl.name.clone())
                     .unwrap_or_else(|| "Playlist".to_string()),
             };
-            ui.label(RichText::new(title).size(22.0).strong().color(p.text));
+            let title_resp = ui.label(RichText::new(title).size(21.0).strong().color(p.text));
+            if let Some(folder) = &self.folder_filter {
+                title_resp.on_hover_text(format!("Directory: {}", folder.display()));
+            }
 
             if self.view == View::Library
                 && self.folder_filter.is_some()
@@ -2582,7 +2645,7 @@ impl TxPlayerApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Concert Visualizer toggle pill
+                // Visualizer toggle pill
                 if pill_button(
                     ui,
                     "Visualizer",
@@ -2594,7 +2657,7 @@ impl TxPlayerApp {
                     },
                     &p,
                 )
-                .on_hover_text("Toggle expanded Concert Piano & Classical Visualizer")
+                .on_hover_text("Toggle Visualizer (V)")
                 .clicked()
                 {
                     self.show_concert_visualizer = !self.show_concert_visualizer;
@@ -2608,56 +2671,93 @@ impl TxPlayerApp {
                     PillStyle::Secondary,
                     &p,
                 )
-                .on_hover_text(format!("Quick Command Palette ({MOD_SHORT}K)"))
+                .on_hover_text(format!("Command Palette ({MOD_SHORT}K)"))
                 .clicked()
                 {
                     self.command_palette.open_fresh();
                 }
 
-                // Search bar
-                Frame::new()
-                    .fill(p.surface)
-                    .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(7.0)
-                    .inner_margin(Margin::symmetric(8, 2))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (ir, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
-                            icons::paint_icon(ui.painter(), ir, Icon::Search, p.faint);
-                            let search = ui.add_sized(
-                                [156.0, 20.0],
-                                egui::TextEdit::singleline(&mut self.search)
-                                    .frame(Frame::NONE)
-                                    .hint_text(
-                                        RichText::new("Filter library… (⌘F)")
-                                            .size(11.5)
-                                            .color(p.faint),
-                                    ),
-                            );
-                            if self.focus_search {
-                                search.request_focus();
-                                self.focus_search = false;
-                            }
-                            if search.changed() {
-                                self.selected_queue_indices.clear();
-                            }
-                            if !self.search.is_empty()
-                                && icons::icon_button(
-                                    ui,
-                                    Vec2::splat(16.0),
-                                    Icon::Close,
-                                    10.0,
-                                    p.muted,
-                                    p.text,
-                                    p.hover,
-                                    "Clear search",
-                                )
-                                .clicked()
-                            {
-                                self.search.clear();
-                            }
-                        });
-                    });
+                // Strictly aligned 24px Filter Library input (exact match to pill_button height!)
+                let search_w = 196.0;
+                let (search_rect, _) = ui.allocate_exact_size(vec2(search_w, 24.0), Sense::hover());
+                let search_has_focus = ui.ctx().memory(|m| m.focused()).is_some_and(|id| {
+                    id == ui.scope_id().with("library_filter_input")
+                });
+                ui.painter().rect_filled(search_rect, 6.0, p.surface);
+                ui.painter().rect_stroke(
+                    search_rect,
+                    6.0,
+                    Stroke::new(
+                        1.0,
+                        if search_has_focus {
+                            p.accent
+                        } else {
+                            p.border
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                let icon_rect = Rect::from_center_size(
+                    pos2(search_rect.left() + 13.0, search_rect.center().y),
+                    Vec2::splat(12.0),
+                );
+                icons::paint_icon(
+                    ui.painter(),
+                    icon_rect,
+                    Icon::Search,
+                    if search_has_focus { p.accent } else { p.faint },
+                );
+                let clear_pad = if self.search.is_empty() { 6.0 } else { 22.0 };
+                let edit_rect = Rect::from_min_max(
+                    pos2(search_rect.left() + 24.0, search_rect.top()),
+                    pos2(search_rect.right() - clear_pad, search_rect.bottom()),
+                );
+                let mut child_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(edit_rect)
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                let search = child_ui.add_sized(
+                    edit_rect.size(),
+                    egui::TextEdit::singleline(&mut self.search)
+                        .id(ui.scope_id().with("library_filter_input"))
+                        .frame(Frame::NONE)
+                        .font(FontId::proportional(11.5))
+                        .align(Align2::LEFT_CENTER)
+                        .hint_text(
+                            RichText::new(format!("Filter library… ({MOD_SHORT}F)"))
+                                .size(11.0)
+                                .color(p.faint),
+                        ),
+                );
+                if self.focus_search {
+                    search.request_focus();
+                    self.focus_search = false;
+                }
+                if search.changed() {
+                    self.selected_queue_indices.clear();
+                }
+                if !self.search.is_empty() {
+                    let clear_r = Rect::from_center_size(
+                        pos2(search_rect.right() - 12.0, search_rect.center().y),
+                        Vec2::splat(16.0),
+                    );
+                    let clear_resp = ui
+                        .interact(clear_r, ui.scope_id().with("library_filter_clear"), Sense::click())
+                        .on_hover_text("Clear filter");
+                    if clear_resp.hovered() {
+                        ui.painter().rect_filled(clear_r, 4.0, p.hover);
+                    }
+                    icons::paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(clear_r.center(), Vec2::splat(9.0)),
+                        Icon::Close,
+                        if clear_resp.hovered() { p.text } else { p.muted },
+                    );
+                    if clear_resp.clicked() {
+                        self.search.clear();
+                    }
+                }
 
                 if self.view == View::Queue && !self.current_queue.is_empty() {
                     if pill_button(ui, "Clear Queue", Some(Icon::Trash), PillStyle::Danger, &p)
@@ -2694,16 +2794,13 @@ impl TxPlayerApp {
                 .color(p.muted)
                 .size(11.0),
             );
-            if !tracks.is_empty() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Hover row for 1-click Play / Next / Tags  ·  ⌘K palette  ·  ⌘T tags  ·  V visualizer  ·  E DSP",
-                        )
+            if let Some(folder) = &self.folder_filter {
+                ui.label(
+                    RichText::new(format!("·  {}", folder.display()))
                         .color(p.faint)
-                        .size(10.0),
-                    );
-                });
+                        .size(10.0)
+                        .monospace(),
+                );
             }
         });
 
@@ -2740,7 +2837,7 @@ impl TxPlayerApp {
                 ui.add_space(54.0);
             });
 
-        // Expandable Concert Classical & Piano Visualizer Stage
+        // Expandable Visualizer Stage
         if self.show_concert_visualizer {
             let enabled_modes = self.plugins.visualizers.enabled_modes();
             if !enabled_modes.contains(&self.visualizer.mode) {
@@ -2749,7 +2846,7 @@ impl TxPlayerApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("CONCERT VISUALIZER")
+                    RichText::new("VISUALIZER")
                         .size(9.5)
                         .strong()
                         .color(p.faint),
@@ -2839,47 +2936,12 @@ impl TxPlayerApp {
         }
     }
 
-    fn aligned_table_header(&mut self, ui: &mut Ui, visible: &[Track]) {
+    fn aligned_table_header(&mut self, ui: &mut Ui, _visible: &[Track]) {
         let p = self.palette;
         let sortable = matches!(self.view, View::Library | View::Favorites);
         let row_w = ui.available_width();
         let (row_rect, _) = ui.allocate_exact_size(vec2(row_w, 24.0), Sense::hover());
         let cols = TrackColumns::compute(row_rect);
-
-        // Master select-all checkbox (strictly aligned with every row's checkbox!)
-        let total = visible.len();
-        let sel_count = if self.view == View::Queue {
-            self.selected_queue_indices.len()
-        } else {
-            visible
-                .iter()
-                .filter(|t| self.selected_tracks.contains(&t.id))
-                .count()
-        };
-        let all_checked = total > 0 && sel_count == total;
-        let indeterminate = sel_count > 0 && sel_count < total;
-        let cb_resp = ui.interact(
-            cols.checkbox,
-            ui.scope_id().with("header_select_all"),
-            Sense::click(),
-        );
-        icons::paint_checkbox(
-            ui.painter(),
-            cols.checkbox,
-            all_checked,
-            indeterminate,
-            cb_resp.hovered(),
-            &p,
-        );
-        if cb_resp.clicked() && total > 0 {
-            if all_checked {
-                self.clear_selection();
-            } else if self.view == View::Queue {
-                self.selected_queue_indices = (0..total).collect();
-            } else {
-                self.selected_tracks = visible.iter().map(|t| t.id).collect();
-            }
-        }
 
         // Index column header
         ui.painter().text(
@@ -2955,6 +3017,8 @@ impl TxPlayerApp {
             .map(|pl| (pl.id, pl.name.clone()))
             .collect();
         let current_view = self.view;
+        let (rms_l, rms_r, _, _, _) = self.visual_tap.levels();
+        let live_rms = ((rms_l + rms_r) * 1.6).clamp(0.0, 1.0);
 
         for (row_idx, track) in tracks.iter().enumerate() {
             let is_current = if self.view == View::Queue {
@@ -2975,7 +3039,6 @@ impl TxPlayerApp {
             }
             let cols = TrackColumns::compute(row_rect);
 
-            let cb_id = ui.scope_id().with(("row_cb", row_idx, track.id));
             let play_id = ui.scope_id().with(("row_play", row_idx, track.id));
             let fav_id = ui.scope_id().with(("row_fav", row_idx, track.id));
             let body_id = ui.scope_id().with(("row_body", row_idx, track.id));
@@ -3006,7 +3069,7 @@ impl TxPlayerApp {
                 vec2(quick_btn_w, 22.0),
             );
 
-            // Non-overlapping hit regions: checkbox | 1-click play | body | (inline quick actions when hovered) | favorite heart
+            // Non-overlapping hit regions: 1-click play | body | (inline quick actions when hovered) | favorite heart
             let body_right = if row_pointer_over {
                 q_next_rect.left() - 4.0
             } else {
@@ -3017,7 +3080,6 @@ impl TxPlayerApp {
                 pos2(body_right.max(cols.cover.right()), row_rect.bottom()),
             );
 
-            let cb_resp = ui.interact(cols.checkbox, cb_id, Sense::click());
             let play_resp = ui.interact(cols.index, play_id, Sense::click());
             let fav_resp = ui.interact(cols.favorite, fav_id, Sense::click());
             let body_resp = ui.interact(body_rect, body_id, Sense::click());
@@ -3030,7 +3092,7 @@ impl TxPlayerApp {
                             ui.scope_id().with(("row_qn", row_idx, track.id)),
                             Sense::click(),
                         )
-                        .on_hover_text("Play Next (1-click)"),
+                        .on_hover_text("Play Next"),
                     );
                     hover_queue_resp = Some(
                         ui.interact(
@@ -3038,7 +3100,7 @@ impl TxPlayerApp {
                             ui.scope_id().with(("row_qq", row_idx, track.id)),
                             Sense::click(),
                         )
-                        .on_hover_text("Add to Queue (1-click)"),
+                        .on_hover_text("Add to Queue"),
                     );
                 }
                 hover_tag_resp = Some(
@@ -3047,66 +3109,66 @@ impl TxPlayerApp {
                         ui.scope_id().with(("row_qt", row_idx, track.id)),
                         Sense::click(),
                     )
-                    .on_hover_text("Edit Tags & Lookup (1-click)"),
+                    .on_hover_text("Edit Tags & Lookup"),
                 );
             }
 
             let row_hovered = row_pointer_over
-                || cb_resp.hovered()
                 || play_resp.hovered()
                 || fav_resp.hovered()
                 || body_resp.hovered();
 
-            // Row background card
-            let bg = if is_selected {
-                p.selected
+            // Distinct visual hierarchy:
+            // - Playing track: rich accent-tinted fill + bright left accent bar + accent title
+            // - Temporarily clicked row: lighter neutral tint + subtle thin neutral border (never confused with playing!)
+            let bg = if is_current && is_selected {
+                lerp_c(p.playing_row, p.clicked_row, 0.35)
             } else if is_current {
                 p.playing_row
+            } else if is_selected {
+                p.clicked_row
             } else if row_hovered {
                 p.hover
             } else if row_idx % 2 == 1 {
                 if p.is_light {
-                    Color32::from_rgba_unmultiplied(0, 0, 0, 6)
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 5)
                 } else {
                     Color32::from_rgba_unmultiplied(255, 255, 255, 3)
                 }
             } else {
                 Color32::TRANSPARENT
             };
-            ui.painter().rect_filled(row_rect, 6.0, bg);
+            ui.painter().rect_filled(row_rect, 5.0, bg);
 
-            if is_selected {
+            if is_current {
                 ui.painter().rect_stroke(
                     row_rect,
-                    6.0,
-                    Stroke::new(1.0, p.selected_border),
+                    5.0,
+                    Stroke::new(
+                        1.0,
+                        if is_selected {
+                            p.accent.gamma_multiply(0.75)
+                        } else {
+                            p.accent.gamma_multiply(0.45)
+                        },
+                    ),
                     StrokeKind::Inside,
                 );
                 let accent_bar = Rect::from_min_max(
-                    pos2(row_rect.left() + 1.5, row_rect.top() + 7.0),
-                    pos2(row_rect.left() + 4.0, row_rect.bottom() - 7.0),
+                    pos2(row_rect.left() + 1.5, row_rect.top() + 6.0),
+                    pos2(row_rect.left() + 4.5, row_rect.bottom() - 6.0),
                 );
                 ui.painter().rect_filled(accent_bar, 1.5, p.accent);
-            } else if is_current {
+            } else if is_selected {
                 ui.painter().rect_stroke(
                     row_rect,
-                    6.0,
-                    Stroke::new(1.0, p.accent.gamma_multiply(0.35)),
+                    5.0,
+                    Stroke::new(1.0, p.border_strong),
                     StrokeKind::Inside,
                 );
             }
 
-            // 1) Aligned 15x15 Checkbox
-            icons::paint_checkbox(
-                ui.painter(),
-                cols.checkbox,
-                is_selected,
-                false,
-                cb_resp.hovered(),
-                &p,
-            );
-
-            // 2) Index / Animated Equalizer / 1-Click Hover Play Button!
+            // 1) Index / Live Audio Equalizer / 1-Click Hover Play Button
             if row_hovered {
                 if play_resp.hovered() {
                     ui.painter().circle_filled(cols.index.center(), 11.0, p.accent);
@@ -3129,23 +3191,30 @@ impl TxPlayerApp {
                 );
             } else if is_current {
                 let eq_rect = Rect::from_center_size(cols.index.center(), vec2(12.0, 12.0));
-                icons::paint_playing_bars(ui.painter(), eq_rect, time, self.playing, p.accent);
+                icons::paint_playing_bars(
+                    ui.painter(),
+                    eq_rect,
+                    time,
+                    self.playing,
+                    live_rms,
+                    p.accent,
+                );
             } else {
                 ui.painter().text(
                     cols.index.center(),
                     Align2::CENTER_CENTER,
                     format!("{:02}", row_idx + 1),
                     FontId::monospace(10.0),
-                    if is_selected { p.accent } else { p.faint },
+                    if is_selected { p.text_secondary } else { p.faint },
                 );
             }
 
-            // 3) Cover Thumbnail (28x28 dead-centered)
+            // 2) Cover Thumbnail (dead-centered)
             let art_size = (row_h - 8.0).clamp(26.0, 32.0);
             let art_rect = Rect::from_center_size(cols.cover.center(), Vec2::splat(art_size));
             self.paint_cover_in_rect(ui, track, art_rect);
 
-            // 4) Title, Artist, Album (strictly clipped & ellipsis-safe inside exact column rects)
+            // 3) Title, Artist, Album (strictly clipped inside exact column rects)
             paint_clipped_cell_text(
                 ui.painter(),
                 cols.title,
@@ -3158,7 +3227,7 @@ impl TxPlayerApp {
                 cols.artist,
                 &track.artist,
                 FontId::proportional(11.5),
-                if is_selected {
+                if is_current || is_selected {
                     p.text_secondary
                 } else {
                     p.muted
@@ -3172,7 +3241,7 @@ impl TxPlayerApp {
                 p.muted,
             );
 
-            // 5) Format Badge OR 1-Click Inline Hover Actions (Play Next / Queue / Tags)
+            // 4) Format Badge OR 1-Click Inline Hover Actions (Play Next / Queue / Tags)
             if row_hovered {
                 let paint_qbtn = |rect: Rect, icon: Icon, hovered: bool| {
                     ui.painter().rect_filled(
@@ -3200,16 +3269,16 @@ impl TxPlayerApp {
                 paint_aligned_quality_badge(ui.painter(), cols.format, track, &p);
             }
 
-            // 6) Tabular Monospace Duration (right-aligned)
+            // 5) Tabular Monospace Duration (right-aligned)
             ui.painter().text(
                 pos2(cols.duration.right() - 2.0, cols.duration.center().y),
                 Align2::RIGHT_CENTER,
                 format_duration(track.duration),
                 FontId::monospace(11.0),
-                p.muted,
+                if is_current { p.accent } else { p.muted },
             );
 
-            // 7) Favorite Heart Button (centered)
+            // 6) Favorite Heart Button (centered)
             let heart_icon = if is_favorite {
                 Icon::HeartFilled
             } else {
@@ -3239,9 +3308,7 @@ impl TxPlayerApp {
             );
 
             // Interactions
-            if cb_resp.clicked() {
-                self.toggle_row_checkbox(row_idx, track.id);
-            } else if play_resp.clicked() {
+            if play_resp.clicked() {
                 if is_current {
                     toggle_current_play = true;
                 } else {
@@ -3261,6 +3328,14 @@ impl TxPlayerApp {
             } else if body_resp.clicked() {
                 self.select_row_click(row_idx, track.id, tracks, cmd, shift);
             }
+
+            // Show parent directory on hover so user immediately sees where the track plays from
+            let dir_hint = track
+                .path
+                .parent()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| track.path.display().to_string());
+            let body_resp = body_resp.on_hover_text(format!("Folder: {dir_hint}"));
 
             // Right-click Floating Context Menu directly at mouse pointer
             let tid = track.id;
@@ -3436,10 +3511,10 @@ impl TxPlayerApp {
         }
     }
 
-    /// Sleek Floating Action Bar for 1 or N selected tracks (never expands row height!).
+    /// Sleek Floating Action Bar for multi-track selection (2+ tracks; single track uses hover & right-click).
     fn floating_selection_dock(&mut self, context: &egui::Context) {
         let count = self.selected_count();
-        if count == 0 {
+        if count < 2 {
             return;
         }
         let visible = self.visible_tracks();
@@ -3694,7 +3769,7 @@ impl TxPlayerApp {
                                     p.text_secondary,
                                     p.text,
                                     p.hover,
-                                    "Reveal in Finder",
+                                    &format!("Reveal in {FILE_MANAGER_NAME}"),
                                 )
                                 .clicked()
                                 {
@@ -3804,7 +3879,7 @@ impl TxPlayerApp {
                         "Try another title, composer, artist, album, or format.",
                     ),
                     View::Library => (
-                        "High-resolution concert playback, ready when you are.",
+                        "Your library is empty",
                         "Add audio files, link a music directory, or drag and drop anywhere.",
                     ),
                     View::Favorites => (
@@ -3862,28 +3937,43 @@ impl TxPlayerApp {
         let center_w = (total_width - left_w - right_w - 16.0).max(280.0);
 
         ui.horizontal_centered(|ui| {
-            // LEFT: Framed Album Art + Metadata + Quick Favorite
+            // LEFT: Framed Album Art + Metadata + Directory Indicator + Quick Favorite
             ui.allocate_ui_with_layout(
-                vec2(left_w, 84.0),
+                vec2(left_w, 76.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     if let Some(track) = &track {
-                        let cover_resp = self.cover_clickable(ui, track, 58.0);
+                        let parent_dir = track
+                            .path
+                            .parent()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_else(|| track.path.display().to_string());
+                        let folder_name = track
+                            .path
+                            .parent()
+                            .and_then(|d| d.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Folder");
+
+                        let cover_resp = self.cover_clickable(ui, track, 54.0);
                         if cover_resp
-                            .on_hover_text("Click to open Track Inspector")
+                            .on_hover_text(format!(
+                                "{}\nFolder: {}\nClick to open Track Info",
+                                track.title, parent_dir
+                            ))
                             .clicked()
                         {
                             self.inspect_track_id = Some(track.id);
                         }
                         ui.add_space(6.0);
-                        let meta_w = (left_w - 98.0).max(86.0);
+                        let meta_w = (left_w - 94.0).max(86.0);
                         ui.allocate_ui_with_layout(
-                            vec2(meta_w, 58.0),
+                            vec2(meta_w, 56.0),
                             Layout::top_down(Align::LEFT),
                             |ui| {
-                                ui.add_space(4.0);
-                                ui.style_mut().spacing.item_spacing.y = 2.0;
-                                ui.add(
+                                ui.add_space(2.0);
+                                ui.style_mut().spacing.item_spacing.y = 1.5;
+                                let title_resp = ui.add(
                                     egui::Label::new(
                                         RichText::new(&track.title)
                                             .size(13.0)
@@ -3893,22 +3983,42 @@ impl TxPlayerApp {
                                     .selectable(false)
                                     .truncate(),
                                 );
+                                title_resp.on_hover_text(format!(
+                                    "{} — {}\nFolder: {}",
+                                    track.title, track.artist, parent_dir
+                                ));
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(&track.artist)
-                                            .size(11.0)
+                                        RichText::new(format!("{} · {}", track.artist, track.album))
+                                            .size(10.5)
                                             .color(p.text_secondary),
                                     )
                                     .selectable(false)
                                     .truncate(),
                                 );
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&track.album).size(10.0).color(p.faint),
-                                    )
-                                    .selectable(false)
-                                    .truncate(),
-                                );
+                                // Subtle clickable directory row so user always sees where audio plays from!
+                                ui.horizontal(|ui| {
+                                    ui.style_mut().spacing.item_spacing.x = 4.0;
+                                    let (fr, _) =
+                                        ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                                    icons::paint_icon(ui.painter(), fr, Icon::Folder, p.faint);
+                                    let dir_resp = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(folder_name)
+                                                    .size(10.0)
+                                                    .color(p.muted),
+                                            )
+                                            .sense(Sense::click())
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(format!(
+                                            "Playing from:\n{parent_dir}\nClick to reveal in {FILE_MANAGER_NAME}"
+                                        ));
+                                    if dir_resp.clicked() {
+                                        reveal_in_file_manager(&track.path);
+                                    }
+                                });
                             },
                         );
 
@@ -3938,7 +4048,7 @@ impl TxPlayerApp {
                         }
                     } else {
                         let (art_rect, _) =
-                            ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
+                            ui.allocate_exact_size(Vec2::splat(52.0), Sense::hover());
                         self.paint_brand_icon(ui.painter(), art_rect);
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
@@ -3950,7 +4060,7 @@ impl TxPlayerApp {
                                     .color(p.text_secondary),
                             );
                             ui.label(
-                                RichText::new("Select a piece to listen")
+                                RichText::new("Select a track to play")
                                     .size(10.5)
                                     .color(p.faint),
                             );
@@ -4105,15 +4215,13 @@ impl TxPlayerApp {
                 },
             );
 
-            // RIGHT: Compact Live Visualizer + Clickable Signal Path Telemetry + Device & Volume
+            // RIGHT: Clickable Signal Path Telemetry + Compact Output Icon + Volume
             ui.allocate_ui_with_layout(
-                vec2(right_w, 84.0),
+                vec2(right_w, 76.0),
                 Layout::top_down(Align::RIGHT),
                 |ui| {
-                    ui.style_mut().spacing.item_spacing.y = 4.0;
-                    let vis_w = (right_w - 8.0).clamp(144.0, 214.0);
-                    self.visualizer
-                        .ui_compact(ui, vec2(vis_w, 28.0), &p, &self.plugins.visualizers);
+                    ui.add_space(12.0);
+                    ui.style_mut().spacing.item_spacing.y = 8.0;
 
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4206,9 +4314,9 @@ impl TxPlayerApp {
                                     .add(
                                         egui::Label::new(
                                             RichText::new(if self.plugins.dsp.enabled {
-                                                "SIGNAL PATH · DSP ON"
+                                                "DSP ON"
                                             } else {
-                                                "SIGNAL PATH · IDLE"
+                                                "SIGNAL PATH"
                                             })
                                             .size(9.5)
                                             .monospace()
@@ -4232,7 +4340,7 @@ impl TxPlayerApp {
 
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if let Some(new_vol) = custom_volume_bar(ui, 82.0, self.volume, &p) {
+                            if let Some(new_vol) = custom_volume_bar(ui, 92.0, self.volume, &p) {
                                 self.set_volume(new_vol);
                             }
                             let vol_icon = if self.volume <= 0.001 {
@@ -4261,26 +4369,27 @@ impl TxPlayerApp {
                                 self.toggle_mute();
                             }
 
-                            ui.add_space(4.0);
+                            ui.add_space(2.0);
                             let active_dev = self
                                 .stream_info
                                 .as_ref()
                                 .map(|s| s.device_name.as_str())
                                 .or(self.preferred_device.as_deref())
-                                .unwrap_or("Output");
-                            let short_dev: String = active_dev.chars().take(14).collect();
-                            let dev_resp = pill_button(
+                                .unwrap_or("System Default");
+                            let dev_resp = icons::icon_button(
                                 ui,
-                                &short_dev,
-                                Some(Icon::Device),
-                                if self.show_device_picker {
-                                    PillStyle::Active
+                                Vec2::splat(24.0),
+                                Icon::Device,
+                                14.0,
+                                if self.show_device_picker || self.preferred_device.is_some() {
+                                    p.accent
                                 } else {
-                                    PillStyle::Secondary
+                                    p.muted
                                 },
-                                &p,
-                            )
-                            .on_hover_text(format!("Audio Output: {active_dev}\nClick to switch"));
+                                p.text,
+                                p.hover,
+                                &format!("Audio Output: {active_dev}\nClick to change device"),
+                            );
                             self.device_btn_rect = Some(dev_resp.rect);
                             if dev_resp.clicked() {
                                 self.available_devices = list_output_devices();
@@ -4464,12 +4573,18 @@ impl TxPlayerApp {
                 .map(|l| (l.id, l.name.clone(), l.tracks.len(), l.playlists.len()))
                 .collect();
 
-            egui::Window::new("Manage Libraries")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .default_width(440.0)
-                .show(context, |ui| {
+            modals::themed_modal_window(
+                context,
+                "manage_libraries_modal",
+                "Libraries",
+                Icon::Library,
+                None,
+                [440.0, 320.0],
+                None,
+                false,
+                &mut open,
+                &p,
+                |ui| {
                     ui.label(
                         RichText::new(
                             "Separate your music collections (e.g. Classical & Piano, Jazz Hi-Res, Studio Masters).",
@@ -4592,12 +4707,18 @@ impl TxPlayerApp {
         if self.show_new_playlist_modal {
             let mut open = self.show_new_playlist_modal;
             let mut create = false;
-            egui::Window::new("New Playlist")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .default_width(340.0)
-                .show(context, |ui| {
+            modals::themed_modal_window(
+                context,
+                "new_playlist_modal",
+                "New Playlist",
+                Icon::Playlist,
+                None,
+                [340.0, 128.0],
+                None,
+                false,
+                &mut open,
+                &p,
+                |ui| {
                     let resp = ui.add_sized(
                         [300.0, 26.0],
                         egui::TextEdit::singleline(&mut self.new_playlist_name)
@@ -4719,7 +4840,17 @@ impl TxPlayerApp {
         let mut entries = Vec::with_capacity(64);
         entries.push(PaletteEntry {
             category: "ACTION",
-            label: "Toggle Concert Visualizer".into(),
+            label: if self.compact_mode {
+                "Switch to Full Library Mode".into()
+            } else {
+                "Switch to Compact Player Mode".into()
+            },
+            subtitle: format!("Shortcut: {MOD_SHORT}Shift+M"),
+            action: PaletteCommand::ToggleCompactMode,
+        });
+        entries.push(PaletteEntry {
+            category: "ACTION",
+            label: "Toggle Visualizer".into(),
             subtitle: "Shortcut: V".into(),
             action: PaletteCommand::ToggleVisualizer,
         });
@@ -4847,6 +4978,10 @@ impl TxPlayerApp {
             PaletteCommand::ToggleVisualizer => {
                 self.show_concert_visualizer = !self.show_concert_visualizer;
             }
+            PaletteCommand::ToggleCompactMode => {
+                let next = !self.compact_mode;
+                self.set_compact_mode(ctx, next);
+            }
             PaletteCommand::EditCurrentTags => {
                 if let Some(cid) = self.current_id() {
                     self.open_tag_editor_for_ids(&[cid]);
@@ -4859,6 +4994,883 @@ impl TxPlayerApp {
                 self.show_settings = true;
             }
             PaletteCommand::AddFolder => self.add_folder(),
+        }
+    }
+
+    fn set_compact_mode(&mut self, ctx: &egui::Context, compact: bool) {
+        self.compact_mode = compact;
+        self.show_device_picker = false;
+        self.show_signal_path = false;
+        if compact {
+            let h = if self.compact_show_playlist {
+                COMPACT_EXPANDED_HEIGHT
+            } else {
+                COMPACT_COLLAPSED_HEIGHT
+            } + if self.show_concert_visualizer { 62.0 } else { 0.0 };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(
+                COMPACT_MIN_WIDTH,
+                COMPACT_MIN_HEIGHT,
+            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(COMPACT_WIDTH, h)));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(
+                FULL_MIN_WIDTH,
+                FULL_MIN_HEIGHT,
+            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(
+                FULL_WIDTH,
+                FULL_HEIGHT,
+            )));
+        }
+    }
+
+    fn sync_compact_height(&self, ctx: &egui::Context) {
+        if !self.compact_mode {
+            return;
+        }
+        let cur_w = ctx.content_rect().width().max(COMPACT_MIN_WIDTH);
+        let target_h = if self.compact_show_playlist {
+            COMPACT_EXPANDED_HEIGHT
+        } else {
+            COMPACT_COLLAPSED_HEIGHT
+        } + if self.show_concert_visualizer { 62.0 } else { 0.0 };
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(cur_w, target_h)));
+    }
+
+    /// Winamp / AIMP2-inspired Compact Mini-Player with optional collapsible playlist drawer.
+    fn compact_view(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        let p = self.palette;
+        let track = self.current_track().cloned();
+        let avail_w = ui.available_width();
+
+        // 1) Slim 28px custom draggable top bar
+        let (hdr_rect, hdr_resp) =
+            ui.allocate_exact_size(vec2(avail_w, 28.0), Sense::click_and_drag());
+        let is_focused = ctx.input(|i| i.focused);
+        let painter = ui.painter();
+        painter.rect_filled(hdr_rect, 0.0, p.sidebar);
+        painter.line_segment(
+            [pos2(hdr_rect.left(), hdr_rect.bottom()), pos2(hdr_rect.right(), hdr_rect.bottom())],
+            Stroke::new(1.0, p.border),
+        );
+
+        let dot_y = hdr_rect.center().y;
+        let close_r = Rect::from_center_size(pos2(hdr_rect.left() + 14.0, dot_y), Vec2::splat(15.0));
+        let min_r = Rect::from_center_size(pos2(hdr_rect.left() + 32.0, dot_y), Vec2::splat(15.0));
+        let close_resp = ui
+            .interact(close_r, ui.scope_id().with("cmp_close"), Sense::click())
+            .on_hover_text("Close");
+        let min_resp = ui
+            .interact(min_r, ui.scope_id().with("cmp_min"), Sense::click())
+            .on_hover_text("Minimize");
+
+        let paint_dot = |c: egui::Pos2, col: Color32, hov: bool| {
+            let fill = if !is_focused && !hov {
+                p.surface_elevated
+            } else if hov {
+                lerp_c(col, Color32::WHITE, 0.18)
+            } else {
+                col
+            };
+            ui.painter().circle_filled(c, 5.2, fill);
+        };
+        paint_dot(close_r.center(), p.danger, close_resp.hovered());
+        paint_dot(min_r.center(), p.hires_gold, min_resp.hovered());
+
+        // Brand mini mark + title + version
+        let mark_r = Rect::from_center_size(pos2(hdr_rect.left() + 54.0, dot_y), Vec2::splat(16.0));
+        self.paint_brand_icon(ui.painter(), mark_r);
+        ui.painter().text(
+            pos2(mark_r.right() + 6.0, dot_y),
+            Align2::LEFT_CENTER,
+            "TxPlayer",
+            FontId::proportional(11.5),
+            p.text,
+        );
+        ui.painter().text(
+            pos2(mark_r.right() + 58.0, dot_y),
+            Align2::LEFT_CENTER,
+            format!("v{}", crate::APP_VERSION),
+            FontId::monospace(9.0),
+            p.faint,
+        );
+
+        // Top-right compact utility icons: Expand | Settings | Playlist Drawer | Visualizer | Pin
+        let right_x = hdr_rect.right() - 14.0;
+        let step = 22.0;
+        let btn_expand_r = Rect::from_center_size(pos2(right_x, dot_y), Vec2::splat(20.0));
+        let btn_set_r = Rect::from_center_size(pos2(right_x - step, dot_y), Vec2::splat(20.0));
+        let btn_list_r = Rect::from_center_size(pos2(right_x - step * 2.0, dot_y), Vec2::splat(20.0));
+        let btn_vis_r = Rect::from_center_size(pos2(right_x - step * 3.0, dot_y), Vec2::splat(20.0));
+        let btn_pin_r = Rect::from_center_size(pos2(right_x - step * 4.0, dot_y), Vec2::splat(20.0));
+
+        let draw_hdr_btn = |ui: &mut Ui, r: Rect, id: &str, icon: Icon, active: bool, tip: &str| {
+            let resp = ui
+                .interact(r, ui.scope_id().with(id), Sense::click())
+                .on_hover_text(tip);
+            if active {
+                ui.painter().rect_filled(r, 4.0, p.accent_subtle);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 4.0, p.hover);
+            }
+            icons::paint_icon(
+                ui.painter(),
+                Rect::from_center_size(r.center(), Vec2::splat(11.5)),
+                icon,
+                if active {
+                    p.accent
+                } else if resp.hovered() {
+                    p.text
+                } else {
+                    p.muted
+                },
+            );
+            resp.clicked()
+        };
+
+        let pin_resp = ui
+            .interact(btn_pin_r, ui.scope_id().with("cmp_pin"), Sense::click())
+            .on_hover_text(if self.always_on_top {
+                "Always on Top: On"
+            } else {
+                "Pin Always on Top"
+            });
+        if self.always_on_top || pin_resp.hovered() {
+            ui.painter().rect_filled(
+                btn_pin_r,
+                4.0,
+                if self.always_on_top { p.accent_subtle } else { p.hover },
+            );
+        }
+        let pc = btn_pin_r.center();
+        let pin_col = if self.always_on_top {
+            p.accent
+        } else if pin_resp.hovered() {
+            p.text
+        } else {
+            p.faint
+        };
+        ui.painter().circle_filled(pos2(pc.x, pc.y - 1.8), 2.3, pin_col);
+        ui.painter().line_segment(
+            [pos2(pc.x, pc.y + 0.5), pos2(pc.x, pc.y + 4.4)],
+            Stroke::new(1.2, pin_col),
+        );
+
+        let vis_clicked = draw_hdr_btn(
+            ui,
+            btn_vis_r,
+            "cmp_vis",
+            Icon::Visualizer,
+            self.show_concert_visualizer,
+            "Toggle Visualizer (V)",
+        );
+        let list_clicked = draw_hdr_btn(
+            ui,
+            btn_list_r,
+            "cmp_list",
+            Icon::List,
+            self.compact_show_playlist,
+            if self.compact_show_playlist {
+                "Hide Playlist Drawer"
+            } else {
+                "Show Playlist Drawer"
+            },
+        );
+        let set_clicked = draw_hdr_btn(
+            ui,
+            btn_set_r,
+            "cmp_set",
+            Icon::Settings,
+            self.show_settings,
+            &format!("Settings ({MOD_SHORT},)"),
+        );
+        let expand_clicked = draw_hdr_btn(
+            ui,
+            btn_expand_r,
+            "cmp_expand",
+            Icon::Expand,
+            false,
+            &format!("Expand to Full Library ({MOD_SHORT}Shift+M)"),
+        );
+
+        if close_resp.clicked() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if min_resp.clicked() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        } else if pin_resp.clicked() {
+            self.always_on_top = !self.always_on_top;
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }));
+        } else if vis_clicked {
+            self.show_concert_visualizer = !self.show_concert_visualizer;
+            self.sync_compact_height(ctx);
+        } else if list_clicked {
+            self.compact_show_playlist = !self.compact_show_playlist;
+            self.sync_compact_height(ctx);
+        } else if set_clicked {
+            self.show_settings = !self.show_settings;
+        } else if expand_clicked || hdr_resp.double_clicked() {
+            self.set_compact_mode(ctx, false);
+            return;
+        } else if hdr_resp.drag_started_by(egui::PointerButton::Primary) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
+        // 2) Main Compact Player Deck
+        Frame::new()
+            .fill(p.panel)
+            .inner_margin(Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                // Row A: Cover + Title / Artist / Playing Folder + Quality + Heart
+                ui.horizontal(|ui| {
+                    if let Some(ref t) = track {
+                        let parent_dir = t
+                            .path
+                            .parent()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_else(|| t.path.display().to_string());
+                        let folder_name = t
+                            .path
+                            .parent()
+                            .and_then(|d| d.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Folder");
+
+                        if self
+                            .cover_clickable(ui, t, 46.0)
+                            .on_hover_text(format!("{}\nFolder: {parent_dir}\nClick for Track Info", t.title))
+                            .clicked()
+                        {
+                            self.inspect_track_id = Some(t.id);
+                        }
+                        ui.add_space(6.0);
+                        let meta_w = (ui.available_width() - 32.0).max(120.0);
+                        ui.allocate_ui_with_layout(
+                            vec2(meta_w, 46.0),
+                            Layout::top_down(Align::LEFT),
+                            |ui| {
+                                ui.style_mut().spacing.item_spacing.y = 1.5;
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&t.title)
+                                            .size(13.0)
+                                            .strong()
+                                            .color(p.text),
+                                    )
+                                    .selectable(false)
+                                    .truncate(),
+                                )
+                                .on_hover_text(format!(
+                                    "{} — {}\nFolder: {parent_dir}",
+                                    t.title, t.artist
+                                ));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!("{} · {}", t.artist, t.album))
+                                            .size(10.5)
+                                            .color(p.text_secondary),
+                                    )
+                                    .selectable(false)
+                                    .truncate(),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.style_mut().spacing.item_spacing.x = 4.0;
+                                    let (fr, _) =
+                                        ui.allocate_exact_size(Vec2::splat(10.5), Sense::hover());
+                                    icons::paint_icon(ui.painter(), fr, Icon::Folder, p.faint);
+                                    let dr = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(folder_name).size(9.5).color(p.muted),
+                                            )
+                                            .sense(Sense::click())
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(format!(
+                                            "Playing from:\n{parent_dir}\nClick to reveal in {FILE_MANAGER_NAME}"
+                                        ));
+                                    if dr.clicked() {
+                                        reveal_in_file_manager(&t.path);
+                                    }
+                                    ui.label(
+                                        RichText::new(format!("·  {}", t.quality_full()))
+                                            .size(9.0)
+                                            .monospace()
+                                            .color(if t.is_hires() { p.hires_gold } else { p.faint }),
+                                    );
+                                });
+                            },
+                        );
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let fav = self.store.active().favorites.contains(&t.id);
+                            if icons::icon_button(
+                                ui,
+                                Vec2::splat(24.0),
+                                if fav {
+                                    Icon::HeartFilled
+                                } else {
+                                    Icon::HeartOutline
+                                },
+                                14.0,
+                                if fav { p.accent } else { p.faint },
+                                p.accent_bright,
+                                p.hover,
+                                if fav { "Unfavorite" } else { "Favorite" },
+                            )
+                            .clicked()
+                            {
+                                self.store.active_mut().toggle_favorite(t.id);
+                                self.mark_library_dirty();
+                                self.store.save();
+                            }
+                        });
+                    } else {
+                        let (art_r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                        self.paint_brand_icon(ui.painter(), art_r);
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.add_space(5.0);
+                            ui.label(
+                                RichText::new("TxPlayer Ready")
+                                    .size(12.5)
+                                    .strong()
+                                    .color(p.text_secondary),
+                            );
+                            ui.label(
+                                RichText::new("Drop files or pick a track below")
+                                    .size(10.0)
+                                    .color(p.faint),
+                            );
+                        });
+                    }
+                });
+
+                ui.add_space(6.0);
+                // Row B: Hi-Def Uniform Progress Scrubber
+                let duration = self.duration.max(0.0);
+                let active = self.current_id().is_some() && duration > 0.01;
+                let waveform = self.current_id().and_then(|id| self.waveforms.get(&id));
+                let full_w = ui.available_width();
+                let time_w = 38.0;
+                let bar_w = (full_w - time_w * 2.0 - 12.0).max(120.0);
+                ui.horizontal(|ui| {
+                    ui.style_mut().spacing.item_spacing.x = 6.0;
+                    ui.allocate_ui_with_layout(
+                        vec2(time_w, 26.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.label(
+                                RichText::new(format_duration(Some(self.position)))
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(p.muted),
+                            );
+                        },
+                    );
+                    if let Some(new_pos) = acoustic_timeline_scrubber(
+                        ui,
+                        bar_w,
+                        self.position,
+                        duration,
+                        active,
+                        waveform.map(Vec::as_slice),
+                        self.progress_style,
+                        &p,
+                    ) {
+                        self.audio.seek(new_pos);
+                        self.position = new_pos;
+                    }
+                    ui.allocate_ui_with_layout(
+                        vec2(time_w, 26.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            let right_text = if self.show_remaining && duration > 0.0 {
+                                format!(
+                                    "-{}",
+                                    format_duration(Some((duration - self.position).max(0.0)))
+                                )
+                            } else {
+                                format_duration(if duration > 0.0 {
+                                    Some(duration)
+                                } else {
+                                    None
+                                })
+                            };
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(right_text)
+                                            .size(10.0)
+                                            .monospace()
+                                            .color(p.muted),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_text("Click to toggle remaining / total time")
+                                .clicked()
+                            {
+                                self.show_remaining = !self.show_remaining;
+                            }
+                        },
+                    );
+                });
+
+                ui.add_space(6.0);
+                // Row C: Compact Tactile Transport (left) + Signal Path + Output Icon + Volume (right)
+                ui.horizontal(|ui| {
+                    ui.style_mut().spacing.item_spacing.x = 5.0;
+                    if transport_toggle_button(ui, Icon::Shuffle, self.shuffle, "Shuffle", &p)
+                        .clicked()
+                    {
+                        self.shuffle = !self.shuffle;
+                    }
+                    if icons::icon_button(
+                        ui,
+                        Vec2::splat(26.0),
+                        Icon::Prev,
+                        14.0,
+                        p.text_secondary,
+                        p.text,
+                        p.hover,
+                        "Previous",
+                    )
+                    .clicked()
+                    {
+                        self.previous();
+                    }
+                    if play_pause_hero_button_sized(ui, 32.0, self.playing, &p).clicked() {
+                        self.toggle_playback();
+                    }
+                    if icons::icon_button(
+                        ui,
+                        Vec2::splat(26.0),
+                        Icon::Next,
+                        14.0,
+                        p.text_secondary,
+                        p.text,
+                        p.hover,
+                        "Next",
+                    )
+                    .clicked()
+                    {
+                        self.next(false);
+                    }
+                    let repeat_icon = match self.repeat {
+                        RepeatMode::One => Icon::RepeatOne,
+                        RepeatMode::Off | RepeatMode::All => Icon::Repeat,
+                    };
+                    if transport_toggle_button(
+                        ui,
+                        repeat_icon,
+                        self.repeat != RepeatMode::Off,
+                        "Repeat",
+                        &p,
+                    )
+                    .clicked()
+                    {
+                        self.repeat = match self.repeat {
+                            RepeatMode::Off => RepeatMode::All,
+                            RepeatMode::All => RepeatMode::One,
+                            RepeatMode::One => RepeatMode::Off,
+                        };
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.style_mut().spacing.item_spacing.x = 4.0;
+                        if let Some(new_vol) = custom_volume_bar(ui, 76.0, self.volume, &p) {
+                            self.set_volume(new_vol);
+                        }
+                        let vol_icon = if self.volume <= 0.001 {
+                            Icon::VolumeMuted
+                        } else if self.volume < 0.5 {
+                            Icon::VolumeLow
+                        } else {
+                            Icon::VolumeHigh
+                        };
+                        if icons::icon_button(
+                            ui,
+                            Vec2::splat(22.0),
+                            vol_icon,
+                            13.5,
+                            if self.volume <= 0.001 {
+                                p.danger
+                            } else {
+                                p.text_secondary
+                            },
+                            p.text,
+                            p.hover,
+                            "Mute (M)",
+                        )
+                        .clicked()
+                        {
+                            self.toggle_mute();
+                        }
+
+                        // Compact Output Device icon (no bulky button!)
+                        let active_dev = self
+                            .stream_info
+                            .as_ref()
+                            .map(|s| s.device_name.as_str())
+                            .or(self.preferred_device.as_deref())
+                            .unwrap_or("System Default");
+                        let dev_resp = icons::icon_button(
+                            ui,
+                            Vec2::splat(22.0),
+                            Icon::Device,
+                            13.5,
+                            if self.show_device_picker || self.preferred_device.is_some() {
+                                p.accent
+                            } else {
+                                p.muted
+                            },
+                            p.text,
+                            p.hover,
+                            &format!("Audio Output: {active_dev}\nClick to change"),
+                        );
+                        self.device_btn_rect = Some(dev_resp.rect);
+                        if dev_resp.clicked() {
+                            self.available_devices = list_output_devices();
+                            self.show_device_picker = !self.show_device_picker;
+                            if self.show_device_picker {
+                                self.show_signal_path = false;
+                            }
+                        }
+
+                        // Signal Path & DSP quick icon
+                        let sig_resp = icons::icon_button(
+                            ui,
+                            Vec2::splat(22.0),
+                            Icon::Sliders,
+                            13.0,
+                            if self.show_signal_path || self.plugins.dsp.is_actively_processing() {
+                                p.accent
+                            } else {
+                                p.muted
+                            },
+                            p.text,
+                            p.hover,
+                            "Signal Path & Live DSP",
+                        );
+                        self.signal_btn_rect = Some(sig_resp.rect);
+                        if sig_resp.clicked() {
+                            self.show_signal_path = !self.show_signal_path;
+                            if self.show_signal_path {
+                                self.show_device_picker = false;
+                            }
+                        }
+                    });
+                });
+            });
+
+        // 3) Optional Compact Live Visualizer Strip (only when toggled ON)
+        if self.show_concert_visualizer {
+            Frame::new()
+                .fill(p.background)
+                .inner_margin(Margin::symmetric(10, 4))
+                .stroke(Stroke::new(1.0, p.border))
+                .show(ui, |ui| {
+                    let w = ui.available_width();
+                    self.visualizer.ui_compact(
+                        ui,
+                        vec2(w, 52.0),
+                        &p,
+                        &self.plugins.visualizers,
+                    );
+                });
+        }
+
+        // 4) Collapsible Winamp / AIMP2-Style Playlist Drawer
+        if self.compact_show_playlist {
+            self.ensure_visible_cache();
+            let tracks = self.cached_visible.clone();
+            let current_id = self.current_id();
+            let time = ctx.input(|i| i.time);
+            let (rms_l, rms_r, _, _, _) = self.visual_tap.levels();
+            let live_rms = ((rms_l + rms_r) * 1.6).clamp(0.0, 1.0);
+            let cmd = ctx.input(|i| i.modifiers.command);
+            let shift = ctx.input(|i| i.modifiers.shift);
+
+            let sep_r = ui.available_rect_before_wrap();
+            ui.painter().line_segment(
+                [pos2(sep_r.left(), sep_r.top()), pos2(sep_r.right(), sep_r.top())],
+                Stroke::new(1.0, p.border),
+            );
+
+            Frame::new()
+                .fill(p.background)
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    // Slim toolbar: aligned filter input + Add Tracks / Add Folder + count
+                    ui.horizontal(|ui| {
+                        let filter_w = (ui.available_width() - 120.0).max(120.0);
+                        let (sr, _) = ui.allocate_exact_size(vec2(filter_w, 22.0), Sense::hover());
+                        ui.painter().rect_filled(sr, 5.0, p.surface);
+                        ui.painter().rect_stroke(sr, 5.0, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                        icons::paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(pos2(sr.left() + 11.0, sr.center().y), Vec2::splat(11.0)),
+                            Icon::Search,
+                            p.faint,
+                        );
+                        let edit_r = Rect::from_min_max(
+                            pos2(sr.left() + 22.0, sr.top()),
+                            pos2(sr.right() - 6.0, sr.bottom()),
+                        );
+                        let mut child = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(edit_r)
+                                .layout(Layout::left_to_right(Align::Center)),
+                        );
+                        let search_resp = child.add_sized(
+                            edit_r.size(),
+                            egui::TextEdit::singleline(&mut self.search)
+                                .frame(Frame::NONE)
+                                .font(FontId::proportional(11.0))
+                                .align(Align2::LEFT_CENTER)
+                                .hint_text(RichText::new("Filter tracks…").size(10.5).color(p.faint)),
+                        );
+                        if self.focus_search {
+                            search_resp.request_focus();
+                            self.focus_search = false;
+                        }
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icons::icon_button(
+                                ui,
+                                Vec2::splat(22.0),
+                                Icon::FolderPlus,
+                                13.0,
+                                p.muted,
+                                p.accent,
+                                p.hover,
+                                "Add Folder",
+                            )
+                            .clicked()
+                            {
+                                self.add_folder();
+                            }
+                            if icons::icon_button(
+                                ui,
+                                Vec2::splat(22.0),
+                                Icon::TrackPlus,
+                                13.0,
+                                p.muted,
+                                p.accent,
+                                p.hover,
+                                "Add Tracks",
+                            )
+                            .clicked()
+                            {
+                                self.add_files();
+                            }
+                            ui.label(
+                                RichText::new(format!("{}", tracks.len()))
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(p.faint),
+                            );
+                        });
+                    });
+
+                    ui.add_space(5.0);
+                    let mut play_target: Option<(usize, u64)> = None;
+                    let mut ctx_action: Option<ContextMenuAction> = None;
+                    let playlists_snap: Vec<(u64, String)> = self
+                        .store
+                        .active()
+                        .playlists
+                        .iter()
+                        .map(|pl| (pl.id, pl.name.clone()))
+                        .collect();
+
+                    ScrollArea::vertical()
+                        .id_salt("compact_playlist_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.style_mut().spacing.item_spacing.y = 1.5;
+                            if tracks.is_empty() {
+                                ui.add_space(28.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        RichText::new("Drop audio files or click + to add music")
+                                            .size(11.0)
+                                            .color(p.faint),
+                                    );
+                                });
+                            } else {
+                                let row_w = ui.available_width();
+                                for (row_idx, tr) in tracks.iter().enumerate() {
+                                    let is_current = current_id == Some(tr.id);
+                                    let is_selected = self.selected_tracks.contains(&tr.id);
+                                    let (row_rect, resp) =
+                                        ui.allocate_exact_size(vec2(row_w, 26.0), Sense::click());
+                                    if !ui.is_rect_visible(row_rect) {
+                                        continue;
+                                    }
+                                    let hovered = resp.hovered();
+                                    let bg = if is_current && is_selected {
+                                        lerp_c(p.playing_row, p.clicked_row, 0.35)
+                                    } else if is_current {
+                                        p.playing_row
+                                    } else if is_selected {
+                                        p.clicked_row
+                                    } else if hovered {
+                                        p.hover
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    };
+                                    ui.painter().rect_filled(row_rect, 4.0, bg);
+                                    if is_current {
+                                        let bar = Rect::from_min_max(
+                                            pos2(row_rect.left() + 1.5, row_rect.top() + 5.0),
+                                            pos2(row_rect.left() + 4.0, row_rect.bottom() - 5.0),
+                                        );
+                                        ui.painter().rect_filled(bar, 1.0, p.accent);
+                                    } else if is_selected {
+                                        ui.painter().rect_stroke(
+                                            row_rect,
+                                            4.0,
+                                            Stroke::new(1.0, p.border_strong),
+                                            StrokeKind::Inside,
+                                        );
+                                    }
+
+                                    let idx_c = pos2(row_rect.left() + 18.0, row_rect.center().y);
+                                    if is_current {
+                                        icons::paint_playing_bars(
+                                            ui.painter(),
+                                            Rect::from_center_size(idx_c, vec2(10.0, 10.0)),
+                                            time,
+                                            self.playing,
+                                            live_rms,
+                                            p.accent,
+                                        );
+                                    } else {
+                                        ui.painter().text(
+                                            idx_c,
+                                            Align2::CENTER_CENTER,
+                                            format!("{:02}", row_idx + 1),
+                                            FontId::monospace(9.5),
+                                            p.faint,
+                                        );
+                                    }
+
+                                    let text_r = Rect::from_min_max(
+                                        pos2(row_rect.left() + 32.0, row_rect.top()),
+                                        pos2(row_rect.right() - 48.0, row_rect.bottom()),
+                                    );
+                                    let line = format!("{} — {}", tr.title, tr.artist);
+                                    ui.painter().with_clip_rect(text_r).text(
+                                        pos2(text_r.left(), row_rect.center().y),
+                                        Align2::LEFT_CENTER,
+                                        line,
+                                        FontId::proportional(11.5),
+                                        if is_current { p.accent } else { p.text },
+                                    );
+                                    ui.painter().text(
+                                        pos2(row_rect.right() - 6.0, row_rect.center().y),
+                                        Align2::RIGHT_CENTER,
+                                        format_duration(tr.duration),
+                                        FontId::monospace(10.0),
+                                        if is_current { p.accent } else { p.muted },
+                                    );
+
+                                    let dir_hint = tr
+                                        .path
+                                        .parent()
+                                        .map(|d| d.display().to_string())
+                                        .unwrap_or_else(|| tr.path.display().to_string());
+                                    let resp = resp.on_hover_text(format!("Folder: {dir_hint}"));
+
+                                    if resp.double_clicked() {
+                                        play_target = Some((row_idx, tr.id));
+                                        self.select_row_click(row_idx, tr.id, &tracks, false, false);
+                                    } else if resp.clicked() {
+                                        self.select_row_click(row_idx, tr.id, &tracks, cmd, shift);
+                                    }
+
+                                    let tid = tr.id;
+                                    resp.context_menu(|ui| {
+                                        if !is_selected {
+                                            self.select_row_click(row_idx, tid, &tracks, false, false);
+                                        }
+                                        if ui.button("Play").clicked() {
+                                            ctx_action = Some(ContextMenuAction::PlaySelected);
+                                            ui.close();
+                                        }
+                                        if ui.button("Play Next").clicked() {
+                                            ctx_action = Some(ContextMenuAction::PlayNext);
+                                            ui.close();
+                                        }
+                                        if ui.button("Add to Play Queue").clicked() {
+                                            ctx_action = Some(ContextMenuAction::AddToQueue);
+                                            ui.close();
+                                        }
+                                        ui.menu_button("Add to Playlist", |ui| {
+                                            for (pl_id, pl_name) in &playlists_snap {
+                                                if ui.button(pl_name).clicked() {
+                                                    ctx_action =
+                                                        Some(ContextMenuAction::AddToPlaylist(*pl_id));
+                                                    ui.close();
+                                                }
+                                            }
+                                            if !playlists_snap.is_empty() {
+                                                ui.separator();
+                                            }
+                                            if ui.button("+ New Playlist…").clicked() {
+                                                ctx_action =
+                                                    Some(ContextMenuAction::NewPlaylistWithSelected);
+                                                ui.close();
+                                            }
+                                        });
+                                        ui.separator();
+                                        if ui.button("Edit Tags & Lookup…").clicked() {
+                                            ctx_action = Some(ContextMenuAction::EditTags);
+                                            ui.close();
+                                        }
+                                        if ui.button("Track Info…").clicked() {
+                                            ctx_action = Some(ContextMenuAction::TrackInfo(tid));
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .button(format!("Reveal in {FILE_MANAGER_NAME}"))
+                                            .clicked()
+                                        {
+                                            ctx_action =
+                                                Some(ContextMenuAction::RevealInFinder(tid));
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                        if ui
+                                            .button(
+                                                RichText::new("Remove from Library").color(p.danger),
+                                            )
+                                            .clicked()
+                                        {
+                                            ctx_action = Some(ContextMenuAction::RemoveSelected);
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                            }
+                        });
+
+                    if let Some((_, tid)) = play_target {
+                        self.play_from_list(tid, &tracks);
+                    }
+                    if let Some(act) = ctx_action {
+                        self.run_context_action(act, &tracks);
+                    }
+                });
+        }
+
+        if self.playing {
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 
@@ -5005,40 +6017,49 @@ impl eframe::App for TxPlayerApp {
         self.process_background_events(&context);
         self.process_input(&context);
         let paused = self.demo_piano_lock || (self.current_id().is_some() && !self.playing);
-        self.visualizer
-            .update(&self.visual_tap, dt, &self.plugins.visualizers, paused);
+        if self.show_concert_visualizer {
+            self.visualizer
+                .update(&self.visual_tap, dt, &self.plugins.visualizers, paused);
+        }
 
         let p = self.palette;
 
-        egui::Panel::bottom("player")
-            .exact_size(TRANSPORT_HEIGHT)
-            .frame(
-                Frame::new()
-                    .fill(p.panel)
-                    .inner_margin(Margin::symmetric(16, 10))
-                    .stroke(Stroke::new(1.0, p.border)),
-            )
-            .show(root, |ui| self.playback_panel(&context, ui));
+        if self.compact_mode {
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(p.background).inner_margin(Margin::ZERO))
+                .show(root, |ui| self.compact_view(&context, ui));
+        } else {
+            egui::Panel::bottom("player")
+                .exact_size(TRANSPORT_HEIGHT)
+                .frame(
+                    Frame::new()
+                        .fill(p.panel)
+                        .inner_margin(Margin::symmetric(16, 8))
+                        .stroke(Stroke::new(1.0, p.border)),
+                )
+                .show(root, |ui| self.playback_panel(&context, ui));
 
-        egui::Panel::left("navigation")
-            .exact_size(SIDEBAR_WIDTH)
-            .frame(
-                Frame::new()
-                    .fill(p.sidebar)
-                    .inner_margin(Margin::ZERO)
-                    .stroke(Stroke::new(1.0, p.border)),
-            )
-            .show(root, |ui| self.sidebar(&context, ui));
+            egui::Panel::left("navigation")
+                .exact_size(SIDEBAR_WIDTH)
+                .frame(
+                    Frame::new()
+                        .fill(p.sidebar)
+                        .inner_margin(Margin::ZERO)
+                        .stroke(Stroke::new(1.0, p.border)),
+                )
+                .show(root, |ui| self.sidebar(&context, ui));
 
-        egui::CentralPanel::default()
-            .frame(
-                Frame::new()
-                    .fill(p.background)
-                    .inner_margin(Margin::symmetric(18, 0)),
-            )
-            .show(root, |ui| self.main_view(ui));
+            egui::CentralPanel::default()
+                .frame(
+                    Frame::new()
+                        .fill(p.background)
+                        .inner_margin(Margin::symmetric(18, 0)),
+                )
+                .show(root, |ui| self.main_view(ui));
 
-        self.floating_selection_dock(&context);
+            self.floating_selection_dock(&context);
+        }
+
         self.show_modals(&context);
         self.drag_overlay(&context);
         self.status_toast(&context);
@@ -5147,6 +6168,8 @@ impl Drop for TxPlayerApp {
             linear_volume: self.linear_volume,
             acoustid_api_key: self.acoustid_api_key.clone(),
             plugins: self.plugins.clone(),
+            compact_mode: self.compact_mode,
+            compact_show_playlist: self.compact_show_playlist,
         }
         .save();
     }
@@ -5291,7 +6314,16 @@ fn transport_toggle_button(
 }
 
 fn play_pause_hero_button(ui: &mut Ui, playing: bool, p: &Palette) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
+    play_pause_hero_button_sized(ui, 36.0, playing, p)
+}
+
+fn play_pause_hero_button_sized(
+    ui: &mut Ui,
+    size: f32,
+    playing: bool,
+    p: &Palette,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     if ui.is_rect_visible(rect) {
         let hovered = resp.hovered();
         let center = rect.center();
@@ -5299,19 +6331,20 @@ fn play_pause_hero_button(ui: &mut Ui, playing: bool, p: &Palette) -> egui::Resp
         if playing || hovered {
             ui.painter().circle_filled(
                 center,
-                r + 2.5,
+                r + 2.0,
                 Color32::from_rgba_unmultiplied(
                     p.accent.r(),
                     p.accent.g(),
                     p.accent.b(),
-                    if hovered { 48 } else { 28 },
+                    if hovered { 42 } else { 24 },
                 ),
             );
         }
         let bg = if hovered { p.accent_bright } else { p.accent };
         ui.painter().circle_filled(center, r, bg);
-        let offset = if playing { 0.0 } else { 1.2 };
-        let ir = Rect::from_center_size(pos2(center.x + offset, center.y), Vec2::splat(16.0));
+        let offset = if playing { 0.0 } else { 1.1 };
+        let icon_sz = (size * 0.44).clamp(13.0, 16.0);
+        let ir = Rect::from_center_size(pos2(center.x + offset, center.y), Vec2::splat(icon_sz));
         icons::paint_icon(
             ui.painter(),
             ir,
@@ -5322,7 +6355,12 @@ fn play_pause_hero_button(ui: &mut Ui, playing: bool, p: &Palette) -> egui::Resp
     resp.on_hover_text(if playing { "Pause (Space)" } else { "Play (Space)" })
 }
 
-/// Studio-grade mirrored acoustic waveform timeline scrubber (replaces generic green progress bar).
+/// High-definition track progress scrubber with three crisp modes:
+/// - `AcousticWaveform`: smooth continuous mirrored acoustic silhouette with exact sub-pixel playhead split
+/// - `PrecisionBars`: strictly pixel-snapped uniform-width bars (zero Moiré/uneven width on 100%/125% displays)
+/// - `StudioRail`: minimal precision rail
+///
+/// All modes show a crisp floating seek timestamp pill directly above the cursor while hovering/scrubbing.
 #[allow(clippy::too_many_arguments)]
 fn acoustic_timeline_scrubber(
     ui: &mut Ui,
@@ -5334,7 +6372,7 @@ fn acoustic_timeline_scrubber(
     style: ProgressBarStyle,
     p: &Palette,
 ) -> Option<f64> {
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click_and_drag());
     let hovered = response.hovered();
     let dragging = response.dragged();
     let pointer_x = ui.ctx().pointer_hover_pos().map(|pt| pt.x);
@@ -5351,18 +6389,34 @@ fn acoustic_timeline_scrubber(
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let playhead_x = rect.left() + rect.width() * frac;
+        let ppp = painter.pixels_per_point().max(1.0);
+        let bg_rect = icons::snap_rect(rect.shrink2(vec2(0.0, 2.0)), ppp);
+        let playhead_x = (bg_rect.left() + bg_rect.width() * frac).clamp(bg_rect.left(), bg_rect.right());
+        let cy = icons::snap_px(bg_rect.top() + bg_rect.height() * 0.62, ppp);
+
+        // Sample smooth interpolated waveform amplitude at normalized t in [0, 1]
+        let sample_amp = |t: f32| -> f32 {
+            let Some(wf) = waveform else {
+                return 0.0;
+            };
+            if wf.is_empty() {
+                return 0.0;
+            }
+            let pos = t.clamp(0.0, 1.0) * (wf.len() - 1) as f32;
+            let i0 = pos.floor() as usize;
+            let i1 = (i0 + 1).min(wf.len() - 1);
+            let f = pos - i0 as f32;
+            (wf[i0] * (1.0 - f) + wf[i1] * f).clamp(0.05, 1.0)
+        };
 
         match style {
             ProgressBarStyle::AcousticWaveform => {
-                // Subtle framed dark acoustic track channel
-                let bg_rect = rect.shrink2(vec2(0.0, 2.0));
                 painter.rect_filled(bg_rect, 5.0, p.background);
                 painter.rect_stroke(
                     bg_rect,
                     5.0,
                     Stroke::new(
-                        0.8,
+                        1.0,
                         if hovered || dragging {
                             p.border_strong
                         } else {
@@ -5372,97 +6426,235 @@ fn acoustic_timeline_scrubber(
                     StrokeKind::Inside,
                 );
 
-                // Subtle center zero-axis hairline
-                let cy = bg_rect.center().y;
+                // Clean center baseline axis
+                let inner_l = bg_rect.left() + 4.0;
+                let inner_r = bg_rect.right() - 4.0;
+                let inner_w = (inner_r - inner_l).max(8.0);
+                let up_h = (cy - bg_rect.top() - 2.5).max(4.0);
+                let dn_h = (bg_rect.bottom() - cy - 2.0).max(2.5);
+                let split_x = (inner_l + inner_w * frac).clamp(inner_l, inner_r);
+
                 painter.line_segment(
-                    [pos2(bg_rect.left() + 4.0, cy), pos2(bg_rect.right() - 4.0, cy)],
-                    Stroke::new(0.6, p.border.gamma_multiply(0.5)),
+                    [pos2(inner_l, cy), pos2(inner_r, cy)],
+                    Stroke::new(1.0 / ppp, p.border),
                 );
 
+                if waveform.is_some() {
+                    // Build high-resolution continuous mirrored ribbon (upper 66% + lower 34% reflection)
+                    let steps = ((inner_w / 2.0).round() as usize).clamp(48, 220);
+                    let unplayed_up = Color32::from_rgba_unmultiplied(
+                        p.muted.r(),
+                        p.muted.g(),
+                        p.muted.b(),
+                        if p.is_light { 95 } else { 78 },
+                    );
+                    let unplayed_dn = Color32::from_rgba_unmultiplied(
+                        p.muted.r(),
+                        p.muted.g(),
+                        p.muted.b(),
+                        if p.is_light { 45 } else { 36 },
+                    );
+                    let played_up = if hovered || dragging {
+                        Color32::from_rgba_unmultiplied(
+                            p.accent_bright.r(),
+                            p.accent_bright.g(),
+                            p.accent_bright.b(),
+                            225,
+                        )
+                    } else {
+                        Color32::from_rgba_unmultiplied(
+                            p.accent.r(),
+                            p.accent.g(),
+                            p.accent.b(),
+                            210,
+                        )
+                    };
+                    let played_dn = Color32::from_rgba_unmultiplied(
+                        p.accent.r(),
+                        p.accent.g(),
+                        p.accent.b(),
+                        86,
+                    );
+                    let hover_up = Color32::from_rgba_unmultiplied(
+                        p.accent.r(),
+                        p.accent.g(),
+                        p.accent.b(),
+                        128,
+                    );
+
+                    let mut played_crest: Vec<Pos2> = Vec::with_capacity(steps);
+                    let mut unplayed_crest: Vec<Pos2> = Vec::with_capacity(steps);
+
+                    let mut prev_x = inner_l;
+                    let mut prev_a = sample_amp(0.0);
+                    for i in 1..=steps {
+                        let t = i as f32 / steps as f32;
+                        let x = inner_l + inner_w * t;
+                        let a = sample_amp(t);
+
+                        let draw_quad = |x0: f32, a0: f32, x1: f32, a1: f32, is_played: bool, is_hov: bool| {
+                            let y0_u = cy - up_h * a0;
+                            let y1_u = cy - up_h * a1;
+                            let y0_d = cy + dn_h * a0;
+                            let y1_d = cy + dn_h * a1;
+                            let col_u = if is_played {
+                                played_up
+                            } else if is_hov {
+                                hover_up
+                            } else {
+                                unplayed_up
+                            };
+                            let col_d = if is_played { played_dn } else { unplayed_dn };
+                            painter.add(egui::Shape::convex_polygon(
+                                vec![pos2(x0, cy), pos2(x0, y0_u), pos2(x1, y1_u), pos2(x1, cy)],
+                                col_u,
+                                Stroke::NONE,
+                            ));
+                            painter.add(egui::Shape::convex_polygon(
+                                vec![pos2(x0, cy), pos2(x1, cy), pos2(x1, y1_d), pos2(x0, y0_d)],
+                                col_d,
+                                Stroke::NONE,
+                            ));
+                        };
+
+                        let in_hover = |mid_x: f32| -> bool {
+                            active
+                                && hovered
+                                && pointer_x.is_some_and(|px| {
+                                    (mid_x >= split_x && mid_x <= px)
+                                        || (mid_x <= split_x && mid_x >= px)
+                                })
+                        };
+
+                        if active && prev_x < split_x && x > split_x {
+                            // Exact sub-pixel split right at playhead!
+                            let alpha = ((split_x - prev_x) / (x - prev_x)).clamp(0.0, 1.0);
+                            let mid_a = prev_a + (a - prev_a) * alpha;
+                            draw_quad(prev_x, prev_a, split_x, mid_a, true, false);
+                            draw_quad(split_x, mid_a, x, a, false, in_hover((split_x + x) * 0.5));
+                            played_crest.push(pos2(prev_x, cy - up_h * prev_a));
+                            played_crest.push(pos2(split_x, cy - up_h * mid_a));
+                            unplayed_crest.push(pos2(split_x, cy - up_h * mid_a));
+                            unplayed_crest.push(pos2(x, cy - up_h * a));
+                        } else {
+                            let is_played = active && x <= split_x;
+                            draw_quad(prev_x, prev_a, x, a, is_played, in_hover((prev_x + x) * 0.5));
+                            if is_played {
+                                if played_crest.is_empty() {
+                                    played_crest.push(pos2(prev_x, cy - up_h * prev_a));
+                                }
+                                played_crest.push(pos2(x, cy - up_h * a));
+                            } else {
+                                if unplayed_crest.is_empty() {
+                                    unplayed_crest.push(pos2(prev_x, cy - up_h * prev_a));
+                                }
+                                unplayed_crest.push(pos2(x, cy - up_h * a));
+                            }
+                        }
+
+                        prev_x = x;
+                        prev_a = a;
+                    }
+
+                    if unplayed_crest.len() >= 2 {
+                        painter.add(egui::Shape::line(
+                            unplayed_crest,
+                            Stroke::new(1.0, p.muted.gamma_multiply(0.7)),
+                        ));
+                    }
+                    if played_crest.len() >= 2 {
+                        painter.add(egui::Shape::line(
+                            played_crest,
+                            Stroke::new(1.3, p.accent_bright),
+                        ));
+                    }
+                } else if active {
+                    // Clean quiet rail while waveform decodes (ZERO fake sine wave!)
+                    let rail_h = 3.0;
+                    let rail_r = Rect::from_min_max(
+                        pos2(inner_l, cy - rail_h * 0.5),
+                        pos2(split_x.max(inner_l + 2.0), cy + rail_h * 0.5),
+                    );
+                    painter.rect_filled(rail_r, 1.5, p.accent);
+                }
+
+                // Precision vertical playhead needle
+                if active {
+                    let px_snap = icons::snap_px(split_x, ppp);
+                    painter.line_segment(
+                        [pos2(px_snap, bg_rect.top() + 1.5), pos2(px_snap, bg_rect.bottom() - 1.5)],
+                        Stroke::new(1.6, p.accent_bright),
+                    );
+                }
+            }
+            ProgressBarStyle::PrecisionBars => {
+                painter.rect_filled(bg_rect, 5.0, p.background);
+                painter.rect_stroke(
+                    bg_rect,
+                    5.0,
+                    Stroke::new(
+                        1.0,
+                        if hovered || dragging {
+                            p.border_strong
+                        } else {
+                            p.border
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+
+                // Strictly pixel-snapped uniform bar width & uniform gap (zero Moiré on 1x Windows displays!)
                 let inner = bg_rect.shrink2(vec2(5.0, 3.0));
-                let bar_count = ((inner.width() / 3.2).floor() as usize).clamp(32, WAVEFORM_BINS);
-                let step = inner.width() / bar_count as f32;
-                let bar_w = (step * 0.62).clamp(1.2, 2.4);
+                let bar_w = icons::snap_px(2.0, ppp).max(1.0 / ppp);
+                let gap = icons::snap_px(2.0, ppp).max(1.0 / ppp);
+                let pitch = bar_w + gap;
+                let bar_count = ((inner.width() / pitch).floor() as usize).clamp(24, 240);
+                let total_w = bar_count as f32 * bar_w + (bar_count.saturating_sub(1)) as f32 * gap;
+                let start_x = icons::snap_px(inner.left() + (inner.width() - total_w) * 0.5, ppp);
                 let half_h = inner.height() * 0.5;
+                let mid_y = icons::snap_px(inner.center().y, ppp);
 
                 for i in 0..bar_count {
                     let t = i as f32 / (bar_count - 1).max(1) as f32;
-                    let amp = if let Some(wf) = waveform {
-                        let idx = ((t * (wf.len() - 1) as f32).round() as usize)
-                            .min(wf.len().saturating_sub(1));
-                        wf[idx]
-                    } else if active {
-                        // Graceful subtle placeholder acoustic envelope while real waveform loads
-                        let w1 = (t * 23.0).sin().abs() * 0.45;
-                        let w2 = (t * 7.3 + 1.1).cos().abs() * 0.35;
-                        (0.18 + w1 + w2).min(0.82)
+                    let amp = if waveform.is_some() {
+                        sample_amp(t)
                     } else {
                         0.12
                     };
-
-                    let bx = inner.left() + i as f32 * step + (step - bar_w) * 0.5;
-                    let played = active && bx <= playhead_x;
+                    let bx = icons::snap_px(start_x + i as f32 * pitch, ppp);
+                    let played = active && bx + bar_w * 0.5 <= playhead_x;
                     let hover_zone = active
                         && hovered
                         && pointer_x.is_some_and(|px| {
                             (bx >= playhead_x && bx <= px) || (bx <= playhead_x && bx >= px)
                         });
-
-                    let bh = (half_h * amp).max(1.2);
-                    let bar_rect = Rect::from_min_max(pos2(bx, cy - bh), pos2(bx + bar_w, cy + bh));
-
+                    let bh = icons::snap_px((half_h * amp).max(1.5), ppp);
+                    let bar_rect =
+                        Rect::from_min_max(pos2(bx, mid_y - bh), pos2(bx + bar_w, mid_y + bh));
                     let col = if played {
-                        // Luminous acoustic gradient along played region
-                        let grad = if t < 0.5 {
-                            lerp_c(p.accent_secondary, p.accent, t * 2.0)
-                        } else {
-                            lerp_c(p.accent, p.hires_gold, (t - 0.5) * 0.7)
-                        };
                         if hovered || dragging {
-                            lerp_c(grad, p.accent_bright, 0.25)
+                            p.accent_bright
                         } else {
-                            grad
+                            p.accent
                         }
                     } else if hover_zone {
                         p.accent.gamma_multiply(0.55)
                     } else {
                         p.border_strong.gamma_multiply(if active { 0.85 } else { 0.45 })
                     };
-                    painter.rect_filled(bar_rect, bar_w * 0.45, col);
+                    painter.rect_filled(bar_rect, 0.8, col);
                 }
 
-                // Glowing vertical precision playhead cursor needle
                 if active {
-                    painter.rect_filled(
-                        Rect::from_center_size(pos2(playhead_x, cy), vec2(6.0, bg_rect.height())),
-                        3.0,
-                        Color32::from_rgba_unmultiplied(
-                            p.accent.r(),
-                            p.accent.g(),
-                            p.accent.b(),
-                            if hovered || dragging { 70 } else { 36 },
-                        ),
-                    );
+                    let px_snap = icons::snap_px(playhead_x, ppp);
                     painter.line_segment(
-                        [
-                            pos2(playhead_x, bg_rect.top() + 1.5),
-                            pos2(playhead_x, bg_rect.bottom() - 1.5),
-                        ],
-                        Stroke::new(1.8, p.accent_bright),
-                    );
-                }
-
-                // Ghost hover cursor needle
-                if active && hovered && !dragging && let Some(px) = pointer_x {
-                    let cx = px.clamp(bg_rect.left() + 2.0, bg_rect.right() - 2.0);
-                    painter.line_segment(
-                        [pos2(cx, bg_rect.top() + 2.0), pos2(cx, bg_rect.bottom() - 2.0)],
-                        Stroke::new(1.0, p.text.gamma_multiply(0.55)),
+                        [pos2(px_snap, bg_rect.top() + 1.5), pos2(px_snap, bg_rect.bottom() - 1.5)],
+                        Stroke::new(1.6, p.accent_bright),
                     );
                 }
             }
             ProgressBarStyle::StudioRail => {
-                let bar_h = if hovered || dragging { 6.0 } else { 4.0 };
+                let bar_h = if hovered || dragging { 5.0 } else { 3.5 };
                 let track_rect = Rect::from_center_size(rect.center(), vec2(rect.width(), bar_h));
                 painter.rect_filled(track_rect, bar_h * 0.5, p.surface_elevated);
                 if frac > 0.0 {
@@ -5482,24 +6674,38 @@ fn acoustic_timeline_scrubber(
                     let knob_c = pos2(playhead_x, track_rect.center().y);
                     painter.circle_filled(
                         knob_c,
-                        if hovered || dragging { 8.5 } else { 5.5 },
-                        Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), 55),
-                    );
-                    painter.circle_filled(
-                        knob_c,
-                        if hovered || dragging { 5.0 } else { 3.5 },
+                        if hovered || dragging { 5.2 } else { 3.5 },
                         p.text,
                     );
                 }
             }
         }
-    }
 
-    if active && hovered && let Some(px) = pointer_x {
-        let hover_frac = ((px - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
-        response
-            .clone()
-            .on_hover_text(format!("Seek to {}", format_duration(Some(hover_frac * duration))));
+        // Crisp floating seek time pill directly above cursor on hover/scrub (zero delayed OS tooltip!)
+        if active && (hovered || dragging) && let Some(px) = pointer_x {
+            let cx = px.clamp(bg_rect.left() + 2.0, bg_rect.right() - 2.0);
+            if !dragging && style != ProgressBarStyle::StudioRail {
+                painter.line_segment(
+                    [pos2(cx, bg_rect.top() + 2.0), pos2(cx, bg_rect.bottom() - 2.0)],
+                    Stroke::new(1.0, p.text.gamma_multiply(0.55)),
+                );
+            }
+            let hover_frac = ((cx - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+            let time_label = format_duration(Some(hover_frac * duration));
+            let top_painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::unique("seek_hover_time_pill"),
+            ));
+            let font = FontId::monospace(9.5);
+            let galley = top_painter.layout_no_wrap(time_label.clone(), font.clone(), p.text);
+            let pill_w = galley.size().x + 10.0;
+            let pill_h = 17.0;
+            let pill_cx = cx.clamp(bg_rect.left() + pill_w * 0.5, bg_rect.right() - pill_w * 0.5);
+            let pill_r = Rect::from_center_size(pos2(pill_cx, bg_rect.top() - 11.0), vec2(pill_w, pill_h));
+            top_painter.rect_filled(pill_r, 4.0, p.surface_elevated);
+            top_painter.rect_stroke(pill_r, 4.0, Stroke::new(1.0, p.selected_border), StrokeKind::Inside);
+            top_painter.text(pill_r.center(), Align2::CENTER_CENTER, time_label, font, p.text);
+        }
     }
 
     if active

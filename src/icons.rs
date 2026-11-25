@@ -42,12 +42,35 @@ pub enum Icon {
     Check,
     Plugin,
     Sliders,
+    Compact,
+    Expand,
+    List,
+}
+
+#[inline]
+pub fn snap_px(v: f32, ppp: f32) -> f32 {
+    (v * ppp).round() / ppp
+}
+
+#[inline]
+pub fn snap_pos(p: Pos2, ppp: f32) -> Pos2 {
+    pos2(snap_px(p.x, ppp), snap_px(p.y, ppp))
+}
+
+#[inline]
+pub fn snap_rect(r: Rect, ppp: f32) -> Rect {
+    Rect::from_min_max(snap_pos(r.min, ppp), snap_pos(r.max, ppp))
 }
 
 pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
-    let c = rect.center();
+    if color.a() == 0 {
+        return;
+    }
+    let ppp = painter.pixels_per_point().max(1.0);
+    let c = snap_pos(rect.center(), ppp);
     let s = rect.width().min(rect.height());
-    let stroke = Stroke::new((s * 0.11).clamp(1.2, 2.0), color);
+    let stroke_w = ((s * 0.115).clamp(1.25, 2.0) * ppp).round().max(1.0) / ppp;
+    let stroke = Stroke::new(stroke_w, color);
 
     match icon {
         Icon::Play => {
@@ -60,18 +83,27 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
         }
         Icon::Pause => {
-            let w = (s * 0.22).max(2.5);
-            let h = s * 0.64;
-            let gap = s * 0.14;
-            let left = Rect::from_center_size(pos2(c.x - gap - w * 0.5, c.y), vec2(w, h));
-            let right = Rect::from_center_size(pos2(c.x + gap + w * 0.5, c.y), vec2(w, h));
-            painter.rect_filled(left, 1.5, color);
-            painter.rect_filled(right, 1.5, color);
+            let w = snap_px((s * 0.22).max(2.5), ppp);
+            let h = snap_px(s * 0.64, ppp);
+            let gap = snap_px(s * 0.14, ppp);
+            let left = snap_rect(
+                Rect::from_center_size(pos2(c.x - gap - w * 0.5, c.y), vec2(w, h)),
+                ppp,
+            );
+            let right = snap_rect(
+                Rect::from_center_size(pos2(c.x + gap + w * 0.5, c.y), vec2(w, h)),
+                ppp,
+            );
+            painter.rect_filled(left, 1.2, color);
+            painter.rect_filled(right, 1.2, color);
         }
         Icon::Prev => {
             let r = s * 0.32;
-            let bar = Rect::from_center_size(pos2(c.x - r * 0.85, c.y), vec2(2.0, r * 1.9));
-            painter.rect_filled(bar, 1.0, color);
+            let bar = snap_rect(
+                Rect::from_center_size(pos2(c.x - r * 0.85, c.y), vec2(2.0, r * 1.9)),
+                ppp,
+            );
+            painter.rect_filled(bar, 0.8, color);
             let pts = vec![
                 pos2(c.x + r * 0.9, c.y - r * 0.95),
                 pos2(c.x - r * 0.55, c.y),
@@ -81,8 +113,11 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Next => {
             let r = s * 0.32;
-            let bar = Rect::from_center_size(pos2(c.x + r * 0.85, c.y), vec2(2.0, r * 1.9));
-            painter.rect_filled(bar, 1.0, color);
+            let bar = snap_rect(
+                Rect::from_center_size(pos2(c.x + r * 0.85, c.y), vec2(2.0, r * 1.9)),
+                ppp,
+            );
+            painter.rect_filled(bar, 0.8, color);
             let pts = vec![
                 pos2(c.x - r * 0.9, c.y - r * 0.95),
                 pos2(c.x + r * 0.55, c.y),
@@ -130,7 +165,7 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Repeat | Icon::RepeatOne => {
             let r = s * 0.36;
-            let loop_rect = Rect::from_center_size(c, vec2(r * 2.0, r * 1.25));
+            let loop_rect = snap_rect(Rect::from_center_size(c, vec2(r * 2.0, r * 1.25)), ppp);
             painter.rect_stroke(loop_rect, r * 0.35, stroke, StrokeKind::Middle);
             let tip = pos2(loop_rect.right() - r * 0.25, loop_rect.top());
             painter.line_segment([pos2(tip.x - r * 0.28, tip.y - r * 0.25), tip], stroke);
@@ -145,23 +180,74 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 );
             }
         }
-        Icon::HeartOutline | Icon::HeartFilled => {
-            let r = s * 0.34;
-            let pts = heart_points(c, r);
-            if icon == Icon::HeartFilled {
-                painter.add(Shape::closed_line(pts.clone(), Stroke::new(1.2, color)));
-                let fill_center = pos2(c.x, c.y + r * 0.1);
-                for i in 0..pts.len() {
-                    let next = (i + 1) % pts.len();
-                    painter.add(Shape::convex_polygon(
-                        vec![fill_center, pts[i], pts[next]],
-                        color,
-                        Stroke::NONE,
-                    ));
+        // Cusp-free geometric heart: ZERO miter spikes at cleft or tip at any DPI!
+        Icon::HeartFilled => {
+            let r = s * 0.36;
+            let lobe_r = r * 0.52;
+            let lobe_y = c.y - r * 0.22;
+            let lobe_dx = r * 0.45;
+            let left_c = pos2(c.x - lobe_dx, lobe_y);
+            let right_c = pos2(c.x + lobe_dx, lobe_y);
+            let tip = pos2(c.x, c.y + r * 0.96);
+
+            painter.circle_filled(left_c, lobe_r, color);
+            painter.circle_filled(right_c, lobe_r, color);
+            // Smooth convex body connecting outer flanks of both lobes to the bottom tip
+            let flank_y = lobe_y + lobe_r * 0.36;
+            let flank_x = lobe_dx + lobe_r * 0.93;
+            let body = vec![
+                pos2(c.x - flank_x, flank_y),
+                pos2(c.x, lobe_y - lobe_r * 0.15),
+                pos2(c.x + flank_x, flank_y),
+                tip,
+            ];
+            painter.add(Shape::convex_polygon(body, color, Stroke::NONE));
+        }
+        Icon::HeartOutline => {
+            // Draw heart outline as two smooth open polylines (left half + right half) meeting cleanly
+            // at the top cleft and bottom tip — completely eliminates closed_line 180° miter spikes!
+            let r = s * 0.36;
+            let lobe_r = r * 0.50;
+            let lobe_y = c.y - r * 0.20;
+            let lobe_dx = r * 0.44;
+            let cleft = pos2(c.x, lobe_y + lobe_r * 0.08);
+            let tip = pos2(c.x, c.y + r * 0.92);
+
+            let build_half = |sign: f32| -> Vec<Pos2> {
+                let lc = pos2(c.x + sign * lobe_dx, lobe_y);
+                let mut pts = Vec::with_capacity(14);
+                pts.push(cleft);
+                // Arc around lobe from inner cleft over top to outer lower flank
+                let steps = 9;
+                for i in 1..=steps {
+                    let t = i as f32 / steps as f32;
+                    // For right (+1): angle from PI -> 0 -> 0.28*PI (clockwise on screen y-down)
+                    let a = if sign > 0.0 {
+                        std::f32::consts::PI - t * (std::f32::consts::PI * 1.24)
+                    } else {
+                        t * (std::f32::consts::PI * 1.24)
+                    };
+                    let px = lc.x + lobe_r * a.cos();
+                    let py = lc.y - lobe_r * a.sin();
+                    pts.push(pos2(px, py));
                 }
-            } else {
-                painter.add(Shape::closed_line(pts, stroke));
-            }
+                // Smooth quadratic curve down to tip
+                let p0 = *pts.last().unwrap();
+                let ctrl = pos2(c.x + sign * (lobe_dx + lobe_r * 0.42), c.y + r * 0.48);
+                for i in 1..=4 {
+                    let t = i as f32 / 4.0;
+                    let mt = 1.0 - t;
+                    let px = mt * mt * p0.x + 2.0 * mt * t * ctrl.x + t * t * tip.x;
+                    let py = mt * mt * p0.y + 2.0 * mt * t * ctrl.y + t * t * tip.y;
+                    pts.push(pos2(px, py));
+                }
+                pts
+            };
+
+            let left_pts = build_half(-1.0);
+            let right_pts = build_half(1.0);
+            painter.add(Shape::line(left_pts, stroke));
+            painter.add(Shape::line(right_pts, stroke));
         }
         Icon::VolumeHigh | Icon::VolumeLow | Icon::VolumeMuted => {
             let r = s * 0.34;
@@ -194,40 +280,37 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Library => {
             let r = s * 0.36;
-            // Stacked books / library bars
-            let bw = (s * 0.15).max(1.8);
-            for (i, h) in [0.75_f32, 0.95, 0.82].iter().enumerate() {
-                let x = c.x - r * 0.85 + i as f32 * (bw + s * 0.13);
-                let bh = r * 1.9 * h;
+            let bw = snap_px((s * 0.15).max(1.8), ppp);
+            let gap = snap_px(s * 0.13, ppp);
+            let total_w = bw * 3.0 + gap * 2.0;
+            let start_x = snap_px(c.x - total_w * 0.5, ppp);
+            let bottom = snap_px(c.y + r * 0.85, ppp);
+            for (i, h) in [0.76_f32, 0.96, 0.82].iter().enumerate() {
+                let x = snap_px(start_x + i as f32 * (bw + gap), ppp);
+                let bh = snap_px(r * 1.85 * h, ppp);
                 painter.rect_filled(
-                    Rect::from_min_max(pos2(x, c.y + r * 0.85 - bh), pos2(x + bw, c.y + r * 0.85)),
-                    1.0,
+                    Rect::from_min_max(pos2(x, bottom - bh), pos2(x + bw, bottom)),
+                    0.8,
                     color,
                 );
             }
         }
-        Icon::Queue => {
+        Icon::Queue | Icon::List => {
             let r = s * 0.35;
             for offset in [-0.55_f32, 0.0, 0.55] {
-                let y = c.y + r * offset;
-                painter.line_segment([pos2(c.x - r * 0.9, y), pos2(c.x + r * 0.9, y)], stroke);
+                let y = snap_px(c.y + r * offset, ppp);
+                painter.line_segment(
+                    [pos2(snap_px(c.x - r * 0.88, ppp), y), pos2(snap_px(c.x + r * 0.88, ppp), y)],
+                    stroke,
+                );
             }
         }
         Icon::Playlist => {
             let r = s * 0.36;
-            painter.line_segment(
-                [pos2(c.x - r * 0.9, c.y - r * 0.55), pos2(c.x + r * 0.35, c.y - r * 0.55)],
-                stroke,
-            );
-            painter.line_segment(
-                [pos2(c.x - r * 0.9, c.y), pos2(c.x + r * 0.15, c.y)],
-                stroke,
-            );
-            painter.line_segment(
-                [pos2(c.x - r * 0.9, c.y + r * 0.55), pos2(c.x + r * 0.15, c.y + r * 0.55)],
-                stroke,
-            );
-            // Small note on right
+            for (dy, right_f) in [(-0.55_f32, 0.35_f32), (0.0, 0.15), (0.55, 0.15)] {
+                let y = snap_px(c.y + r * dy, ppp);
+                painter.line_segment([pos2(c.x - r * 0.9, y), pos2(c.x + r * right_f, y)], stroke);
+            }
             let head = pos2(c.x + r * 0.55, c.y + r * 0.45);
             painter.circle_filled(head, r * 0.24, color);
             painter.line_segment(
@@ -237,21 +320,21 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Folder | Icon::FolderPlus => {
             let r = s * 0.36;
-            let body = Rect::from_min_max(
-                pos2(c.x - r, c.y - r * 0.45),
-                pos2(c.x + r, c.y + r * 0.8),
+            let body = snap_rect(
+                Rect::from_min_max(pos2(c.x - r, c.y - r * 0.42), pos2(c.x + r, c.y + r * 0.8)),
+                ppp,
             );
-            painter.rect_stroke(body, 2.0, stroke, StrokeKind::Middle);
+            painter.rect_stroke(body, 1.8, stroke, StrokeKind::Middle);
             let tab_pts = vec![
-                pos2(c.x - r, c.y - r * 0.45),
-                pos2(c.x - r, c.y - r * 0.82),
-                pos2(c.x - r * 0.18, c.y - r * 0.82),
-                pos2(c.x + r * 0.05, c.y - r * 0.45),
+                pos2(body.left(), body.top()),
+                pos2(body.left(), snap_px(c.y - r * 0.80, ppp)),
+                pos2(snap_px(c.x - r * 0.18, ppp), snap_px(c.y - r * 0.80, ppp)),
+                pos2(snap_px(c.x + r * 0.05, ppp), body.top()),
             ];
             painter.add(Shape::line(tab_pts, stroke));
             if icon == Icon::FolderPlus {
-                let pr = r * 0.35;
-                let pc = pos2(c.x, c.y + r * 0.18);
+                let pr = r * 0.34;
+                let pc = snap_pos(pos2(c.x, c.y + r * 0.19), ppp);
                 painter.line_segment([pos2(pc.x - pr, pc.y), pos2(pc.x + pr, pc.y)], stroke);
                 painter.line_segment([pos2(pc.x, pc.y - pr), pos2(pc.x, pc.y + pr)], stroke);
             }
@@ -309,9 +392,12 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 [pos2(c.x - r * 0.35, c.y - r * 0.85), pos2(c.x + r * 0.35, c.y - r * 0.85)],
                 stroke,
             );
-            let body = Rect::from_min_max(
-                pos2(c.x - r * 0.62, c.y - r * 0.55),
-                pos2(c.x + r * 0.62, c.y + r * 0.85),
+            let body = snap_rect(
+                Rect::from_min_max(
+                    pos2(c.x - r * 0.62, c.y - r * 0.55),
+                    pos2(c.x + r * 0.62, c.y + r * 0.85),
+                ),
+                ppp,
             );
             painter.rect_stroke(body, 1.5, stroke, StrokeKind::Middle);
             painter.line_segment(
@@ -332,14 +418,14 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Tag => {
             let r = s * 0.36;
             let pts = vec![
-                pos2(c.x - r * 0.85, c.y - r * 0.85),
-                pos2(c.x + r * 0.05, c.y - r * 0.85),
-                pos2(c.x + r * 0.88, c.y + r * 0.02),
-                pos2(c.x + r * 0.02, c.y + r * 0.88),
-                pos2(c.x - r * 0.85, c.y + r * 0.05),
+                pos2(c.x - r * 0.82, c.y - r * 0.82),
+                pos2(c.x + r * 0.05, c.y - r * 0.82),
+                pos2(c.x + r * 0.86, c.y + r * 0.02),
+                pos2(c.x + r * 0.02, c.y + r * 0.86),
+                pos2(c.x - r * 0.82, c.y + r * 0.05),
             ];
             painter.add(Shape::closed_line(pts, stroke));
-            painter.circle_filled(pos2(c.x - r * 0.4, c.y - r * 0.4), (s * 0.08).max(1.2), color);
+            painter.circle_filled(pos2(c.x - r * 0.38, c.y - r * 0.38), (s * 0.08).max(1.2), color);
         }
         Icon::Settings => {
             let r = s * 0.35;
@@ -408,25 +494,25 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Device => {
             let r = s * 0.34;
-            let box_rect = Rect::from_center_size(c, vec2(r * 1.45, r * 2.0));
-            painter.rect_stroke(box_rect, 2.5, stroke, StrokeKind::Middle);
-            painter.circle_filled(pos2(c.x, c.y - r * 0.45), r * 0.15, color);
-            painter.circle_stroke(pos2(c.x, c.y + r * 0.32), r * 0.35, stroke);
+            let box_rect = snap_rect(Rect::from_center_size(c, vec2(r * 1.45, r * 2.0)), ppp);
+            painter.rect_stroke(box_rect, 2.2, stroke, StrokeKind::Middle);
+            painter.circle_filled(pos2(c.x, c.y - r * 0.45), r * 0.16, color);
+            painter.circle_stroke(pos2(c.x, c.y + r * 0.32), r * 0.34, stroke);
         }
         Icon::Visualizer => {
             let r = s * 0.38;
             let heights = [0.35_f32, 0.72, 1.0, 0.62, 0.85];
-            let bar_w = (s * 0.10).max(1.5);
-            let gap = (s * 0.075).max(1.2);
+            let bar_w = snap_px((s * 0.10).max(1.5), ppp);
+            let gap = snap_px((s * 0.075).max(1.2), ppp);
             let total_w = heights.len() as f32 * bar_w + (heights.len() - 1) as f32 * gap;
-            let start_x = c.x - total_w * 0.5;
-            let bottom = c.y + r;
+            let start_x = snap_px(c.x - total_w * 0.5, ppp);
+            let bottom = snap_px(c.y + r, ppp);
             for (i, h) in heights.iter().enumerate() {
-                let bh = r * 1.9 * h;
-                let x = start_x + i as f32 * (bar_w + gap);
+                let bh = snap_px(r * 1.9 * h, ppp);
+                let x = snap_px(start_x + i as f32 * (bar_w + gap), ppp);
                 painter.rect_filled(
                     Rect::from_min_max(pos2(x, bottom - bh), pos2(x + bar_w, bottom)),
-                    1.0,
+                    0.8,
                     color,
                 );
             }
@@ -451,30 +537,50 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Plugin => {
             let r = s * 0.34;
-            let body = Rect::from_min_max(
-                pos2(c.x - r * 0.75, c.y - r * 0.15),
-                pos2(c.x + r * 0.75, c.y + r * 0.65),
+            let body = snap_rect(
+                Rect::from_min_max(pos2(c.x - r * 0.75, c.y - r * 0.15), pos2(c.x + r * 0.75, c.y + r * 0.65)),
+                ppp,
             );
             painter.rect_stroke(body, 2.0, stroke, StrokeKind::Middle);
-            // Two top prongs
             painter.line_segment(
-                [pos2(c.x - r * 0.35, c.y - r * 0.85), pos2(c.x - r * 0.35, c.y - r * 0.15)],
+                [pos2(c.x - r * 0.35, c.y - r * 0.85), pos2(c.x - r * 0.35, body.top())],
                 stroke,
             );
             painter.line_segment(
-                [pos2(c.x + r * 0.35, c.y - r * 0.85), pos2(c.x + r * 0.35, c.y - r * 0.15)],
+                [pos2(c.x + r * 0.35, c.y - r * 0.85), pos2(c.x + r * 0.35, body.top())],
                 stroke,
             );
-            // Cord stem
-            painter.line_segment([pos2(c.x, c.y + r * 0.65), pos2(c.x, c.y + r * 0.98)], stroke);
+            painter.line_segment([pos2(c.x, body.bottom()), pos2(c.x, c.y + r * 0.98)], stroke);
         }
         Icon::Sliders => {
             let r = s * 0.36;
             for (dy, knob_x) in [(-0.55_f32, -0.25_f32), (0.0, 0.35), (0.55, -0.1)] {
-                let y = c.y + r * dy;
+                let y = snap_px(c.y + r * dy, ppp);
                 painter.line_segment([pos2(c.x - r * 0.9, y), pos2(c.x + r * 0.9, y)], stroke);
                 painter.circle_filled(pos2(c.x + r * knob_x, y), (s * 0.11).max(1.8), color);
             }
+        }
+        Icon::Compact => {
+            // Outer window frame with compact mini-player bar highlighted at bottom
+            let r = s * 0.37;
+            let outer = snap_rect(Rect::from_center_size(c, vec2(r * 2.0, r * 1.75)), ppp);
+            painter.rect_stroke(outer, 2.0, stroke, StrokeKind::Middle);
+            let mini = snap_rect(
+                Rect::from_min_max(
+                    pos2(outer.left() + r * 0.32, outer.center().y + r * 0.05),
+                    pos2(outer.right() - r * 0.32, outer.bottom() - r * 0.28),
+                ),
+                ppp,
+            );
+            painter.rect_filled(mini, 1.0, color);
+        }
+        Icon::Expand => {
+            // Full window with sidebar + library grid
+            let r = s * 0.37;
+            let outer = snap_rect(Rect::from_center_size(c, vec2(r * 2.0, r * 1.75)), ppp);
+            painter.rect_stroke(outer, 2.0, stroke, StrokeKind::Middle);
+            let split_x = snap_px(outer.left() + outer.width() * 0.36, ppp);
+            painter.line_segment([pos2(split_x, outer.top()), pos2(split_x, outer.bottom())], stroke);
         }
     }
 }
@@ -498,22 +604,6 @@ fn paint_arc(
     painter.add(Shape::line(pts, stroke));
 }
 
-fn heart_points(center: Pos2, r: f32) -> Vec<Pos2> {
-    let steps = 28;
-    let scale = r / 15.5;
-    (0..steps)
-        .map(|i| {
-            let t = (i as f32 / steps as f32) * std::f32::consts::TAU;
-            let x = 16.0 * t.sin().powi(3);
-            let y = -(13.0 * t.cos()
-                - 5.0 * (2.0 * t).cos()
-                - 2.0 * (3.0 * t).cos()
-                - (4.0 * t).cos());
-            pos2(center.x + x * scale, center.y + y * scale - r * 0.08)
-        })
-        .collect()
-}
-
 /// Uniform crisp aligned checkbox (exact 15x15px square, centered inside `cell_rect`).
 pub fn paint_checkbox(
     painter: &Painter,
@@ -523,7 +613,8 @@ pub fn paint_checkbox(
     hovered: bool,
     palette: &Palette,
 ) {
-    let box_rect = Rect::from_center_size(cell_rect.center(), Vec2::splat(15.0));
+    let ppp = painter.pixels_per_point().max(1.0);
+    let box_rect = snap_rect(Rect::from_center_size(cell_rect.center(), Vec2::splat(15.0)), ppp);
     let (fill, border) = if checked || indeterminate {
         (palette.accent, palette.accent)
     } else if hovered {
@@ -532,7 +623,7 @@ pub fn paint_checkbox(
         (palette.surface, palette.border_strong)
     };
     painter.rect_filled(box_rect, 3.5, fill);
-    painter.rect_stroke(box_rect, 3.5, Stroke::new(1.1, border), StrokeKind::Inside);
+    painter.rect_stroke(box_rect, 3.5, Stroke::new(1.0, border), StrokeKind::Inside);
 
     if checked {
         let c = box_rect.center();
@@ -548,31 +639,44 @@ pub fn paint_checkbox(
     }
 }
 
-/// Paints an animated 3-bar studio equalizer indicator for the currently playing track.
-pub fn paint_playing_bars(painter: &Painter, rect: Rect, time: f64, playing: bool, color: Color32) {
+/// Paints a crisp 3-bar playing indicator that reacts to real audio energy when playing.
+pub fn paint_playing_bars(
+    painter: &Painter,
+    rect: Rect,
+    time: f64,
+    playing: bool,
+    audio_level: f32,
+    color: Color32,
+) {
+    let ppp = painter.pixels_per_point().max(1.0);
     let w = rect.width();
     let h = rect.height();
-    let bar_w = (w * 0.22).max(2.0);
-    let gap = (w - bar_w * 3.0) / 2.0;
-    let phases = [0.0_f64, 2.1, 4.3];
-    let speeds = [7.2_f64, 9.5, 6.1];
+    let bar_w = snap_px((w * 0.24).max(2.0), ppp);
+    let gap = snap_px((w - bar_w * 3.0) / 2.0, ppp);
+    let phases = [0.0_f64, 2.0, 4.1];
+    let speeds = [5.8_f64, 7.6, 4.9];
+    let drive = if audio_level > 0.02 {
+        (0.35 + audio_level * 0.85).clamp(0.35, 1.0)
+    } else {
+        0.55
+    };
 
     for i in 0..3 {
         let level = if playing {
             let wave = ((time * speeds[i] + phases[i]).sin() * 0.5 + 0.5) as f32;
-            let wave2 = ((time * (speeds[i] * 0.57) + phases[i] * 1.7).cos() * 0.5 + 0.5) as f32;
-            0.22 + 0.78 * (wave * 0.65 + wave2 * 0.35)
+            (0.20 + 0.80 * wave * drive).clamp(0.18, 1.0)
         } else {
             0.24
         };
-        let bh = (h * level).max(2.5);
-        let x = rect.left() + i as f32 * (bar_w + gap);
-        let bar = Rect::from_min_max(pos2(x, rect.bottom() - bh), pos2(x + bar_w, rect.bottom()));
-        painter.rect_filled(bar, 1.0, color);
+        let bh = snap_px((h * level).max(2.0), ppp);
+        let x = snap_px(rect.left() + i as f32 * (bar_w + gap), ppp);
+        let bottom = snap_px(rect.bottom(), ppp);
+        let bar = Rect::from_min_max(pos2(x, bottom - bh), pos2(x + bar_w, bottom));
+        painter.rect_filled(bar, 0.8, color);
     }
 }
 
-/// Paints the unified TxPlayer visualizer emblem (matches AppIcon.svg — 9 precision bars + peak caps + reflection).
+/// Paints the unified TxPlayer visualizer emblem (fallback if PNG texture unavailable).
 pub fn paint_brand_mark(painter: &Painter, rect: Rect, palette: &Palette) {
     let rounding = (rect.width() * 0.22).clamp(6.0, 14.0);
     let bg = if palette.is_light {
@@ -589,18 +693,12 @@ pub fn paint_brand_mark(painter: &Painter, rect: Rect, palette: &Palette) {
     );
 
     let inner = rect.shrink(rect.width() * 0.16);
-    // Exact 9-bar proportions from assets/AppIcon.svg
     let heights = [0.33_f32, 0.56, 0.82, 0.67, 1.0, 0.77, 0.89, 0.50, 0.28];
     let n = heights.len();
     let gap = (inner.width() * 0.045).max(0.8);
     let bar_w = ((inner.width() - gap * (n - 1) as f32) / n as f32).max(1.4);
     let horizon = inner.bottom() - inner.height() * 0.24;
     let max_bar_h = (horizon - inner.top() - inner.height() * 0.08).max(4.0);
-
-    painter.line_segment(
-        [pos2(inner.left(), horizon + 1.0), pos2(inner.right(), horizon + 1.0)],
-        Stroke::new(0.8, palette.accent.gamma_multiply(0.32)),
-    );
 
     for (i, &h) in heights.iter().enumerate() {
         let x = inner.left() + i as f32 * (bar_w + gap);
@@ -617,26 +715,6 @@ pub fn paint_brand_mark(painter: &Painter, rect: Rect, palette: &Palette) {
             Rect::from_min_max(pos2(x, top_y), pos2(x + bar_w, horizon)),
             bar_w * 0.48,
             color,
-        );
-        // Floating peak caps on bars 2, 4, 6 (matching AppIcon.svg)
-        if matches!(i, 2 | 4 | 6) {
-            let cap_h = (bar_w * 0.45).clamp(1.0, 2.2);
-            let cap_y = (top_y - cap_h - 1.4).max(inner.top());
-            painter.rect_filled(
-                Rect::from_min_max(pos2(x, cap_y), pos2(x + bar_w, cap_y + cap_h)),
-                cap_h * 0.5,
-                color,
-            );
-        }
-        // Soft acoustic reflection below horizon
-        let refl_h = (inner.height() * 0.20 * h).max(1.2);
-        painter.rect_filled(
-            Rect::from_min_max(
-                pos2(x, horizon + 2.0),
-                pos2(x + bar_w, (horizon + 2.0 + refl_h).min(inner.bottom())),
-            ),
-            bar_w * 0.4,
-            Color32::from_rgba_unmultiplied(palette.accent.r(), palette.accent.g(), palette.accent.b(), 65),
         );
     }
 }
@@ -712,7 +790,7 @@ pub fn icon_button(
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered();
         if hovered {
-            ui.painter().rect_filled(rect, 6.0, hover_bg);
+            ui.painter().rect_filled(rect, 5.0, hover_bg);
         }
         let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icon_size));
         paint_icon(

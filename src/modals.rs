@@ -27,6 +27,7 @@ use crate::visualizer::VisualizerMode;
 pub enum ProgressBarStyle {
     #[default]
     AcousticWaveform,
+    PrecisionBars,
     StudioRail,
 }
 
@@ -521,6 +522,140 @@ pub fn pill_button(
     response
 }
 
+/// Renders a crisp, theme-aligned modal window with a slim 28px custom header bar
+/// (replaces egui's oversized default title bar). Dragging anywhere on the window moves it.
+#[allow(clippy::too_many_arguments)]
+pub fn themed_modal_window(
+    context: &egui::Context,
+    id: &str,
+    title: &str,
+    icon: Icon,
+    subtitle_right: Option<&str>,
+    default_size: [f32; 2],
+    min_size: Option<[f32; 2]>,
+    resizable: bool,
+    open: &mut bool,
+    palette: &Palette,
+    content: impl FnOnce(&mut Ui),
+) {
+    if !*open {
+        return;
+    }
+    let center = context.content_rect().center();
+    let default_pos = pos2(
+        (center.x - default_size[0] * 0.5).max(16.0),
+        (center.y - default_size[1] * 0.5).max(20.0),
+    );
+    let mut close_clicked = false;
+    let frame = Frame::new()
+        .fill(palette.panel)
+        .stroke(Stroke::new(1.0, palette.border_strong))
+        .corner_radius(8.0)
+        .inner_margin(Margin::ZERO)
+        .shadow(egui::Shadow {
+            offset: [0, 8],
+            blur: 20,
+            spread: 0,
+            color: Color32::from_rgba_unmultiplied(0, 0, 0, if palette.is_light { 45 } else { 135 }),
+        });
+
+    let mut win = egui::Window::new(id)
+        .id(egui::Id::unique(id))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(resizable)
+        .frame(frame)
+        .default_pos(default_pos)
+        .default_size(default_size);
+    if let Some(ms) = min_size {
+        win = win.min_size(ms);
+    }
+
+    win.show(context, |ui| {
+        // Slim 28px custom title strip
+        let hdr_h = 28.0;
+        let avail_w = ui.available_width();
+        let (hdr_rect, _) = ui.allocate_exact_size(vec2(avail_w, hdr_h), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(
+            hdr_rect,
+            egui::CornerRadius {
+                nw: 8,
+                ne: 8,
+                sw: 0,
+                se: 0,
+            },
+            palette.sidebar,
+        );
+        p.line_segment(
+            [
+                pos2(hdr_rect.left(), hdr_rect.bottom()),
+                pos2(hdr_rect.right(), hdr_rect.bottom()),
+            ],
+            Stroke::new(1.0, palette.border),
+        );
+
+        let icon_rect = Rect::from_center_size(
+            pos2(hdr_rect.left() + 16.0, hdr_rect.center().y),
+            Vec2::splat(13.0),
+        );
+        icons::paint_icon(p, icon_rect, icon, palette.accent);
+
+        p.text(
+            pos2(hdr_rect.left() + 28.0, hdr_rect.center().y),
+            Align2::LEFT_CENTER,
+            title,
+            FontId::proportional(12.0),
+            palette.text,
+        );
+
+        let close_rect = Rect::from_center_size(
+            pos2(hdr_rect.right() - 15.0, hdr_rect.center().y),
+            Vec2::splat(20.0),
+        );
+        let close_resp = ui
+            .interact(close_rect, ui.scope_id().with((id, "hdr_close")), Sense::click())
+            .on_hover_text("Close (Esc)");
+        if close_resp.hovered() {
+            ui.painter().rect_filled(close_rect, 4.0, palette.hover);
+        }
+        icons::paint_icon(
+            ui.painter(),
+            Rect::from_center_size(close_rect.center(), Vec2::splat(9.5)),
+            Icon::Close,
+            if close_resp.hovered() {
+                palette.text
+            } else {
+                palette.muted
+            },
+        );
+        if close_resp.clicked() {
+            close_clicked = true;
+        }
+
+        if let Some(sub) = subtitle_right {
+            ui.painter().text(
+                pos2(close_rect.left() - 8.0, hdr_rect.center().y),
+                Align2::RIGHT_CENTER,
+                sub,
+                FontId::monospace(9.5),
+                palette.faint,
+            );
+        }
+
+        // Body content with crisp padding
+        Frame::new()
+            .inner_margin(Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                content(ui);
+            });
+    });
+
+    if close_clicked {
+        *open = false;
+    }
+}
+
 pub struct SettingsViewActions {
     pub theme_changed: Option<ThemeId>,
     pub device_changed: Option<Option<String>>,
@@ -567,14 +702,19 @@ pub fn show_settings_window(
     }
 
     let mut is_open = *open;
-    let center = context.content_rect().center();
-    egui::Window::new("Settings")
-        .open(&mut is_open)
-        .collapsible(false)
-        .resizable(false)
-        .default_width(640.0)
-        .default_pos(pos2((center.x - 320.0).max(24.0), (center.y - 255.0).max(36.0)))
-        .show(context, |ui| {
+    let ver_badge = format!("v{}", env!("CARGO_PKG_VERSION"));
+    themed_modal_window(
+        context,
+        "settings_modal",
+        "Settings",
+        Icon::Settings,
+        Some(&ver_badge),
+        [636.0, 498.0],
+        None,
+        false,
+        &mut is_open,
+        palette,
+        |ui| {
             // Top segmented tab bar
             ui.horizontal(|ui| {
                 for (t, label, icon) in [
@@ -689,39 +829,30 @@ pub fn show_settings_window(
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("Track Progress Style:")
+                            RichText::new("Track Progress:")
                                 .size(11.5)
                                 .color(palette.text_secondary),
                         );
-                        if pill_button(
-                            ui,
-                            "Acoustic Waveform",
-                            None,
-                            if *progress_style == ProgressBarStyle::AcousticWaveform {
-                                PillStyle::Active
-                            } else {
-                                PillStyle::Secondary
-                            },
-                            palette,
-                        )
-                        .clicked()
-                        {
-                            *progress_style = ProgressBarStyle::AcousticWaveform;
-                        }
-                        if pill_button(
-                            ui,
-                            "Studio Rail",
-                            None,
-                            if *progress_style == ProgressBarStyle::StudioRail {
-                                PillStyle::Active
-                            } else {
-                                PillStyle::Secondary
-                            },
-                            palette,
-                        )
-                        .clicked()
-                        {
-                            *progress_style = ProgressBarStyle::StudioRail;
+                        for (lbl, st) in [
+                            ("Waveform", ProgressBarStyle::AcousticWaveform),
+                            ("Uniform Bars", ProgressBarStyle::PrecisionBars),
+                            ("Minimal Rail", ProgressBarStyle::StudioRail),
+                        ] {
+                            if pill_button(
+                                ui,
+                                lbl,
+                                None,
+                                if *progress_style == st {
+                                    PillStyle::Active
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                palette,
+                            )
+                            .clicked()
+                            {
+                                *progress_style = st;
+                            }
                         }
                     });
                     ui.add_space(4.0);
@@ -766,14 +897,14 @@ pub fn show_settings_window(
                 SettingsTab::Visualizer => {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("CONCERT VISUALIZATION & PIANO ENGINE")
+                            RichText::new("VISUALIZER")
                                 .size(10.0)
                                 .strong()
                                 .color(palette.faint),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
-                                RichText::new(format!("DSP: {:.2} ms/frame", vis_compute_ms))
+                                RichText::new(format!("{:.2} ms/frame", vis_compute_ms))
                                     .size(9.5)
                                     .monospace()
                                     .color(palette.accent),
@@ -960,10 +1091,10 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // REAL-TIME AUDIOPHILE DSP SUITE (EQ + Crossfeed + Limiter)
+                        // DSP & Equalizer
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("REAL-TIME AUDIOPHILE DSP SUITE (LOCK-FREE 64-BIT BIQUAD)")
+                                RichText::new("EQUALIZER & CROSSFEED")
                                     .size(10.0)
                                     .strong()
                                     .color(palette.faint),
@@ -1001,7 +1132,7 @@ pub fn show_settings_window(
                 SettingsTab::Plugins => {
                     ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
                         ui.label(
-                            RichText::new("PLUGGABLE MODULES & RUNTIME STATUS (100% FREE & LOCAL)")
+                            RichText::new("MODULES & TOOLS")
                                 .size(10.0)
                                 .strong()
                                 .color(palette.faint),
@@ -1284,13 +1415,18 @@ pub fn show_tag_editor_window(
         save_targets = Some(state.target_ids.clone());
     }
 
-    egui::Window::new(title)
-        .open(&mut is_open)
-        .collapsible(false)
-        .resizable(true)
-        .default_size([740.0, 575.0])
-        .min_size([640.0, 480.0])
-        .show(context, |ui| {
+    themed_modal_window(
+        context,
+        "tag_editor_modal",
+        &title,
+        Icon::Tag,
+        Some("ESC to close"),
+        [740.0, 565.0],
+        Some([640.0, 460.0]),
+        true,
+        &mut is_open,
+        palette,
+        |ui| {
             // Top Hash & File Identity bar
             if let Some(track) = &state.primary_track {
                 Frame::new()
@@ -1696,12 +1832,18 @@ pub fn show_track_info_window(
     let mut open = true;
     let mut action = None;
 
-    egui::Window::new("Track Inspector")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .default_width(480.0)
-        .show(context, |ui| {
+    themed_modal_window(
+        context,
+        "track_inspector_modal",
+        "Track Info",
+        Icon::Info,
+        None,
+        [480.0, 390.0],
+        None,
+        false,
+        &mut open,
+        palette,
+        |ui| {
             ui.horizontal(|ui| {
                 cover_paint(ui, 112.0);
                 ui.add_space(10.0);
@@ -1845,12 +1987,18 @@ pub fn show_folders_window(
     let mut is_open = *open;
     let mut action = None;
 
-    egui::Window::new("Manage Music Directories")
-        .open(&mut is_open)
-        .collapsible(false)
-        .resizable(true)
-        .default_size([560.0, 320.0])
-        .show(context, |ui| {
+    themed_modal_window(
+        context,
+        "folders_modal",
+        "Music Directories",
+        Icon::Folder,
+        None,
+        [560.0, 320.0],
+        Some([460.0, 260.0]),
+        true,
+        &mut is_open,
+        palette,
+        |ui| {
             ui.label(
                 RichText::new(
                     "Directories are indexed in place — TxPlayer never moves or deletes your audio files.",
@@ -2217,52 +2365,82 @@ fn anchored_popover(
         .show(context, |ui| {
             Frame::new()
                 .fill(palette.panel)
-                .stroke(Stroke::new(1.2, palette.selected_border))
-                .corner_radius(10.0)
-                .inner_margin(Margin::symmetric(12, 10))
+                .stroke(Stroke::new(1.0, palette.selected_border))
+                .corner_radius(8.0)
+                .inner_margin(Margin::ZERO)
                 .shadow(egui::Shadow {
-                    offset: [0, 8],
-                    blur: 22,
-                    spread: 1,
-                    color: Color32::from_rgba_unmultiplied(0, 0, 0, 145),
+                    offset: [0, 6],
+                    blur: 18,
+                    spread: 0,
+                    color: Color32::from_rgba_unmultiplied(
+                        0,
+                        0,
+                        0,
+                        if palette.is_light { 45 } else { 130 },
+                    ),
                 })
                 .show(ui, |ui| {
-                    ui.set_width(width - 24.0);
-                    // Compact themed header (no giant OS grey Window title bar!)
-                    ui.horizontal(|ui| {
-                        let (ir, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
-                        icons::paint_icon(ui.painter(), ir, icon, palette.accent);
-                        ui.label(
-                            RichText::new(title)
-                                .size(12.5)
-                                .strong()
-                                .color(palette.text),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if icons::icon_button(
-                                ui,
-                                Vec2::splat(20.0),
-                                Icon::Close,
-                                10.0,
-                                palette.muted,
-                                palette.text,
-                                palette.hover,
-                                "Close (Esc)",
-                            )
-                            .clicked()
-                            {
-                                close_clicked = true;
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-                    let sep = ui.available_rect_before_wrap();
+                    ui.set_width(width);
+                    // Slim 26px popover header
+                    let (hdr_rect, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+                    ui.painter().rect_filled(
+                        hdr_rect,
+                        egui::CornerRadius {
+                            nw: 8,
+                            ne: 8,
+                            sw: 0,
+                            se: 0,
+                        },
+                        palette.sidebar,
+                    );
                     ui.painter().line_segment(
-                        [pos2(sep.left(), sep.top()), pos2(sep.right(), sep.top())],
+                        [
+                            pos2(hdr_rect.left(), hdr_rect.bottom()),
+                            pos2(hdr_rect.right(), hdr_rect.bottom()),
+                        ],
                         Stroke::new(1.0, palette.border),
                     );
-                    ui.add_space(6.0);
-                    content(ui);
+                    let ir = Rect::from_center_size(
+                        pos2(hdr_rect.left() + 14.0, hdr_rect.center().y),
+                        Vec2::splat(12.5),
+                    );
+                    icons::paint_icon(ui.painter(), ir, icon, palette.accent);
+                    ui.painter().text(
+                        pos2(hdr_rect.left() + 25.0, hdr_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        title,
+                        FontId::proportional(11.5),
+                        palette.text,
+                    );
+                    let close_r = Rect::from_center_size(
+                        pos2(hdr_rect.right() - 14.0, hdr_rect.center().y),
+                        Vec2::splat(18.0),
+                    );
+                    let close_resp = ui
+                        .interact(close_r, ui.scope_id().with((id, "pop_close")), Sense::click())
+                        .on_hover_text("Close (Esc)");
+                    if close_resp.hovered() {
+                        ui.painter().rect_filled(close_r, 4.0, palette.hover);
+                    }
+                    icons::paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(close_r.center(), Vec2::splat(9.0)),
+                        Icon::Close,
+                        if close_resp.hovered() {
+                            palette.text
+                        } else {
+                            palette.muted
+                        },
+                    );
+                    if close_resp.clicked() {
+                        close_clicked = true;
+                    }
+
+                    Frame::new()
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            content(ui);
+                        });
                 });
         });
 
@@ -2647,6 +2825,7 @@ pub enum PaletteCommand {
     ApplyEqPreset(EqPreset),
     ToggleDsp,
     ToggleVisualizer,
+    ToggleCompactMode,
     EditCurrentTags,
     OpenSettings(SettingsTab),
     AddFolder,

@@ -24,15 +24,26 @@ pub const MOD_SHORT: &str = "Ctrl+";
 pub fn reveal_in_file_manager(path: &Path) {
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open").arg("-R").arg(path).spawn();
+        if path.is_dir() {
+            let _ = Command::new("open").arg(path).spawn();
+        } else {
+            let _ = Command::new("open").arg("-R").arg(path).spawn();
+        }
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+
+        // Normalize slashes and strip any verbatim `\\?\` prefix that breaks explorer.exe /select
+        let raw = path.to_string_lossy().replace('/', "\\");
+        let clean = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
         if path.is_dir() {
-            let _ = Command::new("explorer").arg(path).spawn();
+            let _ = Command::new("explorer.exe").arg(clean).spawn();
         } else {
-            let _ = Command::new("explorer")
-                .arg(format!("/select,{}", path.display()))
+            // `raw_arg` passes `/select,"C:\path with spaces\file.flac"` verbatim so
+            // explorer.exe selects the exact file instead of misparsing quoted `/select,`.
+            let _ = Command::new("explorer.exe")
+                .raw_arg(format!("/select,\"{clean}\""))
                 .spawn();
         }
     }
