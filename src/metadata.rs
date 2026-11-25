@@ -30,6 +30,30 @@ pub struct Track {
     pub codec: String,
     pub nominal_bitrate: Option<u32>,
     pub cover_path: Option<PathBuf>,
+    // CUE sheet virtual track boundaries (None for normal standalone files)
+    #[serde(default)]
+    pub cue_start: Option<f64>,
+    #[serde(default)]
+    pub cue_end: Option<f64>,
+    // ReplayGain / EBU R128 loudness metadata
+    #[serde(default)]
+    pub rg_track_gain_db: Option<f32>,
+    #[serde(default)]
+    pub rg_track_peak: Option<f32>,
+    #[serde(default)]
+    pub rg_album_gain_db: Option<f32>,
+    #[serde(default)]
+    pub rg_album_peak: Option<f32>,
+    // Embedded synced/unsynced lyrics (sidecar .lrc also supported dynamically)
+    #[serde(default)]
+    pub lyrics: Option<String>,
+    // Listening stats & user rating (0..=5)
+    #[serde(default)]
+    pub play_count: u32,
+    #[serde(default)]
+    pub rating: u8,
+    #[serde(default)]
+    pub added_at: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +135,11 @@ struct Tags {
     disc_number: Option<u32>,
     year: Option<String>,
     genre: Option<String>,
+    rg_track_gain_db: Option<f32>,
+    rg_track_peak: Option<f32>,
+    rg_album_gain_db: Option<f32>,
+    rg_album_peak: Option<f32>,
+    lyrics: Option<String>,
 }
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -126,6 +155,12 @@ pub fn is_supported(path: &Path) -> bool {
             SUPPORTED_EXTENSIONS.contains(&lower.as_str())
         })
         .unwrap_or(false)
+}
+
+pub fn is_cue_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
 }
 
 pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
@@ -178,6 +213,11 @@ pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
         .and_then(|(data, media_type)| save_cover(cover_directory, id, &data, &media_type).ok())
         .or_else(|| find_sidecar_cover(path));
 
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     Ok(Track {
         id,
         path: path.to_path_buf(),
@@ -196,6 +236,16 @@ pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
         codec: codec_name(parameters.codec).into(),
         nominal_bitrate: None,
         cover_path,
+        cue_start: None,
+        cue_end: None,
+        rg_track_gain_db: tags.rg_track_gain_db,
+        rg_track_peak: tags.rg_track_peak,
+        rg_album_gain_db: tags.rg_album_gain_db,
+        rg_album_peak: tags.rg_album_peak,
+        lyrics: tags.lyrics,
+        play_count: 0,
+        rating: 0,
+        added_at: now_unix,
     })
 }
 
@@ -240,9 +290,56 @@ fn read_tags(tags: &[symphonia::core::meta::Tag], output: &mut Tags) {
             Some(StandardTagKey::DiscNumber) => output.disc_number = parse_number(&value),
             Some(StandardTagKey::Date | StandardTagKey::OriginalDate) => output.year = Some(value),
             Some(StandardTagKey::Genre) => output.genre = Some(value),
-            _ => {}
+            Some(StandardTagKey::ReplayGainTrackGain) => {
+                output.rg_track_gain_db = parse_gain_db(&value);
+            }
+            Some(StandardTagKey::ReplayGainTrackPeak) => {
+                output.rg_track_peak = value.parse::<f32>().ok();
+            }
+            Some(StandardTagKey::ReplayGainAlbumGain) => {
+                output.rg_album_gain_db = parse_gain_db(&value);
+            }
+            Some(StandardTagKey::ReplayGainAlbumPeak) => {
+                output.rg_album_peak = value.parse::<f32>().ok();
+            }
+            Some(StandardTagKey::Lyrics) => output.lyrics = Some(value),
+            _ => {
+                // Handle custom Vorbis/ID3/MP4 ReplayGain, R128 & Lyrics keys
+                let k = tag.key.to_ascii_uppercase();
+                match k.as_str() {
+                    "REPLAYGAIN_TRACK_GAIN" => output.rg_track_gain_db = parse_gain_db(&value),
+                    "REPLAYGAIN_TRACK_PEAK" => output.rg_track_peak = value.parse::<f32>().ok(),
+                    "REPLAYGAIN_ALBUM_GAIN" => output.rg_album_gain_db = parse_gain_db(&value),
+                    "REPLAYGAIN_ALBUM_PEAK" => output.rg_album_peak = value.parse::<f32>().ok(),
+                    "R128_TRACK_GAIN" => {
+                        // Opus R128 gain is Q7.8 fixed-point (1/256 dB) relative to -23 LUFS (+5 dB to -18 LUFS RG ref)
+                        if let Ok(q) = value.parse::<f32>() {
+                            output.rg_track_gain_db = Some(q / 256.0 + 5.0);
+                        }
+                    }
+                    "R128_ALBUM_GAIN" => {
+                        if let Ok(q) = value.parse::<f32>() {
+                            output.rg_album_gain_db = Some(q / 256.0 + 5.0);
+                        }
+                    }
+                    "LYRICS" | "UNSYNCEDLYRICS" | "USLT" | "SYLT" if output.lyrics.is_none() => {
+                        output.lyrics = Some(value);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
+}
+
+pub fn parse_gain_db(value: &str) -> Option<f32> {
+    let cleaned = value
+        .trim()
+        .trim_end_matches("dB")
+        .trim_end_matches("db")
+        .trim_end_matches("DB")
+        .trim();
+    cleaned.parse::<f32>().ok().filter(|v| v.is_finite())
 }
 
 fn tag_value(value: &Value) -> String {
@@ -310,6 +407,15 @@ pub fn track_id(path: &Path) -> u64 {
     hasher.finish()
 }
 
+pub fn cue_track_id(audio_path: &Path, track_number: u32, start_secs: f64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    audio_path.to_string_lossy().hash(&mut hasher);
+    "cue".hash(&mut hasher);
+    track_number.hash(&mut hasher);
+    (start_secs * 100.0).round().to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn format_sample_rate(rate: u32) -> String {
     if rate.is_multiple_of(1000) {
         format!("{} kHz", rate / 1000)
@@ -348,5 +454,18 @@ pub fn format_file_size(bytes: u64) -> String {
         format!("{:.0} KB", b / KB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_replaygain_db_strings() {
+        assert!((parse_gain_db("-6.42 dB").unwrap() - (-6.42)).abs() < 1e-4);
+        assert!((parse_gain_db("+2.50dB").unwrap() - 2.50).abs() < 1e-4);
+        assert!((parse_gain_db("-0.15 DB").unwrap() - (-0.15)).abs() < 1e-4);
+        assert!(parse_gain_db("invalid").is_none());
     }
 }

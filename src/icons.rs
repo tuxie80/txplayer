@@ -45,6 +45,10 @@ pub enum Icon {
     Compact,
     Expand,
     List,
+    Lyrics,
+    StarFilled,
+    StarOutline,
+    Grid,
 }
 
 #[inline]
@@ -581,6 +585,49 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.rect_stroke(outer, 2.0, stroke, StrokeKind::Middle);
             let split_x = snap_px(outer.left() + outer.width() * 0.36, ppp);
             painter.line_segment([pos2(split_x, outer.top()), pos2(split_x, outer.bottom())], stroke);
+        }
+        Icon::Lyrics => {
+            // Clean speech/lyric lines with subtle quote rhythm
+            let r = s * 0.36;
+            for (dy, w_frac) in [(-0.55_f32, 0.90_f32), (-0.05, 0.72), (0.45, 0.52)] {
+                let y = snap_px(c.y + r * dy, ppp);
+                painter.line_segment(
+                    [pos2(snap_px(c.x - r * 0.85, ppp), y), pos2(snap_px(c.x - r * 0.85 + r * 1.75 * w_frac, ppp), y)],
+                    stroke,
+                );
+            }
+        }
+        Icon::StarFilled | Icon::StarOutline => {
+            let r_out = s * 0.40;
+            let r_in = s * 0.17;
+            let mut pts = Vec::with_capacity(10);
+            for i in 0..10 {
+                let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                let r = if i % 2 == 0 { r_out } else { r_in };
+                pts.push(pos2(c.x + r * angle.cos(), c.y + r * angle.sin()));
+            }
+            if icon == Icon::StarFilled {
+                for i in 0..10 {
+                    let next = (i + 1) % 10;
+                    painter.add(Shape::convex_polygon(vec![c, pts[i], pts[next]], color, Stroke::NONE));
+                }
+            } else {
+                for i in 0..10 {
+                    let next = (i + 1) % 10;
+                    painter.line_segment([pts[i], pts[next]], stroke);
+                }
+            }
+        }
+        Icon::Grid => {
+            let r = s * 0.36;
+            let cell = snap_px(r * 0.78, ppp);
+            let off = snap_px(r * 0.52, ppp);
+            for dx in [-off, off] {
+                for dy in [-off, off] {
+                    let cr = snap_rect(Rect::from_center_size(pos2(c.x + dx, c.y + dy), Vec2::splat(cell)), ppp);
+                    painter.rect_stroke(cr, 1.0, stroke, StrokeKind::Inside);
+                }
+            }
         }
     }
 }

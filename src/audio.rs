@@ -172,18 +172,47 @@ impl Default for VisualTap {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PlaybackSpec {
+    pub path: PathBuf,
+    /// Virtual track start offset in the underlying file (0.0 for regular files, INDEX 01 for CUE).
+    pub cue_start: f64,
+    /// Optional virtual track end offset in the underlying file (Some for CUE tracks).
+    pub cue_end: Option<f64>,
+    /// Track-relative initial seek position (e.g. session resume).
+    pub start_offset: f64,
+    pub start_paused: bool,
+    /// Effective linear ReplayGain multiplier (1.0 when off/neutral).
+    pub rg_gain_linear: f32,
+    /// Display ReplayGain offset in dB (None when off/absent).
+    pub rg_gain_db: Option<f32>,
+}
+
+impl PlaybackSpec {
+    pub fn file_start_secs(&self) -> f64 {
+        (self.cue_start + self.start_offset).max(0.0)
+    }
+
+    pub fn effective_duration(&self, file_duration: Option<f64>) -> Option<f64> {
+        let end = self.cue_end.or(file_duration)?;
+        Some((end - self.cue_start).max(0.0))
+    }
+}
+
 #[derive(Debug)]
 pub enum AudioCommand {
-    Play {
-        path: PathBuf,
-        start_seconds: f64,
-        start_paused: bool,
-    },
+    Play(PlaybackSpec),
+    PreloadNext(Option<PlaybackSpec>),
     Pause,
     Resume,
     Stop,
     Seek(f64),
     SelectDevice(Option<String>),
+    SetSpeed(f32),
+    SetAbLoop(Option<(f64, f64)>),
+    SetGapless(bool),
+    SetCrossfade(f32),
+    SetReplayGainLinear(f32),
     Shutdown,
 }
 
@@ -196,6 +225,18 @@ pub enum AudioEvent {
         bit_depth: Option<u32>,
         duration: Option<f64>,
         device_name: String,
+        bit_perfect: bool,
+        rg_gain_db: Option<f32>,
+    },
+    GaplessTransitioned {
+        source_sample_rate: u32,
+        output_sample_rate: u32,
+        channels: u16,
+        bit_depth: Option<u32>,
+        duration: Option<f64>,
+        device_name: String,
+        bit_perfect: bool,
+        rg_gain_db: Option<f32>,
     },
     DeviceRouted(String),
     Playing(bool),
@@ -213,7 +254,9 @@ pub struct AudioHandle {
     commands: Sender<AudioCommand>,
     events: Receiver<AudioEvent>,
     volume: Arc<AtomicU32>,
+    rg_gain: Arc<AtomicU32>,
     linear_volume: Arc<AtomicBool>,
+    bit_perfect: Arc<AtomicBool>,
     visual_tap: Arc<VisualTap>,
     dsp: Arc<SharedDspParams>,
     _join: JoinHandle<()>,
@@ -224,11 +267,15 @@ impl AudioHandle {
         let (command_tx, command_rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
         let volume = Arc::new(AtomicU32::new(0.75_f32.to_bits()));
+        let rg_gain = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
         let linear_volume = Arc::new(AtomicBool::new(false));
+        let bit_perfect = Arc::new(AtomicBool::new(false));
         let visual_tap = Arc::new(VisualTap::new());
         let dsp = Arc::new(SharedDspParams::new(&DspConfig::default()));
         let thread_volume = Arc::clone(&volume);
+        let thread_rg = Arc::clone(&rg_gain);
         let thread_linear = Arc::clone(&linear_volume);
+        let thread_bp = Arc::clone(&bit_perfect);
         let thread_tap = Arc::clone(&visual_tap);
         let thread_dsp = Arc::clone(&dsp);
         let join = thread::Builder::new()
@@ -238,7 +285,9 @@ impl AudioHandle {
                     command_rx,
                     event_tx.clone(),
                     thread_volume,
+                    thread_rg,
                     thread_linear,
+                    thread_bp,
                     thread_tap,
                     thread_dsp,
                 ) {
@@ -250,19 +299,21 @@ impl AudioHandle {
             commands: command_tx,
             events: event_rx,
             volume,
+            rg_gain,
             linear_volume,
+            bit_perfect,
             visual_tap,
             dsp,
             _join: join,
         }
     }
 
-    pub fn play(&self, path: PathBuf) {
-        let _ = self.commands.send(AudioCommand::Play {
-            path,
-            start_seconds: 0.0,
-            start_paused: false,
-        });
+    pub fn play_spec(&self, spec: PlaybackSpec) {
+        let _ = self.commands.send(AudioCommand::Play(spec));
+    }
+
+    pub fn preload_next(&self, spec: Option<PlaybackSpec>) {
+        let _ = self.commands.send(AudioCommand::PreloadNext(spec));
     }
 
     pub fn pause(&self) {
@@ -294,8 +345,34 @@ impl AudioHandle {
         self.linear_volume.store(linear, Ordering::Relaxed);
     }
 
+    pub fn set_speed(&self, speed: f32) {
+        let _ = self
+            .commands
+            .send(AudioCommand::SetSpeed(speed.clamp(0.5, 2.0)));
+    }
+
+    pub fn set_ab_loop(&self, loop_range: Option<(f64, f64)>) {
+        let _ = self.commands.send(AudioCommand::SetAbLoop(loop_range));
+    }
+
+    pub fn set_replay_gain_linear(&self, gain: f32) {
+        let clamped = gain.clamp(0.1, 4.0);
+        self.rg_gain.store(clamped.to_bits(), Ordering::Relaxed);
+        let _ = self
+            .commands
+            .send(AudioCommand::SetReplayGainLinear(clamped));
+    }
+
     pub fn update_dsp(&self, cfg: &DspConfig) {
+        self.bit_perfect
+            .store(cfg.bit_perfect_mode, Ordering::Relaxed);
         self.dsp.update(cfg);
+        let _ = self
+            .commands
+            .send(AudioCommand::SetGapless(cfg.gapless_enabled));
+        let _ = self
+            .commands
+            .send(AudioCommand::SetCrossfade(cfg.crossfade_secs.clamp(0.0, 6.0)));
     }
 
     pub fn visual_tap(&self) -> Arc<VisualTap> {
@@ -467,31 +544,42 @@ enum PlaybackExit {
     Ended,
     Stopped,
     Command(AudioCommand),
-    ReopenAt {
-        path: PathBuf,
-        position: f64,
-        paused: bool,
-    },
+    ReopenSpec(PlaybackSpec),
 }
 
+struct AudioEnginePrefs {
+    preferred_device: Option<String>,
+    gapless_enabled: bool,
+    crossfade_secs: f32,
+    speed: f32,
+    ab_loop: Option<(f64, f64)>,
+    next_spec: Option<PlaybackSpec>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_audio_thread(
     commands: Receiver<AudioCommand>,
     events: Sender<AudioEvent>,
     volume: Arc<AtomicU32>,
+    rg_gain: Arc<AtomicU32>,
     linear_volume: Arc<AtomicBool>,
+    bit_perfect: Arc<AtomicBool>,
     visual_tap: Arc<VisualTap>,
     dsp: Arc<SharedDspParams>,
 ) -> Result<()> {
-    let mut preferred_device: Option<String> = None;
+    let mut prefs = AudioEnginePrefs {
+        preferred_device: None,
+        gapless_enabled: true,
+        crossfade_secs: 0.0,
+        speed: 1.0,
+        ab_loop: None,
+        next_spec: None,
+    };
     let mut next = commands.recv();
     while let Ok(command) = next {
         match command {
-            AudioCommand::Play {
-                path,
-                start_seconds,
-                start_paused,
-            } => {
-                let device_result = resolve_output_device(preferred_device.as_deref());
+            AudioCommand::Play(spec) => {
+                let device_result = resolve_output_device(prefs.preferred_device.as_deref());
                 let (device, device_name, device_id) = match device_result {
                     Ok(triple) => triple,
                     Err(error) => {
@@ -505,27 +593,19 @@ fn run_audio_thread(
                     &device,
                     device_name,
                     device_id,
-                    path,
-                    start_seconds,
-                    start_paused,
+                    spec,
                     &commands,
                     &events,
                     &volume,
+                    &rg_gain,
                     &linear_volume,
+                    &bit_perfect,
                     &visual_tap,
                     &dsp,
-                    &mut preferred_device,
+                    &mut prefs,
                 ) {
                     Ok(PlaybackExit::Command(command)) => Ok(command),
-                    Ok(PlaybackExit::ReopenAt {
-                        path,
-                        position,
-                        paused,
-                    }) => Ok(AudioCommand::Play {
-                        path,
-                        start_seconds: position,
-                        start_paused: paused,
-                    }),
+                    Ok(PlaybackExit::ReopenSpec(new_spec)) => Ok(AudioCommand::Play(new_spec)),
                     Ok(PlaybackExit::Ended | PlaybackExit::Stopped) => {
                         visual_tap.set_active(false);
                         commands.recv()
@@ -538,8 +618,32 @@ fn run_audio_thread(
                     }
                 };
             }
+            AudioCommand::PreloadNext(spec) => {
+                prefs.next_spec = spec;
+                next = commands.recv();
+            }
             AudioCommand::SelectDevice(name) => {
-                preferred_device = name;
+                prefs.preferred_device = name;
+                next = commands.recv();
+            }
+            AudioCommand::SetSpeed(s) => {
+                prefs.speed = s.clamp(0.5, 2.0);
+                next = commands.recv();
+            }
+            AudioCommand::SetAbLoop(l) => {
+                prefs.ab_loop = l;
+                next = commands.recv();
+            }
+            AudioCommand::SetGapless(g) => {
+                prefs.gapless_enabled = g;
+                next = commands.recv();
+            }
+            AudioCommand::SetCrossfade(c) => {
+                prefs.crossfade_secs = c.clamp(0.0, 6.0);
+                next = commands.recv();
+            }
+            AudioCommand::SetReplayGainLinear(g) => {
+                rg_gain.store(g.clamp(0.1, 4.0).to_bits(), Ordering::Relaxed);
                 next = commands.recv();
             }
             AudioCommand::Stop => {
@@ -661,52 +765,85 @@ struct OutputStream {
     reopen_needed: Arc<AtomicBool>,
 }
 
+struct PendingGapless {
+    boundary_frame: u64,
+    spec: PlaybackSpec,
+    source_sample_rate: u32,
+    channels: u16,
+    bit_depth: Option<u32>,
+    duration: Option<f64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn play_file(
     device: &Device,
     device_name: String,
     active_device_id: Option<cpal::DeviceId>,
-    path: PathBuf,
-    start_seconds: f64,
-    start_paused: bool,
+    mut spec: PlaybackSpec,
     commands: &Receiver<AudioCommand>,
     events: &Sender<AudioEvent>,
     volume: &Arc<AtomicU32>,
+    rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
+    bit_perfect: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp: &Arc<SharedDspParams>,
-    preferred_device: &mut Option<String>,
+    prefs: &mut AudioEnginePrefs,
 ) -> Result<PlaybackExit> {
-    let mut decoder = DecoderState::open(&path)?;
-    if start_seconds > 0.05 {
-        let _ = decoder.seek(start_seconds);
+    let mut decoder = DecoderState::open(&spec.path)?;
+    let initial_file_pos = spec.file_start_secs();
+    if initial_file_pos > 0.05 {
+        let _ = decoder.seek(initial_file_pos);
     }
+    rg_gain.store(spec.rg_gain_linear.clamp(0.1, 4.0).to_bits(), Ordering::Relaxed);
+
     let (output, mut producer) = create_output_stream(
         device,
         decoder.source_sample_rate,
         volume,
+        rg_gain,
         linear_volume,
+        bit_perfect,
         visual_tap,
         dsp,
         events,
     )?;
     let output_rate = output.sample_rate;
     visual_tap.set_sample_rate(output_rate);
-    if start_seconds > 0.05 {
-        output
-            .played_frames
-            .store((start_seconds * output_rate as f64) as u64, Ordering::Relaxed);
-    }
+
+    let mut track_origin_secs = spec.start_offset.max(0.0);
+    let mut track_origin_frame: u64 = 0;
+    let mut written_frames: u64 = 0;
+    let mut decoded_source_frames: u64 =
+        (initial_file_pos * decoder.source_sample_rate as f64).round() as u64;
+    let mut fade_in_remaining: usize = 0;
+    let mut fade_in_total: usize = 0;
+    let mut pending_gapless: Option<PendingGapless> = None;
+
+    let eff_dur = spec.effective_duration(decoder.duration);
+    let bp_active = bit_perfect.load(Ordering::Relaxed)
+        && decoder.source_sample_rate == output_rate
+        && (prefs.speed - 1.0).abs() < 0.001;
     let _ = events.send(AudioEvent::Started {
         source_sample_rate: decoder.source_sample_rate,
         output_sample_rate: output_rate,
         channels: decoder.source_channels.min(u16::MAX as usize) as u16,
         bit_depth: decoder.bit_depth,
-        duration: decoder.duration,
+        duration: eff_dur,
         device_name: device_name.clone(),
+        bit_perfect: bp_active,
+        rg_gain_db: if bit_perfect.load(Ordering::Relaxed) {
+            None
+        } else {
+            spec.rg_gain_db
+        },
     });
-    let mut resampler =
-        StreamResampler::new(decoder.source_sample_rate, output_rate, output.channels)?;
+    let mut resampler = StreamResampler::new(
+        decoder.source_sample_rate,
+        output_rate,
+        output.channels,
+        prefs.speed,
+    )?;
     let mut stats = BitrateMonitor::new(
         decoder.time_base,
         is_variable_lossless(decoder.decoder.codec_params().codec),
@@ -714,15 +851,21 @@ fn play_file(
     let mut current_block = Vec::new();
     let mut block_offset = 0;
     let mut decode_buf: Option<(usize, SampleBuffer<f32>)> = None;
-    let mut paused = start_paused;
+    let mut paused = spec.start_paused;
     let mut decoder_finished = false;
     let mut packet_errors = 0;
     let mut last_position_update = Instant::now();
     let mut last_device_check = Instant::now();
 
+    let calc_position = |played: u64, origin_frame: u64, origin_secs: f64, speed: f32| -> f64 {
+        let delta_frames = played.saturating_sub(origin_frame);
+        origin_secs + (delta_frames as f64 / output_rate as f64) * speed as f64
+    };
+
     if paused {
         visual_tap.set_active(false);
         let _ = events.send(AudioEvent::Playing(false));
+        let _ = events.send(AudioEvent::Position(track_origin_secs));
     } else {
         output.stream.play()?;
         visual_tap.set_active(true);
@@ -730,11 +873,40 @@ fn play_file(
     }
 
     loop {
-        // Detect CoreAudio default-device switches (e.g. connecting Bluetooth Klipsch speakers)
-        // or device disconnects even mid-track or while paused, and seamlessly reopen!
+        // Detect audible gapless transition boundary as soon as played_frames reaches the splice!
+        let played_now = output.played_frames.load(Ordering::Relaxed);
+        if let Some(ref pending) = pending_gapless
+            && played_now >= pending.boundary_frame
+        {
+            let trans = pending_gapless.take().unwrap();
+            spec = trans.spec;
+            track_origin_frame = trans.boundary_frame;
+            track_origin_secs = spec.start_offset.max(0.0);
+            rg_gain.store(spec.rg_gain_linear.clamp(0.1, 4.0).to_bits(), Ordering::Relaxed);
+            let bp = bit_perfect.load(Ordering::Relaxed)
+                && trans.source_sample_rate == output_rate
+                && (prefs.speed - 1.0).abs() < 0.001;
+            let _ = events.send(AudioEvent::GaplessTransitioned {
+                source_sample_rate: trans.source_sample_rate,
+                output_sample_rate: output_rate,
+                channels: trans.channels,
+                bit_depth: trans.bit_depth,
+                duration: trans.duration,
+                device_name: device_name.clone(),
+                bit_perfect: bp,
+                rg_gain_db: if bit_perfect.load(Ordering::Relaxed) {
+                    None
+                } else {
+                    spec.rg_gain_db
+                },
+            });
+            let _ = events.send(AudioEvent::Position(track_origin_secs));
+        }
+
+        // Detect default-device switches or device disconnects and seamlessly reopen
         let mut should_reopen = output.reopen_needed.swap(false, Ordering::AcqRel);
         if !should_reopen
-            && preferred_device.is_none()
+            && prefs.preferred_device.is_none()
             && last_device_check.elapsed() >= Duration::from_millis(500)
         {
             last_device_check = Instant::now();
@@ -746,20 +918,19 @@ fn play_file(
             }
         }
         if should_reopen {
-            let position =
-                output.played_frames.load(Ordering::Relaxed) as f64 / output_rate as f64;
+            let pos = calc_position(played_now, track_origin_frame, track_origin_secs, prefs.speed);
             visual_tap.set_active(false);
             if let Some(new_name) = default_output_device_name()
-                && preferred_device.is_none()
+                && prefs.preferred_device.is_none()
             {
                 let _ = events.send(AudioEvent::DeviceRouted(new_name));
             }
-            return Ok(PlaybackExit::ReopenAt {
-                path,
-                position,
-                paused,
-            });
+            let mut reopen = spec;
+            reopen.start_offset = pos;
+            reopen.start_paused = paused;
+            return Ok(PlaybackExit::ReopenSpec(reopen));
         }
+
         let command = if paused {
             match commands.recv_timeout(Duration::from_millis(60)) {
                 Ok(command) => Some(command),
@@ -794,35 +965,77 @@ fn play_file(
                     let _ = events.send(AudioEvent::Stopped);
                     return Ok(PlaybackExit::Stopped);
                 }
-                AudioCommand::Seek(seconds) => match decoder.seek(seconds) {
-                    Ok(()) => {
-                        resampler.reset();
-                        current_block.clear();
-                        block_offset = 0;
-                        decoder_finished = false;
-                        stats.reset();
-                        output
-                            .played_frames
-                            .store((seconds * output_rate as f64) as u64, Ordering::Relaxed);
-                        output.seek_generation.fetch_add(1, Ordering::Release);
-                        let _ = events.send(AudioEvent::Position(seconds));
+                AudioCommand::Seek(rel_seconds) => {
+                    let clamped_rel = rel_seconds.max(0.0);
+                    let abs_secs = spec.cue_start + clamped_rel;
+                    match decoder.seek(abs_secs) {
+                        Ok(()) => {
+                            resampler.reset();
+                            current_block.clear();
+                            block_offset = 0;
+                            decoder_finished = false;
+                            pending_gapless = None;
+                            stats.reset();
+                            decoded_source_frames =
+                                (abs_secs * decoder.source_sample_rate as f64).round() as u64;
+                            let cur_played = output.played_frames.load(Ordering::Relaxed);
+                            track_origin_frame = cur_played;
+                            track_origin_secs = clamped_rel;
+                            written_frames = cur_played;
+                            output.seek_generation.fetch_add(1, Ordering::Release);
+                            let _ = events.send(AudioEvent::Position(clamped_rel));
+                        }
+                        Err(err) => {
+                            let _ = events.send(AudioEvent::Error(format!("Seek failed: {err}")));
+                        }
                     }
-                    Err(err) => {
-                        let _ = events.send(AudioEvent::Error(format!("Seek failed: {err}")));
-                    }
-                },
-                AudioCommand::SelectDevice(name) => {
-                    *preferred_device = name;
-                    let position =
-                        output.played_frames.load(Ordering::Relaxed) as f64 / output_rate as f64;
-                    visual_tap.set_active(false);
-                    return Ok(PlaybackExit::ReopenAt {
-                        path,
-                        position,
-                        paused,
-                    });
                 }
-                command @ (AudioCommand::Play { .. } | AudioCommand::Shutdown) => {
+                AudioCommand::PreloadNext(next_s) => {
+                    prefs.next_spec = next_s;
+                }
+                AudioCommand::SetSpeed(new_speed) => {
+                    let new_speed = new_speed.clamp(0.5, 2.0);
+                    if (new_speed - prefs.speed).abs() > 0.001 {
+                        let cur_played = output.played_frames.load(Ordering::Relaxed);
+                        track_origin_secs =
+                            calc_position(cur_played, track_origin_frame, track_origin_secs, prefs.speed);
+                        track_origin_frame = cur_played;
+                        prefs.speed = new_speed;
+                        if let Ok(new_r) = StreamResampler::new(
+                            decoder.source_sample_rate,
+                            output_rate,
+                            output.channels,
+                            prefs.speed,
+                        ) {
+                            resampler = new_r;
+                        }
+                    }
+                }
+                AudioCommand::SetAbLoop(l) => {
+                    prefs.ab_loop = l;
+                }
+                AudioCommand::SetGapless(g) => {
+                    prefs.gapless_enabled = g;
+                }
+                AudioCommand::SetCrossfade(c) => {
+                    prefs.crossfade_secs = c.clamp(0.0, 6.0);
+                }
+                AudioCommand::SetReplayGainLinear(g) => {
+                    let clamped = g.clamp(0.1, 4.0);
+                    spec.rg_gain_linear = clamped;
+                    rg_gain.store(clamped.to_bits(), Ordering::Relaxed);
+                }
+                AudioCommand::SelectDevice(name) => {
+                    prefs.preferred_device = name;
+                    let pos =
+                        calc_position(played_now, track_origin_frame, track_origin_secs, prefs.speed);
+                    visual_tap.set_active(false);
+                    let mut reopen = spec;
+                    reopen.start_offset = pos;
+                    reopen.start_paused = paused;
+                    return Ok(PlaybackExit::ReopenSpec(reopen));
+                }
+                command @ (AudioCommand::Play(_) | AudioCommand::Shutdown) => {
                     visual_tap.set_active(false);
                     return Ok(PlaybackExit::Command(command));
                 }
@@ -834,16 +1047,42 @@ fn play_file(
             continue;
         }
 
+        let current_pos =
+            calc_position(played_now, track_origin_frame, track_origin_secs, prefs.speed);
+
+        // Enforce A-B section loop cleanly in real time
+        if let Some((a, b)) = prefs.ab_loop
+            && b > a + 0.1
+            && current_pos >= b
+        {
+            let abs_a = spec.cue_start + a.max(0.0);
+            if decoder.seek(abs_a).is_ok() {
+                resampler.reset();
+                current_block.clear();
+                block_offset = 0;
+                decoder_finished = false;
+                pending_gapless = None;
+                decoded_source_frames =
+                    (abs_a * decoder.source_sample_rate as f64).round() as u64;
+                let cur_played = output.played_frames.load(Ordering::Relaxed);
+                track_origin_frame = cur_played;
+                track_origin_secs = a.max(0.0);
+                written_frames = cur_played;
+                output.seek_generation.fetch_add(1, Ordering::Release);
+                let _ = events.send(AudioEvent::Position(track_origin_secs));
+                continue;
+            }
+        }
+
         if last_position_update.elapsed() >= POSITION_UPDATE_INTERVAL {
-            let position =
-                output.played_frames.load(Ordering::Relaxed) as f64 / output_rate as f64;
-            let _ = events.send(AudioEvent::Position(position));
+            let _ = events.send(AudioEvent::Position(current_pos));
             last_position_update = Instant::now();
         }
 
         if block_offset < current_block.len() {
             let pushed = producer.push_slice(&current_block[block_offset..]);
             block_offset += pushed;
+            written_frames += (pushed / output.channels.max(1)) as u64;
             if pushed == 0 {
                 thread::sleep(Duration::from_millis(2));
             }
@@ -851,11 +1090,78 @@ fn play_file(
         }
         current_block.clear();
         block_offset = 0;
-        if let Some(block) = resampler.next_block() {
+        if let Some(mut block) = resampler.next_block() {
+            // Apply smooth equal-power fade-in right after a crossfade transition
+            if fade_in_remaining > 0 && fade_in_total > 0 {
+                let ch = output.channels.max(1);
+                for frame in block.chunks_mut(ch) {
+                    if fade_in_remaining == 0 {
+                        break;
+                    }
+                    let done = fade_in_total - fade_in_remaining;
+                    let t = (done as f32 / fade_in_total as f32).clamp(0.0, 1.0);
+                    let gain = (t * std::f32::consts::FRAC_PI_2).sin();
+                    for s in frame.iter_mut() {
+                        *s *= gain;
+                    }
+                    fade_in_remaining -= 1;
+                }
+            }
             current_block = block;
             continue;
         }
         if decoder_finished {
+            // Attempt seamless gapless splice into the pre-queued next track inside the same open OutputStream!
+            if prefs.gapless_enabled
+                && pending_gapless.is_none()
+                && let Some(next_s) = prefs.next_spec.take()
+                && let Ok(mut next_dec) = DecoderState::open(&next_s.path)
+            {
+                let rate_switch_needed = bit_perfect.load(Ordering::Relaxed)
+                    && next_dec.source_sample_rate != output_rate;
+                if !rate_switch_needed {
+                    let start_f = next_s.file_start_secs();
+                    if start_f > 0.05 {
+                        let _ = next_dec.seek(start_f);
+                    }
+                    if let Ok(next_resampler) = StreamResampler::new(
+                        next_dec.source_sample_rate,
+                        output_rate,
+                        output.channels,
+                        prefs.speed,
+                    ) {
+                        let next_dur = next_s.effective_duration(next_dec.duration);
+                        pending_gapless = Some(PendingGapless {
+                            boundary_frame: written_frames,
+                            spec: next_s,
+                            source_sample_rate: next_dec.source_sample_rate,
+                            channels: next_dec.source_channels.min(u16::MAX as usize) as u16,
+                            bit_depth: next_dec.bit_depth,
+                            duration: next_dur,
+                        });
+                        if prefs.crossfade_secs > 0.05 {
+                            let fade_f = ((prefs.crossfade_secs * 0.5) * output_rate as f32).round()
+                                as usize;
+                            fade_in_total = fade_f;
+                            fade_in_remaining = fade_f;
+                        }
+                        decoder = next_dec;
+                        resampler = next_resampler;
+                        stats = BitrateMonitor::new(
+                            decoder.time_base,
+                            is_variable_lossless(decoder.decoder.codec_params().codec),
+                        );
+                        decoded_source_frames =
+                            (start_f * decoder.source_sample_rate as f64).round() as u64;
+                        decoder_finished = false;
+                        continue;
+                    }
+                } else {
+                    // Put back so the UI advances and reopens the DAC at the new native sample rate!
+                    prefs.next_spec = Some(next_s);
+                }
+            }
+
             if producer.is_empty() {
                 visual_tap.set_active(false);
                 let _ = events.send(AudioEvent::Ended);
@@ -863,6 +1169,17 @@ fn play_file(
             }
             thread::sleep(Duration::from_millis(2));
             continue;
+        }
+
+        // Enforce CUE virtual track end boundary cleanly
+        if let Some(cue_end) = spec.cue_end {
+            let decoded_secs =
+                decoded_source_frames as f64 / decoder.source_sample_rate.max(1) as f64;
+            if decoded_secs >= cue_end {
+                resampler.finish();
+                decoder_finished = true;
+                continue;
+            }
         }
 
         let packet = match decoder.format.next_packet() {
@@ -888,18 +1205,45 @@ fn play_file(
         match decoder.decoder.decode(&packet) {
             Ok(audio) => {
                 packet_errors = 0;
-                let spec = *audio.spec();
-                let channels = spec.channels.count();
+                let spec_audio = *audio.spec();
+                let channels = spec_audio.channels.count();
                 let cap = audio.capacity();
                 let buf = match &mut decode_buf {
                     Some((cur_cap, sb)) if *cur_cap >= cap => sb,
                     slot => {
-                        *slot = Some((cap, SampleBuffer::<f32>::new(cap as u64, spec)));
+                        *slot = Some((cap, SampleBuffer::<f32>::new(cap as u64, spec_audio)));
                         &mut slot.as_mut().unwrap().1
                     }
                 };
                 buf.copy_interleaved_ref(audio);
-                resampler.push_interleaved(buf.samples(), channels);
+                let mut samples = buf.samples().to_vec();
+                let frames_in_pkt = samples.len() / channels.max(1);
+
+                // Optional smooth fade-out near end of track when crossfade is enabled
+                let end_secs = spec.cue_end.or(decoder.duration);
+                if prefs.crossfade_secs > 0.05
+                    && let Some(end_s) = end_secs
+                {
+                    let sr = decoder.source_sample_rate.max(1) as f64;
+                    let fade_s = (prefs.crossfade_secs * 0.5) as f64;
+                    let fade_start = (end_s - fade_s).max(spec.cue_start);
+                    let pkt_end_s = (decoded_source_frames + frames_in_pkt as u64) as f64 / sr;
+                    if pkt_end_s > fade_start {
+                        for f_idx in 0..frames_in_pkt {
+                            let t_s = (decoded_source_frames + f_idx as u64) as f64 / sr;
+                            if t_s > fade_start {
+                                let rem = ((end_s - t_s) / fade_s).clamp(0.0, 1.0) as f32;
+                                let gain = (rem * std::f32::consts::FRAC_PI_2).sin();
+                                for c in 0..channels {
+                                    samples[f_idx * channels + c] *= gain;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                decoded_source_frames += frames_in_pkt as u64;
+                resampler.push_interleaved(&samples, channels);
             }
             Err(SymphoniaError::DecodeError(_)) => {
                 packet_errors += 1;
@@ -928,7 +1272,9 @@ fn create_output_stream(
     device: &Device,
     source_rate: u32,
     volume: &Arc<AtomicU32>,
+    rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
+    bit_perfect: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp: &Arc<SharedDspParams>,
     events: &Sender<AudioEvent>,
@@ -966,11 +1312,19 @@ fn create_output_stream(
         format: preferred_config.sample_format(),
     };
 
-    match open_with_config(device, &primary, volume, linear_volume, visual_tap, dsp, events) {
+    match open_with_config(
+        device,
+        &primary,
+        volume,
+        rg_gain,
+        linear_volume,
+        bit_perfect,
+        visual_tap,
+        dsp,
+        events,
+    ) {
         Ok(res) => Ok(res),
         Err(primary_err) => {
-            // Bluetooth A2DP speakers (e.g. Klipsch) often reject sample-rate switches and
-            // require their active default hardware rate (resampled cleanly via SincFixedIn).
             let fallback = OutputConfig {
                 config: StreamConfig {
                     channels: default.channels(),
@@ -985,7 +1339,17 @@ fn create_output_stream(
             {
                 return Err(primary_err);
             }
-            open_with_config(device, &fallback, volume, linear_volume, visual_tap, dsp, events)
+            open_with_config(
+                device,
+                &fallback,
+                volume,
+                rg_gain,
+                linear_volume,
+                bit_perfect,
+                visual_tap,
+                dsp,
+                events,
+            )
         }
     }
 }
@@ -995,7 +1359,9 @@ fn open_with_config(
     device: &Device,
     output: &OutputConfig,
     volume: &Arc<AtomicU32>,
+    rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
+    bit_perfect: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp: &Arc<SharedDspParams>,
     events: &Sender<AudioEvent>,
@@ -1015,7 +1381,9 @@ fn open_with_config(
                 &output.config,
                 consumer,
                 volume,
+                rg_gain,
                 linear_volume,
+                bit_perfect,
                 visual_tap,
                 dsp,
                 &played_frames,
@@ -1111,7 +1479,9 @@ fn build_stream<T: CpalSample>(
     config: &StreamConfig,
     mut consumer: HeapCons<f32>,
     volume: &Arc<AtomicU32>,
+    rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
+    bit_perfect: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp_params: &Arc<SharedDspParams>,
     played_frames: &Arc<AtomicU64>,
@@ -1121,7 +1491,9 @@ fn build_stream<T: CpalSample>(
 ) -> Result<Stream> {
     let channels = config.channels as usize;
     let volume = Arc::clone(volume);
+    let rg_gain = Arc::clone(rg_gain);
     let linear_volume = Arc::clone(linear_volume);
+    let bit_perfect = Arc::clone(bit_perfect);
     let visual_tap = Arc::clone(visual_tap);
     let dsp_params = Arc::clone(dsp_params);
     let played_frames = Arc::clone(played_frames);
@@ -1146,10 +1518,16 @@ fn build_stream<T: CpalSample>(
                 callback_generation = generation;
             }
             dsp.sync(&dsp_params);
+            let bp = bit_perfect.load(Ordering::Relaxed);
+            let rg = if bp {
+                1.0
+            } else {
+                f32::from_bits(rg_gain.load(Ordering::Relaxed)).clamp(0.1, 4.0)
+            };
             let target_gain = volume_to_gain(
                 f32::from_bits(volume.load(Ordering::Relaxed)),
                 linear_volume.load(Ordering::Relaxed),
-            );
+            ) * rg;
             let mut sum_sq_l = 0.0_f32;
             let mut sum_sq_r = 0.0_f32;
             let mut sum_lr = 0.0_f32;
@@ -1176,7 +1554,11 @@ fn build_stream<T: CpalSample>(
                     if channels == 1 {
                         raw_r = raw_l;
                     }
-                    let (proc_l, proc_r) = dsp.process_stereo(raw_l, raw_r);
+                    let (proc_l, proc_r) = if bp {
+                        (raw_l, raw_r)
+                    } else {
+                        dsp.process_stereo(raw_l, raw_r)
+                    };
                     for (ch_idx, sample) in frame.iter_mut().enumerate() {
                         let out = if ch_idx == 0 {
                             proc_l
@@ -1256,10 +1638,12 @@ struct StreamResampler {
 }
 
 impl StreamResampler {
-    fn new(source_rate: u32, output_rate: u32, channels: usize) -> Result<Self> {
+    fn new(source_rate: u32, output_rate: u32, channels: usize, speed: f32) -> Result<Self> {
         let channels = channels.max(1);
         let chunk_size = 1024;
-        let resampler = if source_rate != output_rate {
+        let speed = speed.clamp(0.5, 2.0) as f64;
+        let ratio = output_rate as f64 / (source_rate.max(1) as f64 * speed);
+        let resampler = if (ratio - 1.0).abs() > 1e-4 {
             let parameters = SincInterpolationParameters {
                 sinc_len: 256,
                 f_cutoff: 0.95,
@@ -1268,8 +1652,8 @@ impl StreamResampler {
                 window: WindowFunction::BlackmanHarris2,
             };
             Some(SincFixedIn::new(
-                output_rate as f64 / source_rate as f64,
-                2.0,
+                ratio,
+                2.5,
                 parameters,
                 chunk_size,
                 channels,

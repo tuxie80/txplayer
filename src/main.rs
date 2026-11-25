@@ -2,16 +2,22 @@
 
 mod app;
 mod audio;
+mod cue;
 mod dsp;
 mod icons;
 mod library;
+mod lyrics;
+mod media_controls;
 mod metadata;
 mod modals;
 mod platform;
+mod playlist_io;
 mod plugins;
 mod tagger;
 mod theme;
+mod tray;
 mod visualizer;
+mod watcher;
 
 use std::sync::Arc;
 

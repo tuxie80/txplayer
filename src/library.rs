@@ -8,7 +8,8 @@ use crossbeam_channel::Sender;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use crate::metadata::{Track, is_supported, read_track};
+use crate::cue::read_cue_tracks;
+use crate::metadata::{Track, is_cue_file, is_supported, read_track};
 
 #[derive(Debug)]
 pub enum ScanEvent {
@@ -62,11 +63,31 @@ impl Default for Library {
 }
 
 impl Library {
-    pub fn upsert(&mut self, track: Track) {
+    pub fn upsert(&mut self, mut track: Track) {
         if let Some(existing) = self.tracks.iter_mut().find(|item| item.id == track.id) {
+            // Preserve user listening stats, ratings, and original added_at when rescanning!
+            track.play_count = existing.play_count.max(track.play_count);
+            if track.rating == 0 {
+                track.rating = existing.rating;
+            }
+            if existing.added_at > 0 {
+                track.added_at = existing.added_at;
+            }
             *existing = track;
         } else {
             self.tracks.push(track);
+        }
+    }
+
+    pub fn increment_play_count(&mut self, id: u64) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == id) {
+            t.play_count = t.play_count.saturating_add(1);
+        }
+    }
+
+    pub fn set_rating(&mut self, id: u64, rating: u8) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == id) {
+            t.rating = rating.min(5);
         }
     }
 
@@ -333,11 +354,14 @@ fn unique_id(label: &str, salt: u64) -> u64 {
     hasher.finish().max(2)
 }
 
-pub fn collect_supported_files(path: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
+pub fn collect_supported_files(path: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut audio_files = Vec::new();
+    let mut cue_files = Vec::new();
     if path.is_file() {
-        if is_supported(path) {
-            files.push(path.to_path_buf());
+        if is_cue_file(path) {
+            cue_files.push(path.to_path_buf());
+        } else if is_supported(path) {
+            audio_files.push(path.to_path_buf());
         }
     } else if path.is_dir() {
         for entry in WalkDir::new(path)
@@ -345,27 +369,61 @@ pub fn collect_supported_files(path: &Path) -> Vec<PathBuf> {
             .into_iter()
             .filter_map(Result::ok)
         {
-            if entry.file_type().is_file() && is_supported(entry.path()) {
-                files.push(entry.into_path());
+            if entry.file_type().is_file() {
+                let p = entry.path();
+                if is_cue_file(p) {
+                    cue_files.push(entry.into_path());
+                } else if is_supported(p) {
+                    audio_files.push(entry.into_path());
+                }
             }
         }
     }
-    files.sort();
-    files
+    audio_files.sort();
+    cue_files.sort();
+    (audio_files, cue_files)
 }
 
 pub fn scan(paths: Vec<PathBuf>, events: Sender<ScanEvent>, cover_directory: PathBuf) {
     let mut files = Vec::new();
+    let mut cues = Vec::new();
     for path in paths {
-        files.extend(collect_supported_files(&path));
+        let (a, c) = collect_supported_files(&path);
+        files.extend(a);
+        cues.extend(c);
     }
     files.sort();
     files.dedup();
+    cues.sort();
+    cues.dedup();
 
-    let total = files.len();
     let mut found = 0;
     let mut failed = 0;
-    for (index, path) in files.iter().enumerate() {
+    let mut cue_referenced_images: HashSet<PathBuf> = HashSet::new();
+
+    // 1) Parse `.cue` sheets first so monolithic album images are split cleanly without duplicates
+    for cue_path in &cues {
+        match read_cue_tracks(cue_path, &cover_directory) {
+            Ok((cue_tracks, referenced)) => {
+                cue_referenced_images.extend(referenced);
+                for tr in cue_tracks {
+                    found += 1;
+                    if events.send(ScanEvent::Track(Box::new(tr))).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(_) => failed += 1,
+        }
+    }
+
+    // 2) Scan standalone audio files (skipping raw monolithic images already expanded by a CUE sheet)
+    let standalone: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|p| !cue_referenced_images.contains(p))
+        .collect();
+    let total = standalone.len();
+    for (index, path) in standalone.iter().enumerate() {
         match read_track(path, &cover_directory) {
             Ok(track) => {
                 found += 1;
@@ -419,6 +477,16 @@ mod tests {
             codec: "FLAC".into(),
             nominal_bitrate: None,
             cover_path: None,
+            cue_start: None,
+            cue_end: None,
+            rg_track_gain_db: None,
+            rg_track_peak: None,
+            rg_album_gain_db: None,
+            rg_album_peak: None,
+            lyrics: None,
+            play_count: 0,
+            rating: 0,
+            added_at: 0,
         }
     }
 

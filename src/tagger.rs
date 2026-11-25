@@ -1040,6 +1040,16 @@ mod tests {
             codec: "FLAC".into(),
             nominal_bitrate: None,
             cover_path: None,
+            cue_start: None,
+            cue_end: None,
+            rg_track_gain_db: None,
+            rg_track_peak: None,
+            rg_album_gain_db: None,
+            rg_album_peak: None,
+            lyrics: None,
+            play_count: 0,
+            rating: 0,
+            added_at: 0,
         };
         let args = build_ffmpeg_metadata_args(&track, true);
         assert!(args.contains(&"genre=".to_string()));

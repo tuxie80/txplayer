@@ -12,10 +12,12 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::audio::{
-    AudioEvent, AudioHandle, VisualTap, compute_waveform, list_output_devices,
+    AudioEvent, AudioHandle, PlaybackSpec, VisualTap, compute_waveform, list_output_devices,
 };
 use crate::icons::{self, Icon};
 use crate::library::{LibraryStore, ScanEvent, cover_directory, scan};
+use crate::lyrics::{TrackLyrics, load_lyrics_for_track};
+use crate::media_controls::{OsMediaBridge, OsMediaCommand};
 use crate::metadata::{
     QualityTier, SUPPORTED_EXTENSIONS, Track, format_duration, format_sample_rate,
 };
@@ -25,9 +27,12 @@ use crate::modals::{
     TrackInfoAction, pill_button,
 };
 use crate::platform::{FILE_MANAGER_NAME, MOD_SHORT, reveal_in_file_manager};
-use crate::plugins::{EqPreset, PianoEngineId, PluginConfig, ToolHealth};
+use crate::playlist_io::{export_playlist, import_playlist_paths};
+use crate::plugins::{EqPreset, PianoEngineId, PluginConfig, ReplayGainMode, ToolHealth};
 use crate::theme::{self, Palette, ThemeId};
+use crate::tray::{SystemTrayBridge, TrayCommand};
 use crate::visualizer::{VisualizerMode, VisualizerState};
+use crate::watcher::FolderWatcher;
 
 const SIDEBAR_WIDTH: f32 = 224.0;
 const TRANSPORT_HEIGHT: f32 = 96.0;
@@ -64,11 +69,39 @@ pub fn startup_window_layout() -> (bool, bool, bool) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum SmartView {
+    HiRes,
+    RecentlyAdded,
+    MostPlayed,
+    TopRated,
+}
+
+impl SmartView {
+    fn label(self) -> &'static str {
+        match self {
+            SmartView::HiRes => "Hi-Res Masters",
+            SmartView::RecentlyAdded => "Recently Added",
+            SmartView::MostPlayed => "Most Played",
+            SmartView::TopRated => "Top Rated",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowseMode {
+    Tracks,
+    Albums,
+    Artists,
+    Folders,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Library,
     Favorites,
     Queue,
     Playlist(u64),
+    Smart(SmartView),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +153,33 @@ struct Preferences {
     compact_mode: bool,
     #[serde(default = "default_true")]
     compact_show_playlist: bool,
+    #[serde(default)]
+    close_to_tray: bool,
+    #[serde(default = "default_true")]
+    auto_watch_folders: bool,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct SessionState {
+    active_library_id: u64,
+    queue_ids: Vec<u64>,
+    current_index: Option<usize>,
+    position_secs: f64,
+}
+
+impl SessionState {
+    fn load() -> Option<Self> {
+        let data = std::fs::read(crate::library::data_directory().join("session.json")).ok()?;
+        serde_json::from_slice(&data).ok()
+    }
+
+    fn save(&self) {
+        let dir = crate::library::data_directory();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(data) = serde_json::to_vec(self) {
+            let _ = std::fs::write(dir.join("session.json"), data);
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -152,6 +212,8 @@ impl Default for Preferences {
             plugins: PluginConfig::default(),
             compact_mode: true,
             compact_show_playlist: true,
+            close_to_tray: false,
+            auto_watch_folders: true,
         }
     }
 }
@@ -177,6 +239,11 @@ impl Preferences {
 enum DialogEvent {
     Files(Vec<PathBuf>),
     Folders(Vec<PathBuf>),
+    ImportPlaylist(Option<PathBuf>),
+    ExportPlaylist {
+        path: Option<PathBuf>,
+        track_ids: Vec<u64>,
+    },
 }
 
 #[derive(Clone)]
@@ -186,6 +253,8 @@ struct StreamInfo {
     channels: u16,
     bit_depth: Option<u32>,
     device_name: String,
+    bit_perfect: bool,
+    rg_gain_db: Option<f32>,
 }
 
 /// Deterministic column layout shared identically by table header AND every track row (no checkboxes).
@@ -266,6 +335,8 @@ struct VisibleCacheKey {
     active_lib_id: u64,
     view: View,
     folder_filter: Option<PathBuf>,
+    album_filter: Option<(String, String)>,
+    artist_filter: Option<String>,
     sort: SortMode,
     sort_ascending: bool,
     search: String,
@@ -275,6 +346,9 @@ pub struct TxPlayerApp {
     audio: AudioHandle,
     visual_tap: Arc<VisualTap>,
     visualizer: VisualizerState,
+    media_bridge: OsMediaBridge,
+    tray_bridge: SystemTrayBridge,
+    watcher: FolderWatcher,
     store: LibraryStore,
     plugins: PluginConfig,
     tool_health: ToolHealth,
@@ -287,15 +361,30 @@ pub struct TxPlayerApp {
     concert_visualizer_height: f32,
     compact_mode: bool,
     compact_show_playlist: bool,
+    close_to_tray: bool,
+    auto_watch_folders: bool,
+    force_quit: bool,
     linear_volume: bool,
     acoustid_api_key: String,
 
     view: View,
+    browse_mode: BrowseMode,
     folder_filter: Option<PathBuf>,
+    album_filter: Option<(String, String)>,
+    artist_filter: Option<String>,
     sort: SortMode,
     sort_ascending: bool,
     search: String,
     focus_search: bool,
+
+    // Playback speed, A-B section loop & synced lyrics
+    playback_speed: f32,
+    loop_a: Option<f64>,
+    loop_b: Option<f64>,
+    show_lyrics: bool,
+    cached_lyrics_id: Option<u64>,
+    cached_lyrics: Option<TrackLyrics>,
+    counted_play_id: Option<u64>,
 
     // Cached filtered/sorted track table & sidebar stats (eliminates 60 Hz cloning/sorting!)
     library_rev: u64,
@@ -445,10 +534,23 @@ impl TxPlayerApp {
             )
         });
 
+        let arguments: Vec<String> = std::env::args().collect();
+        let is_screenshot = arguments.iter().any(|a| a == "--screenshot");
+
+        let media_bridge = OsMediaBridge::new(context);
+        let tray_bridge = SystemTrayBridge::new(is_screenshot);
+        let watcher = FolderWatcher::spawn(
+            store.active().folders.clone(),
+            preferences.auto_watch_folders && !is_screenshot,
+        );
+
         let mut app = Self {
             audio,
             visual_tap,
             visualizer,
+            media_bridge,
+            tray_bridge,
+            watcher,
             store,
             plugins: preferences.plugins,
             tool_health: ToolHealth::default(),
@@ -461,14 +563,27 @@ impl TxPlayerApp {
             concert_visualizer_height: preferences.concert_visualizer_height,
             compact_mode: preferences.compact_mode,
             compact_show_playlist: preferences.compact_show_playlist,
+            close_to_tray: preferences.close_to_tray,
+            auto_watch_folders: preferences.auto_watch_folders,
+            force_quit: false,
             linear_volume: preferences.linear_volume,
             acoustid_api_key: preferences.acoustid_api_key,
             view: View::Library,
+            browse_mode: BrowseMode::Tracks,
             folder_filter: None,
+            album_filter: None,
+            artist_filter: None,
             sort: SortMode::Artist,
             sort_ascending: true,
             search: String::new(),
             focus_search: false,
+            playback_speed: 1.0,
+            loop_a: None,
+            loop_b: None,
+            show_lyrics: false,
+            cached_lyrics_id: None,
+            cached_lyrics: None,
+            counted_play_id: None,
             library_rev: 1,
             queue_rev: 1,
             visible_cache_key: None,
@@ -538,7 +653,6 @@ impl TxPlayerApp {
             ephemeral_session: false,
         };
 
-        let arguments: Vec<String> = std::env::args().collect();
         if arguments.iter().any(|a| a == "--compact") {
             app.compact_mode = true;
             app.compact_show_playlist = true;
@@ -609,6 +723,38 @@ impl TxPlayerApp {
                 }
                 Err(error) => app.set_status(format!("Could not open {path:?}: {error:#}")),
             }
+        } else if !app.ephemeral_session
+            && let Some(sess) = SessionState::load()
+            && sess.active_library_id == app.store.active_id
+            && !sess.queue_ids.is_empty()
+        {
+            // Restore previous playback session (paused at exact saved position, ready to hit Space!)
+            let valid_queue: Vec<u64> = sess
+                .queue_ids
+                .into_iter()
+                .filter(|id| app.track(*id).is_some())
+                .collect();
+            if !valid_queue.is_empty() {
+                app.current_queue = valid_queue;
+                app.current_index = sess
+                    .current_index
+                    .filter(|&i| i < app.current_queue.len());
+                app.mark_queue_dirty();
+                if let Some(track) = app.current_track().cloned()
+                    && track.path.exists()
+                {
+                    let resume_pos = sess
+                        .position_secs
+                        .clamp(0.0, track.duration.unwrap_or(sess.position_secs).max(0.0));
+                    app.position = resume_pos;
+                    app.duration = track.duration.unwrap_or(0.0);
+                    app.request_waveform(&track);
+                    app.sync_lyrics_for_current();
+                    let spec = app.build_spec(&track, resume_pos, true);
+                    app.audio.play_spec(spec);
+                    app.preload_next_track();
+                }
+            }
         }
         app
     }
@@ -672,6 +818,8 @@ impl TxPlayerApp {
             active_lib_id: self.store.active_id,
             view: self.view,
             folder_filter: self.folder_filter.clone(),
+            album_filter: self.album_filter.clone(),
+            artist_filter: self.artist_filter.clone(),
             sort: self.sort,
             sort_ascending: self.sort_ascending,
             search: self.search.clone(),
@@ -702,6 +850,16 @@ impl TxPlayerApp {
                         .as_ref()
                         .is_none_or(|folder| track.path.starts_with(folder))
                 })
+                .filter(|track| {
+                    self.album_filter
+                        .as_ref()
+                        .is_none_or(|(alb, art)| &track.album == alb && &track.artist == art)
+                })
+                .filter(|track| {
+                    self.artist_filter
+                        .as_ref()
+                        .is_none_or(|art| &track.artist == art)
+                })
                 .filter(|track| query.is_empty() || track.search_text().contains(&query))
                 .cloned()
                 .collect(),
@@ -730,9 +888,47 @@ impl TxPlayerApp {
                         .collect()
                 })
                 .unwrap_or_default(),
+            View::Smart(smart) => {
+                let mut list: Vec<Track> = lib
+                    .tracks
+                    .iter()
+                    .filter(|track| match smart {
+                        SmartView::HiRes => track.is_hires(),
+                        SmartView::RecentlyAdded => true,
+                        SmartView::MostPlayed => track.play_count > 0,
+                        SmartView::TopRated => track.rating >= 4,
+                    })
+                    .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                    .cloned()
+                    .collect();
+                match smart {
+                    SmartView::RecentlyAdded => {
+                        list.sort_by(|a, b| b.added_at.cmp(&a.added_at).then(a.title.cmp(&b.title)));
+                        list.truncate(100);
+                    }
+                    SmartView::MostPlayed => {
+                        list.sort_by(|a, b| {
+                            b.play_count.cmp(&a.play_count).then(a.title.cmp(&b.title))
+                        });
+                    }
+                    SmartView::TopRated => {
+                        list.sort_by(|a, b| {
+                            b.rating
+                                .cmp(&a.rating)
+                                .then(b.play_count.cmp(&a.play_count))
+                                .then(a.title.cmp(&b.title))
+                        });
+                    }
+                    SmartView::HiRes => {}
+                }
+                list
+            }
         };
 
-        if matches!(self.view, View::Library | View::Favorites) {
+        if matches!(
+            self.view,
+            View::Library | View::Favorites | View::Smart(SmartView::HiRes)
+        ) {
             tracks.sort_by(|a, b| {
                 let ord = match self.sort {
                     SortMode::Artist => a
@@ -1011,7 +1207,7 @@ impl TxPlayerApp {
                     ));
                 }
             }
-            View::Library | View::Favorites => {
+            View::Library | View::Favorites | View::Smart(_) => {
                 let ids = self.selected_ordered_ids(visible);
                 if !ids.is_empty() {
                     self.remove_tracks_from_library(&ids);
@@ -1183,6 +1379,155 @@ impl TxPlayerApp {
         });
     }
 
+    fn compute_rg_for_track(&self, track: &Track) -> (f32, Option<f32>) {
+        let dsp = &self.plugins.dsp;
+        if dsp.bit_perfect_mode || dsp.replay_gain == ReplayGainMode::Off {
+            return (1.0, None);
+        }
+        let (gain_db, peak) = match dsp.replay_gain {
+            ReplayGainMode::Off => return (1.0, None),
+            ReplayGainMode::Track => (
+                track.rg_track_gain_db.or(track.rg_album_gain_db),
+                track.rg_track_peak.or(track.rg_album_peak),
+            ),
+            ReplayGainMode::Album => (
+                track.rg_album_gain_db.or(track.rg_track_gain_db),
+                track.rg_album_peak.or(track.rg_track_peak),
+            ),
+        };
+        let Some(db) = gain_db else {
+            return (1.0, None);
+        };
+        let total_db = (db + dsp.rg_preamp_db).clamp(-18.0, 12.0);
+        let mut linear = 10.0_f32.powf(total_db / 20.0);
+        if dsp.rg_prevent_clipping
+            && let Some(pk) = peak
+            && pk > 0.01
+            && linear * pk > 0.99
+        {
+            linear = 0.99 / pk;
+        }
+        let applied_db = 20.0 * linear.max(1e-4).log10();
+        (linear, Some(applied_db))
+    }
+
+    fn build_spec(&self, track: &Track, start_offset: f64, start_paused: bool) -> PlaybackSpec {
+        let (rg_gain_linear, rg_gain_db) = self.compute_rg_for_track(track);
+        PlaybackSpec {
+            path: track.path.clone(),
+            cue_start: track.cue_start.unwrap_or(0.0),
+            cue_end: track.cue_end,
+            start_offset,
+            start_paused,
+            rg_gain_linear,
+            rg_gain_db,
+        }
+    }
+
+    fn peek_next_index(&self) -> Option<usize> {
+        if self.current_queue.is_empty() {
+            return None;
+        }
+        if self.repeat == RepeatMode::One {
+            return self.current_index;
+        }
+        if self.shuffle {
+            return None;
+        }
+        let cur = self.current_index?;
+        if cur + 1 < self.current_queue.len() {
+            Some(cur + 1)
+        } else if self.repeat == RepeatMode::All {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    fn preload_next_track(&self) {
+        if !self.plugins.dsp.gapless_enabled {
+            self.audio.preload_next(None);
+            return;
+        }
+        let spec = self
+            .peek_next_index()
+            .and_then(|idx| self.current_queue.get(idx).copied())
+            .and_then(|id| self.track(id))
+            .filter(|t| t.path.exists())
+            .map(|t| self.build_spec(t, 0.0, false));
+        self.audio.preload_next(spec);
+    }
+
+    fn sync_lyrics_for_current(&mut self) {
+        let cur_id = self.current_id();
+        if self.cached_lyrics_id == cur_id {
+            return;
+        }
+        self.cached_lyrics_id = cur_id;
+        self.cached_lyrics = cur_id
+            .and_then(|id| self.track(id))
+            .and_then(|t| load_lyrics_for_track(&t.path, t.lyrics.as_deref()));
+    }
+
+    fn apply_current_rg(&mut self) {
+        if let Some(track) = self.current_track().cloned() {
+            let (linear, db) = self.compute_rg_for_track(&track);
+            self.audio.set_replay_gain_linear(linear);
+            if let Some(ref mut info) = self.stream_info {
+                info.rg_gain_db = db;
+                info.bit_perfect = self.plugins.dsp.bit_perfect_mode
+                    && info.source_rate == info.output_rate
+                    && (self.playback_speed - 1.0).abs() < 0.001;
+            }
+        }
+        self.preload_next_track();
+    }
+
+    fn set_playback_speed(&mut self, speed: f32) {
+        let clamped = speed.clamp(0.5, 2.0);
+        self.playback_speed = clamped;
+        self.audio.set_speed(clamped);
+        self.set_status(format!("Playback speed: {:.2}x", clamped));
+    }
+
+    fn set_loop_a(&mut self) {
+        if self.current_id().is_none() {
+            return;
+        }
+        self.loop_a = Some(self.position);
+        if let Some(b) = self.loop_b
+            && b <= self.position + 0.1
+        {
+            self.loop_b = None;
+        }
+        let range = self.loop_a.zip(self.loop_b);
+        self.audio.set_ab_loop(range);
+        self.set_status(format!("Loop A set at {}", format_duration(Some(self.position))));
+    }
+
+    fn set_loop_b(&mut self) {
+        if self.current_id().is_none() {
+            return;
+        }
+        let a = self.loop_a.unwrap_or(0.0);
+        if self.position > a + 0.15 {
+            self.loop_a = Some(a);
+            self.loop_b = Some(self.position);
+            self.audio.set_ab_loop(Some((a, self.position)));
+            self.set_status(format!(
+                "A-B Loop active: {} → {}",
+                format_duration(Some(a)),
+                format_duration(Some(self.position))
+            ));
+        }
+    }
+
+    fn clear_ab_loop(&mut self) {
+        self.loop_a = None;
+        self.loop_b = None;
+        self.audio.set_ab_loop(None);
+    }
+
     fn start_current(&mut self) {
         let Some(track) = self.current_track().cloned() else {
             self.playing = false;
@@ -1198,10 +1543,24 @@ impl TxPlayerApp {
         self.bitrate = None;
         self.variable_bitrate = false;
         self.stream_info = None;
+        self.clear_ab_loop();
         self.visualizer.reset();
         self.request_waveform(&track);
-        self.audio.play(track.path);
+        self.sync_lyrics_for_current();
+        self.counted_play_id = None;
+        let spec = self.build_spec(&track, 0.0, false);
+        self.audio.play_spec(spec);
+        self.preload_next_track();
         self.playing = true;
+        self.media_bridge.sync_metadata(
+            track.id,
+            &track.title,
+            &track.artist,
+            &track.album,
+            track.duration,
+            track.cover_path.as_deref(),
+        );
+        self.media_bridge.sync_playback(true, true, 0.0);
     }
 
     fn toggle_playback(&mut self) {
@@ -1323,6 +1682,39 @@ impl TxPlayerApp {
         });
     }
 
+    fn import_playlist_dialog(&mut self) {
+        if self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Import Playlist (.m3u / .m3u8 / .pls)")
+            .add_filter("Playlists", &["m3u", "m3u8", "pls"]);
+        let events = self.dialog_sender.clone();
+        thread::spawn(move || {
+            let path = pollster::block_on(dialog.pick_file()).map(|h| h.path().to_path_buf());
+            let _ = events.send(DialogEvent::ImportPlaylist(path));
+        });
+    }
+
+    fn export_playlist_dialog(&mut self, default_name: &str, track_ids: Vec<u64>) {
+        if self.dialog_open || track_ids.is_empty() {
+            return;
+        }
+        self.dialog_open = true;
+        let file_name = format!("{}.m3u8", default_name.replace(['/', '\\', ':'], "_"));
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Export Playlist (.m3u8 or .pls)")
+            .set_file_name(&file_name)
+            .add_filter("M3U8 Playlist", &["m3u8", "m3u"])
+            .add_filter("PLS Playlist", &["pls"]);
+        let events = self.dialog_sender.clone();
+        thread::spawn(move || {
+            let path = pollster::block_on(dialog.save_file()).map(|h| h.path().to_path_buf());
+            let _ = events.send(DialogEvent::ExportPlaylist { path, track_ids });
+        });
+    }
+
     fn rescan(&mut self) {
         let folders = self.store.active().folders.clone();
         if folders.is_empty() {
@@ -1354,6 +1746,83 @@ impl TxPlayerApp {
             uploaded += 1;
         }
 
+        // OS Media Keys & System Now Playing events (SMTC / MPRIS / macOS Control Center)
+        while let Some(cmd) = self.media_bridge.try_event() {
+            match cmd {
+                OsMediaCommand::Play => {
+                    if !self.playing {
+                        self.toggle_playback();
+                    }
+                }
+                OsMediaCommand::Pause => {
+                    if self.playing {
+                        self.toggle_playback();
+                    }
+                }
+                OsMediaCommand::Toggle => self.toggle_playback(),
+                OsMediaCommand::Next => self.next(false),
+                OsMediaCommand::Previous => self.previous(),
+                OsMediaCommand::Stop => self.stop_playback(),
+                OsMediaCommand::SeekAbs(pos) => {
+                    if self.current_id().is_some() {
+                        let target = pos.clamp(0.0, self.duration.max(pos));
+                        self.audio.seek(target);
+                        self.position = target;
+                    }
+                }
+                OsMediaCommand::SeekRel(delta) => {
+                    if self.current_id().is_some() {
+                        let target = (self.position + delta).clamp(0.0, self.duration.max(0.0));
+                        self.audio.seek(target);
+                        self.position = target;
+                    }
+                }
+            }
+        }
+
+        // System Tray / Menu Bar events
+        while let Some(tcmd) = self.tray_bridge.poll() {
+            match tcmd {
+                TrayCommand::ShowWindow => {
+                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayCommand::TogglePlay => self.toggle_playback(),
+                TrayCommand::Next => self.next(false),
+                TrayCommand::Previous => self.previous(),
+                TrayCommand::Quit => {
+                    self.force_quit = true;
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+
+        // Background Live Folder Watcher auto-sync
+        while let Some(delta) = self.watcher.try_event() {
+            if delta.removed_count > 0 {
+                let removed = self.store.active_mut().prune_missing();
+                if !removed.is_empty() {
+                    self.purge_ids_from_queue(&removed);
+                    self.mark_library_dirty();
+                    self.store.save();
+                }
+            }
+            if !delta.changed_or_added.is_empty() {
+                self.start_scan(delta.changed_or_added);
+            }
+        }
+
+        // Close-to-tray intercept on native window close button / Cmd+W / Alt+F4
+        if self.close_to_tray
+            && !self.force_quit
+            && !self.ephemeral_session
+            && context.input(|i| i.viewport().close_requested())
+        {
+            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         // Audio events
         while let Some(event) = self.audio.try_event() {
             match event {
@@ -1364,6 +1833,8 @@ impl TxPlayerApp {
                     bit_depth,
                     duration,
                     device_name,
+                    bit_perfect,
+                    rg_gain_db,
                 } => {
                     self.stream_info = Some(StreamInfo {
                         source_rate: source_sample_rate,
@@ -1371,6 +1842,8 @@ impl TxPlayerApp {
                         channels,
                         bit_depth,
                         device_name,
+                        bit_perfect,
+                        rg_gain_db,
                     });
                     if let Some(duration) = duration {
                         self.duration = duration;
@@ -1386,17 +1859,91 @@ impl TxPlayerApp {
                             track.duration = Some(duration);
                         }
                     }
+                    if let Some(t) = self.current_track().cloned() {
+                        self.media_bridge.sync_metadata(
+                            t.id,
+                            &t.title,
+                            &t.artist,
+                            &t.album,
+                            Some(self.duration),
+                            t.cover_path.as_deref(),
+                        );
+                    }
+                }
+                AudioEvent::GaplessTransitioned {
+                    source_sample_rate,
+                    output_sample_rate,
+                    channels,
+                    bit_depth,
+                    duration,
+                    device_name,
+                    bit_perfect,
+                    rg_gain_db,
+                } => {
+                    if let Some(next_idx) = self.peek_next_index() {
+                        self.current_index = Some(next_idx);
+                    }
+                    self.position = 0.0;
+                    self.clear_ab_loop();
+                    self.counted_play_id = None;
+                    self.stream_info = Some(StreamInfo {
+                        source_rate: source_sample_rate,
+                        output_rate: output_sample_rate,
+                        channels,
+                        bit_depth,
+                        device_name,
+                        bit_perfect,
+                        rg_gain_db,
+                    });
+                    if let Some(d) = duration {
+                        self.duration = d;
+                    } else if let Some(t) = self.current_track() {
+                        self.duration = t.duration.unwrap_or(0.0);
+                    }
+                    if let Some(t) = self.current_track().cloned() {
+                        self.request_waveform(&t);
+                        self.sync_lyrics_for_current();
+                        self.media_bridge.sync_metadata(
+                            t.id,
+                            &t.title,
+                            &t.artist,
+                            &t.album,
+                            Some(self.duration),
+                            t.cover_path.as_deref(),
+                        );
+                    }
+                    self.preload_next_track();
                 }
                 AudioEvent::DeviceRouted(name) => {
                     self.available_devices = list_output_devices();
                     self.set_status(format!("Audio output switched to {name}"));
                 }
-                AudioEvent::Playing(playing) => self.playing = playing,
+                AudioEvent::Playing(playing) => {
+                    self.playing = playing;
+                    self.media_bridge
+                        .sync_playback(self.current_id().is_some(), playing, self.position);
+                }
                 AudioEvent::Stopped => {
                     self.playing = false;
                     self.position = 0.0;
+                    self.media_bridge.sync_playback(false, false, 0.0);
                 }
-                AudioEvent::Position(position) => self.position = position,
+                AudioEvent::Position(position) => {
+                    self.position = position;
+                    // Record play count once per track after 10s (or 30% for short tracks)
+                    if let Some(cid) = self.current_id()
+                        && self.counted_play_id != Some(cid)
+                        && self.playing
+                    {
+                        let threshold = (self.duration * 0.30).clamp(3.0, 12.0);
+                        if position >= threshold {
+                            self.counted_play_id = Some(cid);
+                            self.store.active_mut().increment_play_count(cid);
+                            self.mark_library_dirty();
+                            self.store.save();
+                        }
+                    }
+                }
                 AudioEvent::Bitrate { kbps, variable } => {
                     self.bitrate = Some(kbps);
                     self.variable_bitrate = variable;
@@ -1428,9 +1975,71 @@ impl TxPlayerApp {
                         for path in &paths {
                             self.store.active_mut().add_folder(path.clone());
                         }
+                        self.watcher.set_folders(self.store.active().folders.clone());
                         self.mark_library_dirty();
                         self.store.save();
                         self.start_scan(paths);
+                    }
+                }
+                DialogEvent::ImportPlaylist(maybe_path) => {
+                    if let Some(path) = maybe_path {
+                        match import_playlist_paths(&path) {
+                            Ok(found_paths) if !found_paths.is_empty() => {
+                                let name = path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("Imported Playlist")
+                                    .to_string();
+                                let pl_id = self.store.active_mut().create_playlist(name.clone());
+                                let cover_dir = cover_directory();
+                                let mut added_ids = Vec::new();
+                                for p in &found_paths {
+                                    let existing_id = self
+                                        .store
+                                        .active()
+                                        .tracks
+                                        .iter()
+                                        .find(|t| &t.path == p)
+                                        .map(|t| t.id);
+                                    if let Some(id) = existing_id {
+                                        added_ids.push(id);
+                                    } else if let Ok(tr) = crate::metadata::read_track(p, &cover_dir)
+                                    {
+                                        let id = tr.id;
+                                        self.store.active_mut().upsert(tr);
+                                        added_ids.push(id);
+                                    }
+                                }
+                                let count = self
+                                    .store
+                                    .active_mut()
+                                    .add_tracks_to_playlist(pl_id, &added_ids);
+                                self.mark_library_dirty();
+                                self.store.save();
+                                self.view = View::Playlist(pl_id);
+                                self.set_status(format!(
+                                    "Imported playlist \"{name}\" ({count} tracks)"
+                                ));
+                            }
+                            Ok(_) => self.set_status("No existing audio files found in playlist".into()),
+                            Err(e) => self.set_status(format!("Playlist import failed: {e}")),
+                        }
+                    }
+                }
+                DialogEvent::ExportPlaylist { path, track_ids } => {
+                    if let Some(dest) = path {
+                        let tracks: Vec<&Track> =
+                            track_ids.iter().filter_map(|id| self.track(*id)).collect();
+                        match export_playlist(&dest, &tracks) {
+                            Ok(()) => self.set_status(format!(
+                                "Exported {} tracks to {}",
+                                tracks.len(),
+                                dest.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("playlist")
+                            )),
+                            Err(e) => self.set_status(format!("Export failed: {e}")),
+                        }
                     }
                 }
             }
@@ -1687,6 +2296,20 @@ impl TxPlayerApp {
         }
         if !cmd && context.input(|i| i.key_pressed(egui::Key::V)) {
             self.show_concert_visualizer = !self.show_concert_visualizer;
+        }
+        if !cmd && context.input(|i| i.key_pressed(egui::Key::L)) {
+            self.show_lyrics = !self.show_lyrics;
+            self.sync_lyrics_for_current();
+        }
+        if !cmd && context.input(|i| i.key_pressed(egui::Key::OpenBracket)) {
+            self.set_loop_a();
+        }
+        if !cmd && context.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
+            self.set_loop_b();
+        }
+        if !cmd && context.input(|i| i.key_pressed(egui::Key::Backslash)) {
+            self.clear_ab_loop();
+            self.set_status("A-B Loop cleared".into());
         }
         if cmd && context.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::M)) {
             let next = !self.compact_mode;
@@ -1979,7 +2602,11 @@ impl TxPlayerApp {
 
         // Dispatch real window commands
         if close_resp.clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if self.close_to_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         } else if min_resp.clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         } else if zoom_resp.clicked() {
@@ -2139,6 +2766,60 @@ impl TxPlayerApp {
                     View::Queue,
                 );
 
+                // SMART PLAYLISTS
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new("SMART").size(9.5).color(p.faint).strong());
+                });
+                let hires_count = self.cached_hires_count;
+                let most_played_count = self
+                    .store
+                    .active()
+                    .tracks
+                    .iter()
+                    .filter(|t| t.play_count > 0)
+                    .count();
+                let top_rated_count = self
+                    .store
+                    .active()
+                    .tracks
+                    .iter()
+                    .filter(|t| t.rating >= 4)
+                    .count();
+                self.nav_row(
+                    ui,
+                    "Hi-Res Masters",
+                    Icon::Sliders,
+                    hires_count,
+                    self.view == View::Smart(SmartView::HiRes),
+                    View::Smart(SmartView::HiRes),
+                );
+                self.nav_row(
+                    ui,
+                    "Recently Added",
+                    Icon::Refresh,
+                    all_count.min(100),
+                    self.view == View::Smart(SmartView::RecentlyAdded),
+                    View::Smart(SmartView::RecentlyAdded),
+                );
+                self.nav_row(
+                    ui,
+                    "Most Played",
+                    Icon::Play,
+                    most_played_count,
+                    self.view == View::Smart(SmartView::MostPlayed),
+                    View::Smart(SmartView::MostPlayed),
+                );
+                self.nav_row(
+                    ui,
+                    "Top Rated",
+                    Icon::StarFilled,
+                    top_rated_count,
+                    self.view == View::Smart(SmartView::TopRated),
+                    View::Smart(SmartView::TopRated),
+                );
+
                 // PLAYLISTS
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -2161,6 +2842,20 @@ impl TxPlayerApp {
                             self.new_playlist_name.clear();
                             self.pending_playlist_tracks.clear();
                             self.show_new_playlist_modal = true;
+                        }
+                        if icons::icon_button(
+                            ui,
+                            Vec2::splat(20.0),
+                            Icon::FolderPlus,
+                            11.5,
+                            p.muted,
+                            p.text,
+                            p.hover,
+                            "Import .m3u / .m3u8 / .pls playlist",
+                        )
+                        .clicked()
+                        {
+                            self.import_playlist_dialog();
                         }
                     });
                 });
@@ -2587,6 +3282,8 @@ impl TxPlayerApp {
                 self.view = target;
                 if target == View::Library {
                     self.folder_filter = None;
+                    self.album_filter = None;
+                    self.artist_filter = None;
                 }
                 self.clear_selection();
             }
@@ -2631,6 +3328,7 @@ impl TxPlayerApp {
                     .playlist(pl_id)
                     .map(|pl| pl.name.clone())
                     .unwrap_or_else(|| "Playlist".to_string()),
+                View::Smart(smart) => smart.label().to_string(),
             };
             let title_resp = ui.label(RichText::new(title).size(21.0).strong().color(p.text));
             if let Some(folder) = &self.folder_filter {
@@ -2638,13 +3336,46 @@ impl TxPlayerApp {
             }
 
             if self.view == View::Library
-                && self.folder_filter.is_some()
+                && (self.folder_filter.is_some()
+                    || self.album_filter.is_some()
+                    || self.artist_filter.is_some())
                 && pill_button(ui, "× All Tracks", None, PillStyle::Active, &p).clicked()
             {
                 self.folder_filter = None;
+                self.album_filter = None;
+                self.artist_filter = None;
+            }
+
+            if let View::Playlist(pl_id) = self.view
+                && let Some(pl) = self.store.active().playlist(pl_id).cloned()
+                && !pl.track_ids.is_empty()
+                && pill_button(ui, "Export", Some(Icon::External), PillStyle::Secondary, &p)
+                    .on_hover_text("Export playlist to .m3u8 or .pls")
+                    .clicked()
+            {
+                self.export_playlist_dialog(&pl.name, pl.track_ids);
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Lyrics toggle pill
+                if pill_button(
+                    ui,
+                    "Lyrics",
+                    Some(Icon::Lyrics),
+                    if self.show_lyrics {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    &p,
+                )
+                .on_hover_text("Toggle Synchronized Lyrics (L)")
+                .clicked()
+                {
+                    self.show_lyrics = !self.show_lyrics;
+                    self.sync_lyrics_for_current();
+                }
+
                 // Visualizer toggle pill
                 if pill_button(
                     ui,
@@ -2794,7 +3525,19 @@ impl TxPlayerApp {
                 .color(p.muted)
                 .size(11.0),
             );
-            if let Some(folder) = &self.folder_filter {
+            if let Some((ref alb, ref art)) = self.album_filter {
+                ui.label(
+                    RichText::new(format!("·  Album: {alb} ({art})"))
+                        .color(p.accent)
+                        .size(10.5),
+                );
+            } else if let Some(ref art) = self.artist_filter {
+                ui.label(
+                    RichText::new(format!("·  Artist: {art}"))
+                        .color(p.accent)
+                        .size(10.5),
+                );
+            } else if let Some(folder) = &self.folder_filter {
                 ui.label(
                     RichText::new(format!("·  {}", folder.display()))
                         .color(p.faint)
@@ -2802,19 +3545,42 @@ impl TxPlayerApp {
                         .monospace(),
                 );
             }
+
+            // Library Browse Mode switcher (Tracks | Albums | Artists | Folders)
+            if self.view == View::Library {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    for (mode, label, icon) in [
+                        (BrowseMode::Folders, "Folders", Icon::Folder),
+                        (BrowseMode::Artists, "Artists", Icon::Playlist),
+                        (BrowseMode::Albums, "Albums", Icon::Grid),
+                        (BrowseMode::Tracks, "Tracks", Icon::List),
+                    ] {
+                        if pill_button(
+                            ui,
+                            label,
+                            Some(icon),
+                            if self.browse_mode == mode {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            &p,
+                        )
+                        .clicked()
+                        {
+                            self.browse_mode = mode;
+                            if mode != BrowseMode::Tracks {
+                                self.album_filter = None;
+                                self.artist_filter = None;
+                            }
+                        }
+                    }
+                });
+            }
         });
 
-        ui.add_space(8.0);
-        // Strictly Aligned Column Header (uses exact same TrackColumns as every row!)
-        self.aligned_table_header(ui, &tracks);
-        let sep_rect = ui.available_rect_before_wrap();
-        ui.painter().line_segment(
-            [pos2(sep_rect.left(), sep_rect.top()), pos2(sep_rect.right(), sep_rect.top())],
-            Stroke::new(1.0, p.border),
-        );
-        ui.add_space(3.0);
+        ui.add_space(6.0);
 
-        // Track Table ScrollArea (reserve bottom room if Concert Visualizer stage is open)
         let vis_reserve = if self.show_concert_visualizer {
             self.concert_visualizer_height + 34.0
         } else {
@@ -2822,20 +3588,44 @@ impl TxPlayerApp {
         };
         let list_h = (ui.available_height() - vis_reserve).max(110.0);
 
-        ScrollArea::vertical()
-            .id_salt("aligned_track_table")
-            .max_height(list_h)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.style_mut().spacing.item_spacing.y = 2.0;
-                if tracks.is_empty() {
-                    self.empty_state(ui);
-                } else {
-                    self.aligned_track_rows(ui, &tracks);
-                }
-                // Extra padding so floating action dock never obscures the bottom row
-                ui.add_space(54.0);
-            });
+        // Render chosen Library Browser mode (or Track Table for Playlists / Queue / Smart / Filtered)
+        let show_grid_browser = self.view == View::Library
+            && self.album_filter.is_none()
+            && self.artist_filter.is_none()
+            && self.browse_mode != BrowseMode::Tracks;
+
+        if show_grid_browser {
+            match self.browse_mode {
+                BrowseMode::Albums => self.albums_grid_view(ui, &tracks, list_h),
+                BrowseMode::Artists => self.artists_browser_view(ui, &tracks, list_h),
+                BrowseMode::Folders => self.folders_tree_view(ui, &tracks, list_h),
+                BrowseMode::Tracks => {}
+            }
+        } else {
+            // Strictly Aligned Column Header (uses exact same TrackColumns as every row!)
+            self.aligned_table_header(ui, &tracks);
+            let sep_rect = ui.available_rect_before_wrap();
+            ui.painter().line_segment(
+                [pos2(sep_rect.left(), sep_rect.top()), pos2(sep_rect.right(), sep_rect.top())],
+                Stroke::new(1.0, p.border),
+            );
+            ui.add_space(3.0);
+
+            ScrollArea::vertical()
+                .id_salt("aligned_track_table")
+                .max_height((list_h - 28.0).max(90.0))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.style_mut().spacing.item_spacing.y = 2.0;
+                    if tracks.is_empty() {
+                        self.empty_state(ui);
+                    } else {
+                        self.aligned_track_rows(ui, &tracks);
+                    }
+                    // Extra padding so floating action dock never obscures the bottom row
+                    ui.add_space(54.0);
+                });
+        }
 
         // Expandable Visualizer Stage
         if self.show_concert_visualizer {
@@ -2933,6 +3723,415 @@ impl TxPlayerApp {
                 &self.plugins.visualizers,
             );
             ui.add_space(6.0);
+        }
+    }
+
+    fn albums_grid_view(&mut self, ui: &mut Ui, tracks: &[Track], max_h: f32) {
+        let p = self.palette;
+        if tracks.is_empty() {
+            self.empty_state(ui);
+            return;
+        }
+        // Group tracks by (album, artist) preserving deterministic sorted order
+        let mut groups: Vec<(String, String, Track, usize, bool)> = Vec::new();
+        let mut idx_map: HashMap<(String, String), usize> = HashMap::new();
+        for tr in tracks {
+            let key = (tr.album.clone(), tr.artist.clone());
+            if let Some(&gi) = idx_map.get(&key) {
+                groups[gi].3 += 1;
+                groups[gi].4 |= tr.is_hires();
+            } else {
+                let gi = groups.len();
+                idx_map.insert(key.clone(), gi);
+                groups.push((key.0, key.1, tr.clone(), 1, tr.is_hires()));
+            }
+        }
+        groups.sort_by_key(|a| a.0.to_lowercase());
+
+        let card_w = 152.0_f32;
+        let card_h = 204.0_f32;
+        let gap = 12.0_f32;
+        let cols = ((ui.available_width() + gap) / (card_w + gap)).floor().max(1.0) as usize;
+        let mut open_album: Option<(String, String)> = None;
+        let mut play_album: Option<(String, String)> = None;
+
+        ScrollArea::vertical()
+            .id_salt("albums_grid_scroll")
+            .max_height(max_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for row in groups.chunks(cols) {
+                    ui.horizontal(|ui| {
+                        ui.style_mut().spacing.item_spacing.x = gap;
+                        for (alb, art, rep, count, hires) in row {
+                            let (card_rect, resp) =
+                                ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
+                            let hovered = resp.hovered();
+                            ui.painter().rect_filled(
+                                card_rect,
+                                8.0,
+                                if hovered { p.hover } else { p.surface },
+                            );
+                            ui.painter().rect_stroke(
+                                card_rect,
+                                8.0,
+                                Stroke::new(1.0, if hovered { p.border_strong } else { p.border }),
+                                StrokeKind::Inside,
+                            );
+
+                            let art_rect = Rect::from_min_size(
+                                pos2(card_rect.left() + 8.0, card_rect.top() + 8.0),
+                                Vec2::splat(card_w - 16.0),
+                            );
+                            self.paint_cover_in_rect(ui, rep, art_rect);
+
+                            if *hires {
+                                let badge = Rect::from_min_size(
+                                    pos2(art_rect.left() + 5.0, art_rect.top() + 5.0),
+                                    vec2(44.0, 15.0),
+                                );
+                                ui.painter().rect_filled(badge, 3.0, p.hires_bg);
+                                ui.painter().text(
+                                    badge.center(),
+                                    Align2::CENTER_CENTER,
+                                    "HI-RES",
+                                    FontId::monospace(8.0),
+                                    p.hires_gold,
+                                );
+                            }
+
+                            // Hover 1-click Play Album circle button
+                            let play_btn_r = Rect::from_center_size(
+                                pos2(art_rect.right() - 18.0, art_rect.bottom() - 18.0),
+                                Vec2::splat(28.0),
+                            );
+                            let over_play = ui
+                                .ctx()
+                                .pointer_hover_pos()
+                                .is_some_and(|pt| play_btn_r.contains(pt));
+                            if hovered {
+                                ui.painter().circle_filled(
+                                    play_btn_r.center(),
+                                    14.0,
+                                    if over_play { p.accent_bright } else { p.accent },
+                                );
+                                icons::paint_icon(
+                                    ui.painter(),
+                                    Rect::from_center_size(
+                                        pos2(play_btn_r.center().x + 1.0, play_btn_r.center().y),
+                                        Vec2::splat(13.0),
+                                    ),
+                                    Icon::Play,
+                                    p.on_accent(),
+                                );
+                            }
+
+                            let text_l = card_rect.left() + 8.0;
+                            let text_r = card_rect.right() - 8.0;
+                            let title_rect = Rect::from_min_max(
+                                pos2(text_l, art_rect.bottom() + 6.0),
+                                pos2(text_r, art_rect.bottom() + 24.0),
+                            );
+                            paint_clipped_cell_text(
+                                ui.painter(),
+                                title_rect,
+                                alb,
+                                FontId::proportional(11.5),
+                                p.text,
+                            );
+                            let sub_rect = Rect::from_min_max(
+                                pos2(text_l, art_rect.bottom() + 23.0),
+                                pos2(text_r, art_rect.bottom() + 39.0),
+                            );
+                            paint_clipped_cell_text(
+                                ui.painter(),
+                                sub_rect,
+                                &format!("{art} · {count}"),
+                                FontId::proportional(10.0),
+                                p.muted,
+                            );
+
+                            if resp.clicked() {
+                                if over_play {
+                                    play_album = Some((alb.clone(), art.clone()));
+                                } else {
+                                    open_album = Some((alb.clone(), art.clone()));
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(gap);
+                }
+            });
+
+        if let Some((alb, art)) = play_album {
+            let alb_tracks: Vec<Track> = tracks
+                .iter()
+                .filter(|t| t.album == alb && t.artist == art)
+                .cloned()
+                .collect();
+            if let Some(first) = alb_tracks.first() {
+                self.play_from_list(first.id, &alb_tracks);
+            }
+        } else if let Some((alb, art)) = open_album {
+            self.album_filter = Some((alb, art));
+            self.browse_mode = BrowseMode::Tracks;
+        }
+    }
+
+    fn artists_browser_view(&mut self, ui: &mut Ui, tracks: &[Track], max_h: f32) {
+        let p = self.palette;
+        if tracks.is_empty() {
+            self.empty_state(ui);
+            return;
+        }
+        let mut counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+        for tr in tracks {
+            let entry = counts
+                .entry(tr.artist.clone())
+                .or_insert_with(|| (0, HashSet::new()));
+            entry.0 += 1;
+            entry.1.insert(tr.album.clone());
+        }
+        let mut artists: Vec<(String, usize, usize)> = counts
+            .into_iter()
+            .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
+            .collect();
+        artists.sort_by_key(|a| a.0.to_lowercase());
+
+        let mut pick: Option<String> = None;
+        ScrollArea::vertical()
+            .id_salt("artists_list_scroll")
+            .max_height(max_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing.y = 3.0;
+                let w = ui.available_width();
+                for (name, t_cnt, a_cnt) in &artists {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    ui.painter().rect_filled(
+                        rect,
+                        6.0,
+                        if resp.hovered() { p.hover } else { p.surface },
+                    );
+                    ui.painter().text(
+                        pos2(rect.left() + 12.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        name,
+                        FontId::proportional(12.5),
+                        p.text,
+                    );
+                    ui.painter().text(
+                        pos2(rect.right() - 12.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!(
+                            "{a_cnt} {}  ·  {t_cnt} {}",
+                            if *a_cnt == 1 { "album" } else { "albums" },
+                            if *t_cnt == 1 { "track" } else { "tracks" }
+                        ),
+                        FontId::monospace(10.0),
+                        p.muted,
+                    );
+                    if resp.clicked() {
+                        pick = Some(name.clone());
+                    }
+                }
+            });
+        if let Some(art) = pick {
+            self.artist_filter = Some(art);
+            self.browse_mode = BrowseMode::Tracks;
+        }
+    }
+
+    fn folders_tree_view(&mut self, ui: &mut Ui, tracks: &[Track], max_h: f32) {
+        let p = self.palette;
+        if tracks.is_empty() {
+            self.empty_state(ui);
+            return;
+        }
+        let mut dir_counts: HashMap<PathBuf, usize> = HashMap::new();
+        for tr in tracks {
+            if let Some(parent) = tr.path.parent() {
+                *dir_counts.entry(parent.to_path_buf()).or_insert(0) += 1;
+            }
+        }
+        let mut dirs_sorted: Vec<(PathBuf, usize)> = dir_counts.into_iter().collect();
+        dirs_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut filter_dir: Option<PathBuf> = None;
+        ScrollArea::vertical()
+            .id_salt("folders_tree_scroll")
+            .max_height(max_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing.y = 3.0;
+                let w = ui.available_width();
+                for (dir, cnt) in &dirs_sorted {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, 36.0), Sense::click());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    ui.painter().rect_filled(
+                        rect,
+                        6.0,
+                        if resp.hovered() { p.hover } else { p.surface },
+                    );
+                    icons::paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), Vec2::splat(14.0)),
+                        Icon::Folder,
+                        p.accent,
+                    );
+                    let name = dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Directory");
+                    ui.painter().text(
+                        pos2(rect.left() + 34.0, rect.top() + 12.0),
+                        Align2::LEFT_CENTER,
+                        name,
+                        FontId::proportional(12.0),
+                        p.text,
+                    );
+                    let path_r = Rect::from_min_max(
+                        pos2(rect.left() + 34.0, rect.top() + 20.0),
+                        pos2(rect.right() - 100.0, rect.bottom() - 2.0),
+                    );
+                    paint_clipped_cell_text(
+                        ui.painter(),
+                        path_r,
+                        &dir.display().to_string(),
+                        FontId::monospace(9.5),
+                        p.faint,
+                    );
+                    ui.painter().text(
+                        pos2(rect.right() - 12.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{cnt} {}", if *cnt == 1 { "track" } else { "tracks" }),
+                        FontId::monospace(10.0),
+                        p.muted,
+                    );
+                    if resp.clicked() {
+                        filter_dir = Some(dir.clone());
+                    }
+                    resp.context_menu(|ui| {
+                        if ui
+                            .button(format!("Reveal in {FILE_MANAGER_NAME}"))
+                            .clicked()
+                        {
+                            reveal_in_file_manager(dir);
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        if let Some(d) = filter_dir {
+            self.folder_filter = Some(d);
+            self.browse_mode = BrowseMode::Tracks;
+        }
+    }
+
+    fn lyrics_panel_contents(&mut self, ui: &mut Ui) {
+        self.sync_lyrics_for_current();
+        let p = self.palette;
+        ui.horizontal(|ui| {
+            let (ir, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            icons::paint_icon(ui.painter(), ir, Icon::Lyrics, p.accent);
+            ui.label(RichText::new("Lyrics").size(12.5).strong().color(p.text));
+            if let Some(ref lyr) = self.cached_lyrics {
+                ui.label(
+                    RichText::new(if lyr.synced { "SYNCED" } else { "PLAIN" })
+                        .size(8.5)
+                        .monospace()
+                        .color(p.accent),
+                )
+                .on_hover_text(&lyr.source_label);
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icons::icon_button(
+                    ui,
+                    Vec2::splat(20.0),
+                    Icon::Close,
+                    10.0,
+                    p.muted,
+                    p.text,
+                    p.hover,
+                    "Hide Lyrics (L)",
+                )
+                .clicked()
+                {
+                    self.show_lyrics = false;
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        let Some(ref lyrics) = self.cached_lyrics.clone() else {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("No lyrics found").size(12.0).color(p.muted));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Place a matching .lrc file next to the audio track or embed a LYRICS tag.")
+                        .size(10.5)
+                        .color(p.faint),
+                );
+            });
+            return;
+        };
+
+        let active_idx = lyrics.active_index(self.position);
+        let mut seek_to: Option<f64> = None;
+        ScrollArea::vertical()
+            .id_salt("synced_lyrics_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing.y = 6.0;
+                for (i, line) in lyrics.lines.iter().enumerate() {
+                    let is_active = active_idx == Some(i);
+                    let col = if is_active {
+                        p.accent_bright
+                    } else if active_idx.is_some_and(|a| i < a) {
+                        p.faint
+                    } else {
+                        p.text_secondary
+                    };
+                    let size = if is_active { 13.5 } else { 11.5 };
+                    let text = if is_active {
+                        RichText::new(&line.text).size(size).strong().color(col)
+                    } else {
+                        RichText::new(&line.text).size(size).color(col)
+                    };
+                    let resp = ui.add(
+                        egui::Label::new(text)
+                            .wrap()
+                            .sense(if line.time_secs.is_some() {
+                                Sense::click()
+                            } else {
+                                Sense::hover()
+                            }),
+                    );
+                    if is_active && self.playing {
+                        resp.scroll_to_me(Some(Align::Center));
+                    }
+                    if let Some(ts) = line.time_secs
+                        && resp
+                            .on_hover_text(format!("Jump to {}", format_duration(Some(ts))))
+                            .clicked()
+                    {
+                        seek_to = Some(ts);
+                    }
+                }
+                ui.add_space(24.0);
+            });
+        if let Some(ts) = seek_to {
+            self.audio.seek(ts);
+            self.position = ts;
         }
     }
 
@@ -3399,6 +4598,20 @@ impl TxPlayerApp {
                         ctx_action = Some(ContextMenuAction::RevealInFinder(tid));
                         ui.close();
                     }
+                    ui.menu_button("Rating", |ui| {
+                        for stars in (1..=5u8).rev() {
+                            let lbl = "★".repeat(stars as usize);
+                            if ui.button(lbl).clicked() {
+                                ctx_action = Some(ContextMenuAction::SetRating(tid, stars));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear Rating").clicked() {
+                            ctx_action = Some(ContextMenuAction::SetRating(tid, 0));
+                            ui.close();
+                        }
+                    });
                 }
                 ui.separator();
                 let remove_lbl = match current_view {
@@ -3506,6 +4719,11 @@ impl TxPlayerApp {
                 if let Some(t) = self.track(id) {
                     reveal_in_file_manager(&t.path);
                 }
+            }
+            ContextMenuAction::SetRating(id, stars) => {
+                self.store.active_mut().set_rating(id, stars);
+                self.mark_library_dirty();
+                self.store.save();
             }
             ContextMenuAction::RemoveSelected => self.remove_selected_in_current_view(visible),
         }
@@ -3894,6 +5112,10 @@ impl TxPlayerApp {
                         "This playlist is empty",
                         "Select tracks in your library and click \"+ Playlist\" to add them here.",
                     ),
+                    View::Smart(smart) => (
+                        smart.label(),
+                        "No tracks match this smart playlist yet.",
+                    ),
                 };
                 ui.label(RichText::new(title).size(17.5).strong().color(p.text));
                 ui.add_space(4.0);
@@ -4172,6 +5394,7 @@ impl TxPlayerApp {
                             active,
                             waveform.map(Vec::as_slice),
                             self.progress_style,
+                            (self.loop_a, self.loop_b),
                             &p,
                         ) {
                             self.audio.seek(new_pos);
@@ -4255,11 +5478,29 @@ impl TxPlayerApp {
                                         format_sample_rate(info.output_rate)
                                     )
                                 };
-                                let dsp_tag = if dsp_on { " · DSP" } else { "" };
+                                let dsp_tag = if info.bit_perfect {
+                                    " · BIT-PERFECT"
+                                } else if dsp_on {
+                                    " · DSP"
+                                } else {
+                                    ""
+                                };
+                                let spd_tag = if (self.playback_speed - 1.0).abs() > 0.01 {
+                                    format!(" · {:.2}x", self.playback_speed)
+                                } else {
+                                    String::new()
+                                };
+                                let ab_tag = if self.loop_a.is_some() && self.loop_b.is_some() {
+                                    " · A-B"
+                                } else {
+                                    ""
+                                };
                                 let sig_resp = ui
                                     .add(
                                         egui::Label::new(
-                                            RichText::new(format!("{bitrate_str}{rate_str}{dsp_tag}"))
+                                            RichText::new(format!(
+                                                "{bitrate_str}{rate_str}{dsp_tag}{spd_tag}{ab_tag}"
+                                            ))
                                                 .size(9.5)
                                                 .monospace()
                                                 .color(if self.show_signal_path {
@@ -4421,6 +5662,8 @@ impl TxPlayerApp {
             self.theme_id,
             &mut self.progress_style,
             &mut self.row_density,
+            &mut self.close_to_tray,
+            &mut self.auto_watch_folders,
             &mut self.visualizer.mode,
             &mut self.show_concert_visualizer,
             &mut self.concert_visualizer_height,
@@ -4450,6 +5693,16 @@ impl TxPlayerApp {
         }
         if settings_actions.dsp_changed {
             self.audio.update_dsp(&self.plugins.dsp);
+            self.preload_next_track();
+        }
+        if settings_actions.rg_changed {
+            self.apply_current_rg();
+        }
+        if let Some(watch_on) = settings_actions.watch_changed {
+            self.watcher.set_enabled(watch_on);
+        }
+        if settings_actions.import_playlist {
+            self.import_playlist_dialog();
         }
         if settings_actions.open_folders {
             self.show_folders = true;
@@ -4521,6 +5774,11 @@ impl TxPlayerApp {
                         }
                         TrackInfoAction::Remove => {
                             self.remove_tracks_from_library(&[tid]);
+                        }
+                        TrackInfoAction::SetRating(stars) => {
+                            self.store.active_mut().set_rating(tid, stars);
+                            self.mark_library_dirty();
+                            self.store.save();
                         }
                     }
                 }
@@ -4804,25 +6062,61 @@ impl TxPlayerApp {
                 bitrate_kbps: self.bitrate,
                 variable_bitrate: self.variable_bitrate,
                 device_name: info.device_name.as_str(),
-                vis_compute_ms: self.visualizer.last_compute_ms,
+                bit_perfect: info.bit_perfect,
+                rg_gain_db: info.rg_gain_db,
             });
-            let (dsp_changed, open_dsp_settings) = modals::show_signal_path_popover(
+            let sig_actions = modals::show_signal_path_popover(
                 context,
                 &mut self.show_signal_path,
                 self.signal_btn_rect,
                 TRANSPORT_HEIGHT,
                 sig,
                 &mut self.plugins,
+                self.playback_speed,
+                (self.loop_a, self.loop_b),
                 &p,
             );
-            if dsp_changed {
+            if sig_actions.dsp_changed {
                 self.audio.update_dsp(&self.plugins.dsp);
+                self.apply_current_rg();
             }
-            if open_dsp_settings {
+            if let Some(spd) = sig_actions.speed_changed {
+                self.set_playback_speed(spd);
+            }
+            if sig_actions.set_loop_a {
+                self.set_loop_a();
+            }
+            if sig_actions.set_loop_b {
+                self.set_loop_b();
+            }
+            if sig_actions.clear_loop {
+                self.clear_ab_loop();
+                self.set_status("A-B Loop cleared".into());
+            }
+            if sig_actions.open_settings_dsp {
                 self.show_signal_path = false;
                 self.settings_tab = SettingsTab::Audio;
                 self.show_settings = true;
             }
+        }
+
+        // 8b) Compact-mode Lyrics Window (in Full mode, Lyrics docks cleanly on the right panel)
+        if self.compact_mode && self.show_lyrics {
+            let mut open = self.show_lyrics;
+            modals::themed_modal_window(
+                context,
+                "compact_lyrics_modal",
+                "Lyrics",
+                Icon::Lyrics,
+                None,
+                [360.0, 380.0],
+                Some([280.0, 240.0]),
+                true,
+                &mut open,
+                &p,
+                |ui| self.lyrics_panel_contents(ui),
+            );
+            self.show_lyrics = open;
         }
 
         // 9) Cmd+K Quick Command Palette
@@ -4853,6 +6147,24 @@ impl TxPlayerApp {
             label: "Toggle Visualizer".into(),
             subtitle: "Shortcut: V".into(),
             action: PaletteCommand::ToggleVisualizer,
+        });
+        entries.push(PaletteEntry {
+            category: "ACTION",
+            label: "Toggle Synchronized Lyrics".into(),
+            subtitle: "Shortcut: L".into(),
+            action: PaletteCommand::ToggleLyrics,
+        });
+        entries.push(PaletteEntry {
+            category: "ACTION",
+            label: "Import Playlist (.m3u / .m3u8 / .pls)…".into(),
+            subtitle: "Create playlist from file".into(),
+            action: PaletteCommand::ImportPlaylist,
+        });
+        entries.push(PaletteEntry {
+            category: "ACTION",
+            label: "Export Current View / Playlist (.m3u8 / .pls)…".into(),
+            subtitle: "Save tracks to standard playlist".into(),
+            action: PaletteCommand::ExportActivePlaylist,
         });
         entries.push(PaletteEntry {
             category: "ACTION",
@@ -4982,6 +6294,25 @@ impl TxPlayerApp {
                 let next = !self.compact_mode;
                 self.set_compact_mode(ctx, next);
             }
+            PaletteCommand::ToggleLyrics => {
+                self.show_lyrics = !self.show_lyrics;
+                self.sync_lyrics_for_current();
+            }
+            PaletteCommand::ImportPlaylist => self.import_playlist_dialog(),
+            PaletteCommand::ExportActivePlaylist => {
+                let visible = self.visible_tracks();
+                let ids: Vec<u64> = visible.iter().map(|t| t.id).collect();
+                let name = match self.view {
+                    View::Playlist(pl_id) => self
+                        .store
+                        .active()
+                        .playlist(pl_id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Playlist".into()),
+                    _ => self.store.active().name.clone(),
+                };
+                self.export_playlist_dialog(&name, ids);
+            }
             PaletteCommand::EditCurrentTags => {
                 if let Some(cid) = self.current_id() {
                     self.open_tag_editor_for_ids(&[cid]);
@@ -5096,14 +6427,15 @@ impl TxPlayerApp {
             p.faint,
         );
 
-        // Top-right compact utility icons: Expand | Settings | Playlist Drawer | Visualizer | Pin
+        // Top-right compact utility icons: Expand | Settings | Playlist Drawer | Visualizer | Lyrics | Pin
         let right_x = hdr_rect.right() - 14.0;
         let step = 22.0;
         let btn_expand_r = Rect::from_center_size(pos2(right_x, dot_y), Vec2::splat(20.0));
         let btn_set_r = Rect::from_center_size(pos2(right_x - step, dot_y), Vec2::splat(20.0));
         let btn_list_r = Rect::from_center_size(pos2(right_x - step * 2.0, dot_y), Vec2::splat(20.0));
         let btn_vis_r = Rect::from_center_size(pos2(right_x - step * 3.0, dot_y), Vec2::splat(20.0));
-        let btn_pin_r = Rect::from_center_size(pos2(right_x - step * 4.0, dot_y), Vec2::splat(20.0));
+        let btn_lyr_r = Rect::from_center_size(pos2(right_x - step * 4.0, dot_y), Vec2::splat(20.0));
+        let btn_pin_r = Rect::from_center_size(pos2(right_x - step * 5.0, dot_y), Vec2::splat(20.0));
 
         let draw_hdr_btn = |ui: &mut Ui, r: Rect, id: &str, icon: Icon, active: bool, tip: &str| {
             let resp = ui
@@ -5157,6 +6489,14 @@ impl TxPlayerApp {
             Stroke::new(1.2, pin_col),
         );
 
+        let lyr_clicked = draw_hdr_btn(
+            ui,
+            btn_lyr_r,
+            "cmp_lyr",
+            Icon::Lyrics,
+            self.show_lyrics,
+            "Toggle Lyrics (L)",
+        );
         let vis_clicked = draw_hdr_btn(
             ui,
             btn_vis_r,
@@ -5195,7 +6535,11 @@ impl TxPlayerApp {
         );
 
         if close_resp.clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if self.close_to_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         } else if min_resp.clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         } else if pin_resp.clicked() {
@@ -5205,6 +6549,9 @@ impl TxPlayerApp {
             } else {
                 egui::WindowLevel::Normal
             }));
+        } else if lyr_clicked {
+            self.show_lyrics = !self.show_lyrics;
+            self.sync_lyrics_for_current();
         } else if vis_clicked {
             self.show_concert_visualizer = !self.show_concert_visualizer;
             self.sync_compact_height(ctx);
@@ -5380,6 +6727,7 @@ impl TxPlayerApp {
                         active,
                         waveform.map(Vec::as_slice),
                         self.progress_style,
+                        (self.loop_a, self.loop_b),
                         &p,
                     ) {
                         self.audio.seek(new_pos);
@@ -6004,6 +7352,7 @@ enum ContextMenuAction {
     EditTags,
     TrackInfo(u64),
     RevealInFinder(u64),
+    SetRating(u64, u8),
     RemoveSelected,
 }
 
@@ -6048,6 +7397,18 @@ impl eframe::App for TxPlayerApp {
                         .stroke(Stroke::new(1.0, p.border)),
                 )
                 .show(root, |ui| self.sidebar(&context, ui));
+
+            if self.show_lyrics {
+                egui::Panel::right("lyrics_panel")
+                    .exact_size(276.0)
+                    .frame(
+                        Frame::new()
+                            .fill(p.sidebar)
+                            .inner_margin(Margin::symmetric(12, 12))
+                            .stroke(Stroke::new(1.0, p.border)),
+                    )
+                    .show(root, |ui| self.lyrics_panel_contents(ui));
+            }
 
             egui::CentralPanel::default()
                 .frame(
@@ -6152,6 +7513,13 @@ impl Drop for TxPlayerApp {
             return;
         }
         self.store.save();
+        SessionState {
+            active_library_id: self.store.active_id,
+            queue_ids: self.current_queue.clone(),
+            current_index: self.current_index,
+            position_secs: self.position,
+        }
+        .save();
         Preferences {
             volume: self.volume,
             shuffle: self.shuffle,
@@ -6170,6 +7538,8 @@ impl Drop for TxPlayerApp {
             plugins: self.plugins.clone(),
             compact_mode: self.compact_mode,
             compact_show_playlist: self.compact_show_playlist,
+            close_to_tray: self.close_to_tray,
+            auto_watch_folders: self.auto_watch_folders,
         }
         .save();
     }
@@ -6370,6 +7740,7 @@ fn acoustic_timeline_scrubber(
     active: bool,
     waveform: Option<&[f32]>,
     style: ProgressBarStyle,
+    ab_loop: (Option<f64>, Option<f64>),
     p: &Palette,
 ) -> Option<f64> {
     let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click_and_drag());
@@ -6678,6 +8049,27 @@ fn acoustic_timeline_scrubber(
                         p.text,
                     );
                 }
+            }
+        }
+
+        // Subtle shaded A-B section loop bracket overlay when active
+        if active && duration > 0.01 {
+            if let (Some(a), Some(b)) = ab_loop
+                && b > a
+            {
+                let ax = bg_rect.left() + bg_rect.width() * (a / duration).clamp(0.0, 1.0) as f32;
+                let bx = bg_rect.left() + bg_rect.width() * (b / duration).clamp(0.0, 1.0) as f32;
+                let span = Rect::from_min_max(pos2(ax, bg_rect.top() + 1.0), pos2(bx, bg_rect.bottom() - 1.0));
+                painter.rect_filled(
+                    span,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(p.hires_gold.r(), p.hires_gold.g(), p.hires_gold.b(), 34),
+                );
+                painter.line_segment([pos2(ax, bg_rect.top() + 1.0), pos2(ax, bg_rect.bottom() - 1.0)], Stroke::new(1.5, p.hires_gold));
+                painter.line_segment([pos2(bx, bg_rect.top() + 1.0), pos2(bx, bg_rect.bottom() - 1.0)], Stroke::new(1.5, p.hires_gold));
+            } else if let Some(a) = ab_loop.0 {
+                let ax = bg_rect.left() + bg_rect.width() * (a / duration).clamp(0.0, 1.0) as f32;
+                painter.line_segment([pos2(ax, bg_rect.top() + 1.0), pos2(ax, bg_rect.bottom() - 1.0)], Stroke::new(1.5, p.hires_gold));
             }
         }
 

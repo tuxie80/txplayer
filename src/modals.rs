@@ -13,8 +13,8 @@ use crate::library::cover_directory;
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, reveal_in_file_manager};
 use crate::plugins::{
-    DspConfig, EQ_FREQ_LABELS, EqPreset, PianoEngineId, PluginConfig, TagProviderConfig,
-    ToolHealth,
+    DspConfig, EQ_FREQ_LABELS, EqPreset, PianoEngineId, PluginConfig, ReplayGainMode,
+    TagProviderConfig, ToolHealth,
 };
 use crate::tagger::{
     EditableTags, LookupStrategy, TagCandidate, TrackHashes, compute_fast_audio_hash,
@@ -661,9 +661,12 @@ pub struct SettingsViewActions {
     pub device_changed: Option<Option<String>>,
     pub linear_vol_changed: Option<bool>,
     pub dsp_changed: bool,
+    pub rg_changed: bool,
+    pub watch_changed: Option<bool>,
     pub open_folders: bool,
     pub open_libraries: bool,
     pub prune_missing: bool,
+    pub import_playlist: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -675,6 +678,8 @@ pub fn show_settings_window(
     theme_id: ThemeId,
     progress_style: &mut ProgressBarStyle,
     row_density: &mut RowDensity,
+    close_to_tray: &mut bool,
+    auto_watch_folders: &mut bool,
     vis_mode: &mut VisualizerMode,
     show_concert_vis: &mut bool,
     concert_vis_height: &mut f32,
@@ -693,9 +698,12 @@ pub fn show_settings_window(
         device_changed: None,
         linear_vol_changed: None,
         dsp_changed: false,
+        rg_changed: false,
+        watch_changed: None,
         open_folders: false,
         open_libraries: false,
         prune_missing: false,
+        import_playlist: false,
     };
     if !*open {
         return actions;
@@ -893,6 +901,13 @@ pub fn show_settings_window(
                             *row_density = RowDensity::Comfortable;
                         }
                     });
+                    ui.add_space(6.0);
+                    aligned_checkbox_row(
+                        ui,
+                        close_to_tray,
+                        "Minimize to system tray instead of quitting on close",
+                        palette,
+                    );
                 }
                 SettingsTab::Visualizer => {
                     ui.horizontal(|ui| {
@@ -1127,6 +1142,124 @@ pub fn show_settings_window(
                         if paint_dsp_controls(ui, &mut plugins.dsp, palette) {
                             actions.dsp_changed = true;
                         }
+
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("PLAYBACK ENGINE · GAPLESS · BIT-PERFECT · REPLAYGAIN")
+                                .size(10.0)
+                                .strong()
+                                .color(palette.faint),
+                        );
+                        ui.add_space(4.0);
+                        let prev_bp = plugins.dsp.bit_perfect_mode;
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.dsp.bit_perfect_mode,
+                            "Bit-Perfect Direct Output (bypass DSP & ReplayGain, auto-switch native DAC sample rate)",
+                            palette,
+                        );
+                        let prev_gap = plugins.dsp.gapless_enabled;
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.dsp.gapless_enabled,
+                            "True Gapless Playback (zero-silence transition between tracks & CUE sheets)",
+                            palette,
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("Crossfade: {:.1}s", plugins.dsp.crossfade_secs))
+                                    .size(11.0)
+                                    .color(palette.text_secondary),
+                            );
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut plugins.dsp.crossfade_secs, 0.0..=6.0)
+                                        .step_by(0.5)
+                                        .show_value(false),
+                                )
+                                .changed()
+                            {
+                                actions.dsp_changed = true;
+                            }
+                            ui.label(
+                                RichText::new(if plugins.dsp.crossfade_secs <= 0.05 {
+                                    "Off (pure gapless)"
+                                } else {
+                                    "Equal-power fade"
+                                })
+                                .size(10.0)
+                                .color(palette.faint),
+                            );
+                        });
+                        if plugins.dsp.bit_perfect_mode != prev_bp
+                            || plugins.dsp.gapless_enabled != prev_gap
+                        {
+                            actions.dsp_changed = true;
+                            actions.rg_changed = true;
+                        }
+
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("ReplayGain:")
+                                    .size(11.0)
+                                    .color(palette.text_secondary),
+                            );
+                            for &mode in ReplayGainMode::ALL {
+                                if pill_button(
+                                    ui,
+                                    mode.name(),
+                                    None,
+                                    if plugins.dsp.replay_gain == mode {
+                                        PillStyle::Active
+                                    } else {
+                                        PillStyle::Secondary
+                                    },
+                                    palette,
+                                )
+                                .clicked()
+                                {
+                                    plugins.dsp.replay_gain = mode;
+                                    actions.rg_changed = true;
+                                }
+                            }
+                            ui.add_space(6.0);
+                            let prev_clip = plugins.dsp.rg_prevent_clipping;
+                            aligned_inline_checkbox(
+                                ui,
+                                &mut plugins.dsp.rg_prevent_clipping,
+                                "Peak Guard",
+                                98.0,
+                                palette,
+                            );
+                            if plugins.dsp.rg_prevent_clipping != prev_clip {
+                                actions.rg_changed = true;
+                            }
+                        });
+                        if plugins.dsp.replay_gain != ReplayGainMode::Off {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "RG Preamp: {:+.1} dB",
+                                        plugins.dsp.rg_preamp_db
+                                    ))
+                                    .size(11.0)
+                                    .color(palette.text_secondary),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut plugins.dsp.rg_preamp_db, -6.0..=6.0)
+                                            .step_by(0.5)
+                                            .show_value(false),
+                                    )
+                                    .changed()
+                                {
+                                    actions.rg_changed = true;
+                                }
+                            });
+                        }
                     });
                 }
                 SettingsTab::Plugins => {
@@ -1356,6 +1489,31 @@ pub fn show_settings_window(
                             actions.prune_missing = true;
                         }
                     });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if pill_button(
+                            ui,
+                            "Import Playlist (.m3u / .pls)…",
+                            Some(Icon::Playlist),
+                            PillStyle::Secondary,
+                            palette,
+                        )
+                        .clicked()
+                        {
+                            actions.import_playlist = true;
+                        }
+                    });
+                    ui.add_space(6.0);
+                    let prev_watch = *auto_watch_folders;
+                    aligned_checkbox_row(
+                        ui,
+                        auto_watch_folders,
+                        "Auto-sync linked directories in background (live folder watching)",
+                        palette,
+                    );
+                    if *auto_watch_folders != prev_watch {
+                        actions.watch_changed = Some(*auto_watch_folders);
+                    }
                     ui.add_space(14.0);
                     ui.label(
                         RichText::new("ONLINE TAG SERVICES")
@@ -1912,6 +2070,63 @@ pub fn show_track_info_window(
                     if let Some(aa) = &track.album_artist {
                         row("Album Artist", aa.clone());
                     }
+                    if track.play_count > 0 {
+                        row("Plays", track.play_count.to_string());
+                    }
+                    if track.rg_track_gain_db.is_some() || track.rg_album_gain_db.is_some() {
+                        let rg_t = track
+                            .rg_track_gain_db
+                            .map(|g| format!("Track {:+.2} dB", g))
+                            .unwrap_or_default();
+                        let rg_a = track
+                            .rg_album_gain_db
+                            .map(|g| format!("Album {:+.2} dB", g))
+                            .unwrap_or_default();
+                        let joined = [rg_t, rg_a]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("  ·  ");
+                        row("ReplayGain", joined);
+                    }
+                    if let Some(cs) = track.cue_start {
+                        let end_s = track
+                            .cue_end
+                            .map(|e| format_duration(Some(e)))
+                            .unwrap_or_else(|| "End".into());
+                        row("CUE Span", format!("{} → {}", format_duration(Some(cs)), end_s));
+                    }
+                    ui.label(RichText::new("Rating").size(11.0).color(palette.faint));
+                    ui.horizontal(|ui| {
+                        ui.style_mut().spacing.item_spacing.x = 2.0;
+                        for star in 1..=5u8 {
+                            let filled = star <= track.rating;
+                            if icons::icon_button(
+                                ui,
+                                Vec2::splat(20.0),
+                                if filled {
+                                    Icon::StarFilled
+                                } else {
+                                    Icon::StarOutline
+                                },
+                                13.0,
+                                if filled {
+                                    palette.hires_gold
+                                } else {
+                                    palette.faint
+                                },
+                                palette.hires_gold,
+                                palette.hover,
+                                &format!("Set {star}-star rating (click active star to clear)"),
+                            )
+                            .clicked()
+                            {
+                                let next = if track.rating == star { 0 } else { star };
+                                action = Some(TrackInfoAction::SetRating(next));
+                            }
+                        }
+                    });
+                    ui.end_row();
                     ui.label(RichText::new("Location").size(11.0).color(palette.faint));
                     ui.add(
                         egui::Label::new(
@@ -1964,6 +2179,7 @@ pub enum TrackInfoAction {
     EditTags,
     RevealInFinder,
     Remove,
+    SetRating(u8),
 }
 
 pub enum FolderModalAction {
@@ -2316,7 +2532,17 @@ pub struct SignalPathDisplay<'a> {
     pub bitrate_kbps: Option<u32>,
     pub variable_bitrate: bool,
     pub device_name: &'a str,
-    pub vis_compute_ms: f32,
+    pub bit_perfect: bool,
+    pub rg_gain_db: Option<f32>,
+}
+
+pub struct SignalPathActions {
+    pub dsp_changed: bool,
+    pub open_settings_dsp: bool,
+    pub speed_changed: Option<f32>,
+    pub set_loop_a: bool,
+    pub set_loop_b: bool,
+    pub clear_loop: bool,
 }
 
 /// Renders a sleek, themed popover card anchored directly above `anchor_rect` with a downward pointer caret.
@@ -2618,6 +2844,7 @@ pub fn show_device_picker_popover(
 
 /// Audirvana-inspired Signal Path Inspector + Quick DSP Popover anchored directly above telemetry.
 /// Returns `(dsp_changed, open_full_dsp_settings)`.
+#[allow(clippy::too_many_arguments)]
 pub fn show_signal_path_popover(
     context: &egui::Context,
     open: &mut bool,
@@ -2625,20 +2852,28 @@ pub fn show_signal_path_popover(
     transport_height: f32,
     signal: Option<SignalPathDisplay<'_>>,
     plugins: &mut PluginConfig,
+    playback_speed: f32,
+    ab_loop: (Option<f64>, Option<f64>),
     palette: &Palette,
-) -> (bool, bool) {
+) -> SignalPathActions {
+    let mut out = SignalPathActions {
+        dsp_changed: false,
+        open_settings_dsp: false,
+        speed_changed: None,
+        set_loop_a: false,
+        set_loop_b: false,
+        clear_loop: false,
+    };
     if !*open {
-        return (false, false);
+        return out;
     }
-    let mut dsp_changed = false;
-    let mut open_settings_dsp = false;
 
     anchored_popover(
         context,
         "signal_path_popover",
         "Signal Path & Live DSP",
         Icon::Sliders,
-        368.0,
+        380.0,
         anchor_rect,
         transport_height + 12.0,
         open,
@@ -2675,34 +2910,56 @@ pub fn show_signal_path_popover(
                 stage_row(
                     ui,
                     "1",
-                    "Source Decoder (Symphonia SIMD)",
-                    format!("{} · {}{} · {} ch{}", s.codec, bits, format_sample_rate(s.source_rate), s.channels, br),
+                    "Source Decoder",
+                    format!(
+                        "{} · {}{} · {} ch{}",
+                        s.codec,
+                        bits,
+                        format_sample_rate(s.source_rate),
+                        s.channels,
+                        br
+                    ),
                     palette.accent,
                 );
                 ui.add_space(4.0);
-                let native = s.source_rate == s.output_rate;
+                let native = s.source_rate == s.output_rate && (playback_speed - 1.0).abs() < 0.001;
                 stage_row(
                     ui,
                     "2",
-                    "Sample-Rate Stage",
-                    if native {
+                    "Sample-Rate & Tempo",
+                    if s.bit_perfect {
+                        format!("BIT-PERFECT DIRECT ({})", format_sample_rate(s.output_rate))
+                    } else if native {
                         format!("Native Bit-Matched ({})", format_sample_rate(s.output_rate))
                     } else {
                         format!(
-                            "Rubato SincFixedIn ({} → {})",
+                            "Rubato Sinc ({} → {}, {:.2}x)",
                             format_sample_rate(s.source_rate),
-                            format_sample_rate(s.output_rate)
+                            format_sample_rate(s.output_rate),
+                            playback_speed
                         )
                     },
-                    if native { palette.accent } else { palette.hires_gold },
+                    if s.bit_perfect || native {
+                        palette.accent
+                    } else {
+                        palette.hires_gold
+                    },
                 );
                 ui.add_space(4.0);
+                let rg_note = match s.rg_gain_db {
+                    Some(db) => format!(" · RG {:+.1} dB", db),
+                    None => String::new(),
+                };
                 stage_row(
                     ui,
                     "3",
-                    "Real-Time DSP Engine",
-                    plugins.dsp.summary(),
-                    if plugins.dsp.is_actively_processing() {
+                    "DSP & ReplayGain",
+                    if plugins.dsp.bit_perfect_mode {
+                        "Bypassed (Bit-Perfect Direct)".into()
+                    } else {
+                        format!("{}{}", plugins.dsp.summary(), rg_note)
+                    },
+                    if plugins.dsp.is_actively_processing() && !plugins.dsp.bit_perfect_mode {
                         palette.accent_secondary
                     } else {
                         palette.accent
@@ -2716,18 +2973,6 @@ pub fn show_signal_path_popover(
                     format!("{} ({})", s.device_name, format_sample_rate(s.output_rate)),
                     palette.accent_bright,
                 );
-                ui.add_space(4.0);
-                stage_row(
-                    ui,
-                    "5",
-                    "Piano Analysis Tap",
-                    format!(
-                        "{} · {:.2} ms/frame",
-                        plugins.visualizers.piano_engine.short_name(),
-                        s.vis_compute_ms
-                    ),
-                    palette.muted,
-                );
             } else {
                 ui.label(
                     RichText::new("No active audio stream. Play a track to inspect live bit-path.")
@@ -2736,31 +2981,46 @@ pub fn show_signal_path_popover(
                 );
             }
 
-            ui.add_space(8.0);
-            ui.separator();
             ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(5.0);
+            // Quick Speed & A-B Section Loop row
             ui.horizontal(|ui| {
-                if pill_button(
-                    ui,
-                    if plugins.dsp.enabled { "DSP: On" } else { "DSP: Bypass" },
-                    Some(Icon::Sliders),
-                    if plugins.dsp.enabled {
-                        PillStyle::Accent
-                    } else {
-                        PillStyle::Secondary
-                    },
-                    palette,
-                )
-                .clicked()
-                {
-                    plugins.dsp.enabled = !plugins.dsp.enabled;
-                    dsp_changed = true;
+                ui.label(RichText::new("Speed:").size(10.5).color(palette.muted));
+                for &spd in &[0.75_f32, 0.85, 1.0, 1.25, 1.5] {
+                    if pill_button(
+                        ui,
+                        &format!("{spd}x"),
+                        None,
+                        if (playback_speed - spd).abs() < 0.02 {
+                            PillStyle::Active
+                        } else {
+                            PillStyle::Secondary
+                        },
+                        palette,
+                    )
+                    .clicked()
+                    {
+                        out.speed_changed = Some(spd);
+                    }
                 }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("A-B Loop:").size(10.5).color(palette.muted));
+                let a_lbl = ab_loop
+                    .0
+                    .map(|a| format!("A {}", format_duration(Some(a))))
+                    .unwrap_or_else(|| "Set A ([)".into());
+                let b_lbl = ab_loop
+                    .1
+                    .map(|b| format!("B {}", format_duration(Some(b))))
+                    .unwrap_or_else(|| "Set B (])".into());
                 if pill_button(
                     ui,
-                    "Crossfeed",
+                    &a_lbl,
                     None,
-                    if plugins.dsp.enabled && plugins.dsp.crossfeed_enabled {
+                    if ab_loop.0.is_some() {
                         PillStyle::Active
                     } else {
                         PillStyle::Secondary
@@ -2769,15 +3029,89 @@ pub fn show_signal_path_popover(
                 )
                 .clicked()
                 {
+                    out.set_loop_a = true;
+                }
+                if pill_button(
+                    ui,
+                    &b_lbl,
+                    None,
+                    if ab_loop.1.is_some() {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    palette,
+                )
+                .clicked()
+                {
+                    out.set_loop_b = true;
+                }
+                if (ab_loop.0.is_some() || ab_loop.1.is_some())
+                    && pill_button(ui, "Clear", Some(Icon::Close), PillStyle::Danger, palette)
+                        .clicked()
+                {
+                    out.clear_loop = true;
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                if pill_button(
+                    ui,
+                    if plugins.dsp.bit_perfect_mode {
+                        "Bit-Perfect"
+                    } else if plugins.dsp.enabled {
+                        "DSP: On"
+                    } else {
+                        "DSP: Bypass"
+                    },
+                    Some(Icon::Sliders),
+                    if plugins.dsp.bit_perfect_mode {
+                        PillStyle::Active
+                    } else if plugins.dsp.enabled {
+                        PillStyle::Accent
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    palette,
+                )
+                .clicked()
+                {
+                    if plugins.dsp.bit_perfect_mode {
+                        plugins.dsp.bit_perfect_mode = false;
+                    } else {
+                        plugins.dsp.enabled = !plugins.dsp.enabled;
+                    }
+                    out.dsp_changed = true;
+                }
+                if pill_button(
+                    ui,
+                    "Crossfeed",
+                    None,
+                    if !plugins.dsp.bit_perfect_mode
+                        && plugins.dsp.enabled
+                        && plugins.dsp.crossfeed_enabled
+                    {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    palette,
+                )
+                .clicked()
+                {
+                    plugins.dsp.bit_perfect_mode = false;
                     plugins.dsp.crossfeed_enabled = !plugins.dsp.crossfeed_enabled;
                     if plugins.dsp.crossfeed_enabled {
                         plugins.dsp.enabled = true;
                     }
-                    dsp_changed = true;
+                    out.dsp_changed = true;
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if pill_button(ui, "EQ & DSP…", None, PillStyle::Secondary, palette).clicked() {
-                        open_settings_dsp = true;
+                        out.open_settings_dsp = true;
                     }
                 });
             });
@@ -2793,7 +3127,10 @@ pub fn show_signal_path_popover(
                         ui,
                         preset.name(),
                         None,
-                        if plugins.dsp.enabled && plugins.dsp.eq_preset == preset {
+                        if !plugins.dsp.bit_perfect_mode
+                            && plugins.dsp.enabled
+                            && plugins.dsp.eq_preset == preset
+                        {
                             PillStyle::Active
                         } else {
                             PillStyle::Secondary
@@ -2802,17 +3139,19 @@ pub fn show_signal_path_popover(
                     )
                     .clicked()
                     {
+                        plugins.dsp.bit_perfect_mode = false;
                         plugins.dsp.apply_preset(preset);
-                        plugins.dsp.enabled = preset != EqPreset::Flat || plugins.dsp.crossfeed_enabled;
+                        plugins.dsp.enabled =
+                            preset != EqPreset::Flat || plugins.dsp.crossfeed_enabled;
                         plugins.dsp.eq_enabled = true;
-                        dsp_changed = true;
+                        out.dsp_changed = true;
                     }
                 }
             });
         },
     );
 
-    (dsp_changed, open_settings_dsp)
+    out
 }
 
 #[derive(Clone)]
@@ -2826,6 +3165,9 @@ pub enum PaletteCommand {
     ToggleDsp,
     ToggleVisualizer,
     ToggleCompactMode,
+    ToggleLyrics,
+    ImportPlaylist,
+    ExportActivePlaylist,
     EditCurrentTags,
     OpenSettings(SettingsTab),
     AddFolder,

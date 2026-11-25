@@ -98,6 +98,30 @@ impl EqPreset {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReplayGainMode {
+    #[default]
+    Off,
+    Track,
+    Album,
+}
+
+impl ReplayGainMode {
+    pub const ALL: &'static [ReplayGainMode] = &[
+        ReplayGainMode::Off,
+        ReplayGainMode::Track,
+        ReplayGainMode::Album,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ReplayGainMode::Off => "Off",
+            ReplayGainMode::Track => "Track",
+            ReplayGainMode::Album => "Album",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DspConfig {
     #[serde(default)]
@@ -116,6 +140,19 @@ pub struct DspConfig {
     pub soft_limiter: bool,
     #[serde(default)]
     pub preamp_db: f32,
+    // Gapless, Crossfade, ReplayGain, and Bit-Perfect Exclusive settings
+    #[serde(default = "default_true")]
+    pub gapless_enabled: bool,
+    #[serde(default)]
+    pub crossfade_secs: f32,
+    #[serde(default)]
+    pub replay_gain: ReplayGainMode,
+    #[serde(default)]
+    pub rg_preamp_db: f32,
+    #[serde(default = "default_true")]
+    pub rg_prevent_clipping: bool,
+    #[serde(default)]
+    pub bit_perfect_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -141,6 +178,12 @@ impl Default for DspConfig {
             crossfeed_amount: default_crossfeed(),
             soft_limiter: true,
             preamp_db: 0.0,
+            gapless_enabled: true,
+            crossfade_secs: 0.0,
+            replay_gain: ReplayGainMode::Off,
+            rg_preamp_db: 0.0,
+            rg_prevent_clipping: true,
+            bit_perfect_mode: false,
         }
     }
 }
