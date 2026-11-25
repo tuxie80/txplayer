@@ -14,10 +14,16 @@ jobs:
         include:
           - os: macos-latest
             name: macOS
+            artifact_name: txplayer-macos-arm64
+            artifact_path: target/release/txplayer
           - os: ubuntu-latest
             name: Linux
+            artifact_name: txplayer-linux-x86_64
+            artifact_path: target/release/txplayer
           - os: windows-latest
             name: Windows
+            artifact_name: txplayer-windows-x86_64
+            artifact_path: target/release/txplayer.exe
 
     runs-on: ${{ matrix.os }}
     name: Build & Test (${{ matrix.name }})
@@ -47,3 +53,11 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release
+
+      - name: Upload release binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          retention-days: 30
+          if-no-files-found: error
