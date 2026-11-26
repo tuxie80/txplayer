@@ -76,13 +76,11 @@ pub fn dop_pcm_sample_rate(dsd_rate_hz: u32) -> Option<u32> {
 /// Pure-Rust DSD over PCM (DoP v1.1) 24-bit integer framer.
 /// Packs pairs of 1-bit DSD bytes (MSB-first in time) into 32-bit left-aligned PCM words:
 /// `[marker (0x05 / 0xFA) << 24 | msb_dsd << 16 | lsb_dsd << 8 | 0x00]`.
-#[allow(dead_code)]
 pub struct DopFramer {
     marker_toggle: bool,
     lsb_first_source: bool,
 }
 
-#[allow(dead_code)]
 impl DopFramer {
     pub fn new(lsb_first_source: bool) -> Self {
         Self {
@@ -107,6 +105,202 @@ impl DopFramer {
         let wr = (marker << 24) | (fix(r0) << 16) | (fix(r1) << 8);
         (wl as i32, wr as i32)
     }
+}
+
+/// Live streaming DSD over PCM (DoP v1.1) reader for stereo DSD64 (176.4 kHz) & DSD128 (352.8 kHz) files.
+pub struct DsdDopReader {
+    file: File,
+    pub info: DsdInfo,
+    pub dop_sample_rate: u32,
+    framer: DopFramer,
+    byte_cursor: u64,
+    total_bytes_per_ch: u64,
+    dsf_block_idx: Option<u64>,
+    dsf_block_buf: Vec<u8>,
+}
+
+impl DsdDopReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let (info, _) = probe_dsd(path)?;
+        if info.channels != 2 {
+            return Err(anyhow!("DoP v1.1 passthrough requires stereo DSD (got {} ch)", info.channels));
+        }
+        let dop_sample_rate = dop_pcm_sample_rate(info.sample_rate_hz).ok_or_else(|| {
+            anyhow!(
+                "{} ({} Hz) exceeds DoP v1.1 transport rate; using 64-bit FIR PCM",
+                info.dsd_label,
+                info.sample_rate_hz
+            )
+        })?;
+        let file = File::open(path)?;
+        let total_bytes_per_ch = info
+            .total_dsd_samples
+            .div_ceil(8)
+            .min(info.data_len / info.channels.max(1) as u64);
+        let dsf_buf_len = if info.container == DsdContainer::Dsf {
+            info.block_size_per_ch * info.channels
+        } else {
+            0
+        };
+        let framer = DopFramer::new(info.lsb_first);
+        Ok(Self {
+            file,
+            info,
+            dop_sample_rate,
+            framer,
+            byte_cursor: 0,
+            total_bytes_per_ch,
+            dsf_block_idx: None,
+            dsf_block_buf: vec![0u8; dsf_buf_len],
+        })
+    }
+
+    pub fn seek(&mut self, seconds: f64) -> Result<()> {
+        let dsd_sample = (seconds.max(0.0) * self.info.sample_rate_hz as f64).round() as u64;
+        // Align to 2-byte DoP frame boundary (16 DSD bits per channel per DoP PCM frame)
+        let target_byte = ((dsd_sample / 8) / 2) * 2;
+        self.byte_cursor = target_byte.min(self.total_bytes_per_ch);
+        self.dsf_block_idx = None;
+        Ok(())
+    }
+
+    /// Reads up to `max_frames` stereo DoP v1.1 `i32` frames into `out_i32` (interleaved L, R)
+    /// and a lightweight approximate float copy into `vis_pcm` for live visualizer/VU feedback.
+    pub fn read_dop_frames(
+        &mut self,
+        max_frames: usize,
+        out_i32: &mut Vec<i32>,
+        vis_pcm: &mut Vec<f32>,
+    ) -> Result<usize> {
+        out_i32.clear();
+        vis_pcm.clear();
+        let remaining_bytes = self.total_bytes_per_ch.saturating_sub(self.byte_cursor) as usize;
+        let frames = (remaining_bytes / 2).min(max_frames);
+        if frames == 0 {
+            return Ok(0);
+        }
+        out_i32.reserve(frames * 2);
+        vis_pcm.reserve(frames * 2);
+
+        match self.info.container {
+            DsdContainer::Dsf => {
+                let bsz = self.info.block_size_per_ch.max(1);
+                let read_stereo_byte = |this: &mut Self| -> Result<(u8, u8)> {
+                    let blk = this.byte_cursor / bsz as u64;
+                    let off = (this.byte_cursor % bsz as u64) as usize;
+                    if this.dsf_block_idx != Some(blk) {
+                        let file_off = this.info.data_offset + blk * (bsz * 2) as u64;
+                        this.file.seek(SeekFrom::Start(file_off))?;
+                        let mut filled = 0;
+                        while filled < this.dsf_block_buf.len() {
+                            let n = this.file.read(&mut this.dsf_block_buf[filled..])?;
+                            if n == 0 {
+                                this.dsf_block_buf[filled..].fill(0x69);
+                                break;
+                            }
+                            filled += n;
+                        }
+                        this.dsf_block_idx = Some(blk);
+                    }
+                    let l = this.dsf_block_buf[off];
+                    let r = this.dsf_block_buf[bsz + off];
+                    this.byte_cursor += 1;
+                    Ok((l, r))
+                };
+                for _ in 0..frames {
+                    let (l0, r0) = read_stereo_byte(self)?;
+                    let (l1, r1) = read_stereo_byte(self)?;
+                    let (wl, wr) = self.framer.pack_stereo_frame(l0, l1, r0, r1);
+                    out_i32.push(wl);
+                    out_i32.push(wr);
+                    let vl = ((l0.count_ones() + l1.count_ones()) as f32 - 8.0) * 0.125;
+                    let vr = ((r0.count_ones() + r1.count_ones()) as f32 - 8.0) * 0.125;
+                    vis_pcm.push(vl.clamp(-1.0, 1.0));
+                    vis_pcm.push(vr.clamp(-1.0, 1.0));
+                }
+            }
+            DsdContainer::Dff => {
+                let bytes_needed = frames * 4;
+                let file_off = self.info.data_offset + self.byte_cursor * 2;
+                self.file.seek(SeekFrom::Start(file_off))?;
+                let mut raw = vec![0u8; bytes_needed];
+                let mut filled = 0;
+                while filled < raw.len() {
+                    let n = self.file.read(&mut raw[filled..])?;
+                    if n == 0 {
+                        raw[filled..].fill(0x69);
+                        break;
+                    }
+                    filled += n;
+                }
+                self.byte_cursor += (frames * 2) as u64;
+                for chunk in raw.chunks_exact(4) {
+                    let (l0, r0, l1, r1) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+                    let (wl, wr) = self.framer.pack_stereo_frame(l0, l1, r0, r1);
+                    out_i32.push(wl);
+                    out_i32.push(wr);
+                    let vl = ((l0.count_ones() + l1.count_ones()) as f32 - 8.0) * 0.125;
+                    let vr = ((r0.count_ones() + r1.count_ones()) as f32 - 8.0) * 0.125;
+                    vis_pcm.push(vl.clamp(-1.0, 1.0));
+                    vis_pcm.push(vr.clamp(-1.0, 1.0));
+                }
+            }
+        }
+        Ok(frames)
+    }
+}
+
+/// Probed metadata from a Scarlet Book SACD `.iso` Master TOC (sector 510).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SacdIsoInfo {
+    pub album_title: String,
+    pub album_artist: String,
+    pub publisher: String,
+    pub disc_year: u16,
+    pub has_stereo_area: bool,
+    pub has_multichannel_area: bool,
+}
+
+/// Pure-Rust SACD `.iso` container inspector (parses Scarlet Book `SACDMTOC` at sector 510).
+#[allow(dead_code)]
+pub fn probe_sacd_iso(path: &Path) -> Result<SacdIsoInfo> {
+    const MASTER_TOC_OFFSET: u64 = 510 * 2048;
+    let mut file = File::open(path).with_context(|| format!("Opening SACD ISO {}", path.display()))?;
+    file.seek(SeekFrom::Start(MASTER_TOC_OFFSET))
+        .context("Seeking to SACD Master TOC (sector 510)")?;
+    let mut sec = [0u8; 2048];
+    file.read_exact(&mut sec)
+        .context("Reading SACD Master TOC sector")?;
+    parse_sacd_master_toc(&sec)
+}
+
+#[allow(dead_code)]
+fn parse_sacd_master_toc(sec: &[u8]) -> Result<SacdIsoInfo> {
+    if sec.len() < 2048 || &sec[0..8] != b"SACDMTOC" {
+        return Err(anyhow!("Not a valid Scarlet Book SACD ISO (missing SACDMTOC signature)"));
+    }
+    let disc_year = u16::from_be_bytes([sec[100], sec[101]]);
+    let area1_start = u32::from_be_bytes([sec[64], sec[65], sec[66], sec[67]]);
+    let area2_start = u32::from_be_bytes([sec[72], sec[73], sec[74], sec[75]]);
+    let read_cstr = |start: usize, max_len: usize| -> String {
+        let end = (start + max_len).min(sec.len());
+        let slice = &sec[start..end];
+        let nul = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+        String::from_utf8_lossy(&slice[..nul]).trim().to_string()
+    };
+    // Master Text offsets (2-byte BE offsets inside Master Text sector; also check inline ASCII area)
+    let album_title = read_cstr(128, 128);
+    let album_artist = read_cstr(256, 128);
+    let publisher = read_cstr(384, 128);
+    Ok(SacdIsoInfo {
+        album_title,
+        album_artist,
+        publisher,
+        disc_year,
+        has_stereo_area: area1_start > 0,
+        has_multichannel_area: area2_start > 0,
+    })
 }
 
 /// Picks optimal integer decimation factor so DSD64 -> 88.2 kHz and DSD128/256/512 -> 176.4 kHz.
@@ -863,5 +1057,23 @@ mod tests {
         assert_eq!((r_b as u32) >> 24, 0xFA);
         assert_eq!(((r_b as u32) >> 16) & 0xFF, 0xF0);
         assert_eq!(((r_b as u32) >> 8) & 0xFF, 0x0F);
+    }
+
+    #[test]
+    fn sacd_iso_master_toc_parser_extracts_disc_metadata() {
+        let mut sec = [0u8; 2048];
+        sec[0..8].copy_from_slice(b"SACDMTOC");
+        sec[64..68].copy_from_slice(&600u32.to_be_bytes()); // stereo TOC start
+        sec[72..76].copy_from_slice(&12000u32.to_be_bytes()); // multichannel TOC start
+        sec[100..102].copy_from_slice(&2003u16.to_be_bytes());
+        sec[128..148].copy_from_slice(b"Goldberg Variations\0");
+        sec[256..268].copy_from_slice(b"Glenn Gould\0");
+        sec[384..398].copy_from_slice(b"Sony Classical");
+        let info = parse_sacd_master_toc(&sec).unwrap();
+        assert_eq!(info.album_title, "Goldberg Variations");
+        assert_eq!(info.album_artist, "Glenn Gould");
+        assert_eq!(info.publisher, "Sony Classical");
+        assert_eq!(info.disc_year, 2003);
+        assert!(info.has_stereo_area && info.has_multichannel_area);
     }
 }

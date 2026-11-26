@@ -12,7 +12,8 @@ use crate::audio::{default_output_device_name, list_output_devices};
 use crate::dsp::compute_eq_response_curve;
 use crate::icons::{self, Icon};
 use crate::library::{
-    DuplicateGroup, LibraryStats, QueryField, QueryOp, QueryRule, SavedView, cover_directory,
+    DuplicateGroup, LibraryStats, PlayHistoryEntry, QueryField, QueryOp, QueryRule, SavedView,
+    cover_directory,
 };
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{
@@ -2704,26 +2705,40 @@ pub fn show_track_info_window(
                             .unwrap_or_else(|| "End".into());
                         row("CUE Span", format!("{} → {}", format_duration(Some(cs)), end_s));
                     }
-                    if !track.custom_tags.is_empty() {
-                        ui.label(RichText::new("Tags").size(11.0).color(palette.faint));
-                        ui.horizontal_wrapped(|ui| {
-                            for tag in &track.custom_tags {
-                                if pill_button(
-                                    ui,
-                                    &format!("#{tag} ×"),
-                                    None,
-                                    PillStyle::Secondary,
-                                    palette,
-                                )
-                                .on_hover_text("Click to remove custom tag")
-                                .clicked()
-                                {
-                                    action = Some(TrackInfoAction::RemoveCustomTag(tag.clone()));
-                                }
+                    ui.label(RichText::new("Tags").size(11.0).color(palette.faint));
+                    ui.horizontal_wrapped(|ui| {
+                        for tag in &track.custom_tags {
+                            if pill_button(
+                                ui,
+                                &format!("#{tag} ×"),
+                                None,
+                                PillStyle::Secondary,
+                                palette,
+                            )
+                            .on_hover_text("Click to remove custom tag")
+                            .clicked()
+                            {
+                                action = Some(TrackInfoAction::RemoveCustomTag(tag.clone()));
                             }
-                        });
-                        ui.end_row();
-                    }
+                        }
+                        let tag_id = egui::Id::unique(("track_info_new_tag", track.id));
+                        let mut draft: String = ui
+                            .ctx()
+                            .data_mut(|d| d.get_temp::<String>(tag_id).unwrap_or_default());
+                        let resp = ui.add_sized(
+                            [116.0, 20.0],
+                            egui::TextEdit::singleline(&mut draft).hint_text("+ #tag + Enter"),
+                        );
+                        if resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !draft.trim().is_empty()
+                        {
+                            action = Some(TrackInfoAction::AddCustomTag(draft.trim().to_string()));
+                            draft.clear();
+                        }
+                        ui.ctx().data_mut(|d| d.insert_temp(tag_id, draft));
+                    });
+                    ui.end_row();
                     ui.label(RichText::new("Rating").size(11.0).color(palette.faint));
                     ui.horizontal(|ui| {
                         ui.style_mut().spacing.item_spacing.x = 2.0;
@@ -3089,6 +3104,7 @@ pub enum TrackInfoAction {
     SetRating(u8),
     AnalyzeQuality,
     RemoveCustomTag(String),
+    AddCustomTag(String),
 }
 
 pub enum FolderModalAction {
@@ -4743,11 +4759,12 @@ pub enum LibraryInsightsAction {
     OpenDbFolder,
 }
 
-/// Library Database Analytics, Format Distribution & Backup Dashboard modal.
+/// Library Database Analytics, Format Distribution, Listening History & Backup Dashboard modal.
 pub fn show_library_insights_modal(
     context: &egui::Context,
     library_name: &str,
     stats: &LibraryStats,
+    recent_history: &[PlayHistoryEntry],
     schema_version: u32,
     palette: &Palette,
 ) -> (bool, Option<LibraryInsightsAction>) {
@@ -4932,7 +4949,43 @@ pub fn show_library_insights_modal(
                 );
             });
 
-            ui.add_space(12.0);
+            if !recent_history.is_empty() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "RECENT LISTENING HISTORY ({} LOGGED PLAYS)",
+                        recent_history.len()
+                    ))
+                    .size(9.5)
+                    .strong()
+                    .color(palette.faint),
+                );
+                ui.add_space(3.0);
+                ScrollArea::vertical()
+                    .id_salt("insights_history_scroll")
+                    .max_height(88.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for ev in recent_history.iter().rev().take(20) {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(&ev.title)
+                                        .size(10.5)
+                                        .color(palette.text),
+                                );
+                                ui.label(
+                                    RichText::new(format!("— {} · {}", ev.artist, ev.album))
+                                        .size(10.0)
+                                        .color(palette.muted),
+                                );
+                            });
+                        }
+                    });
+            }
+
+            ui.add_space(10.0);
             ui.separator();
             ui.add_space(8.0);
 
@@ -5321,7 +5374,13 @@ pub fn show_signal_path_popover(
                 let native = s.source_rate == s.output_rate && (playback_speed - 1.0).abs() < 0.001;
                 let dsp_active = plugins.dsp.is_actively_processing() && !plugins.dsp.bit_perfect_mode;
                 let (verdict_title, verdict_sub, verdict_col) =
-                    if s.exclusive_active && s.bit_perfect && s.direct_volume_lock {
+                    if s.output_format.starts_with("DoP") {
+                        (
+                            "NATIVE DSD OVER PCM (DoP v1.1)",
+                            "Bit-Exact 1-Bit DSD · 0x05/0xFA Framing · 0.0 dBFS Direct DAC Lock",
+                            palette.hires_gold,
+                        )
+                    } else if s.exclusive_active && s.bit_perfect && s.direct_volume_lock {
                         (
                             "BIT-PERFECT EXCLUSIVE",
                             "Hardware Hog Mode · 1:1 Clock · 0.0 dBFS Direct Pass-Through",

@@ -74,3 +74,12 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
 - [x] **Database Health — Duplicate Quality Audit & Missing-Files Cleaner:** Automatic duplicate group detection across formats/folders ranking copies by audio fidelity (`DSD / Hi-Res > Lossless > Lossy`), flagging `BEST` master copies with 1-click **Keep Best Quality (Remove Lower-Res Duplicates)** and **Prune Missing Files**.
 - [x] **Record Labels Facet Browser, Drag-to-Collection & Database Restore:** Dedicated **Labels** browser (`Deutsche Grammophon`, `Decca`, `ECM`, etc.), direct drag-and-drop of tracks onto sidebar Collections, right-click **Add Album to Collection**, and 1-click **Restore Backup (`.json`)**.
 - [x] **Pure-Rust DSD over PCM (DoP v1.1) Framing Engine:** Standards-compliant `0x05`/`0xFA` 24-bit integer framer (`176.4 kHz` / `352.8 kHz`) with DSF LSB→MSB bit reversal and Settings toggle.
+
+---
+
+## Wave 7 — Live DoP v1.1 DAC Transport, Listening History & Power-Query Database (`v1.6.0` Completed)
+- [x] **Live End-to-End Native DSD over PCM (DoP v1.1) Audio Path:** Streams raw 1-bit DSD64 (`176.4 kHz`) & DSD128 (`352.8 kHz`) bit-identically via `DsdDopReader` into an `I32` Exclusive DAC stream with zero volume/DSP alteration, live visual sidechain, gold **`NATIVE DSD OVER PCM (DoP v1.1)`** Signal Path verdict banner, and automatic fallback to 64-bit Blackman-Harris LUT FIR PCM when hardware doesn't expose `I32` DoP rates.
+- [x] **Persistent Listening History & `Recently Played` Smart View:** Logs every track play (`PlayHistoryEntry`, rolling 2,000 plays) directly in the Library Database, surfaced in the new **Recently Played** sidebar view and **Library Insights** listening log.
+- [x] **Classical `Works / Opus` & `Years` Database Browsers:** Dedicated browse modes (`Tracks | Albums | Artists | Composers | Works | Genres | Labels | Years | Folders`) for deep classical & archival exploration.
+- [x] **Audiophile Power-Search Query Syntax & Inline `#Tag` Entry:** Instant live search tokens (`composer:beethoven`, `dr>=12`, `rate>=96`, `bits>=24`, `codec:dsd`, `label:dg`, `work:27`, `rating>=4`, `#reference`) + inline `+ #tag` entry right inside Track Info.
+- [x] **Pure-Rust SACD `.iso` Master TOC Prober:** Parses Scarlet Book `SACDMTOC` (sector 510) disc metadata & Stereo/Multichannel area flags with unit test coverage.

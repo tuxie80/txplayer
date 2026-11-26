@@ -169,6 +169,131 @@ impl Track {
         }
         s
     }
+
+    /// Evaluates TxPlayer's audiophile power-search syntax (all whitespace tokens must match):
+    /// - `#tag` -> custom tag
+    /// - `dr>=12`, `dr<=8`, `dr=14` -> persisted Dynamic Range score
+    /// - `rate>=96` (or `96000`), `bits>=24`, `rating>=4` -> numeric audio/user filters
+    /// - `codec:dsd`, `composer:beethoven`, `artist:...`, `album:...`, `label:...`, `genre:...`, `year:...`, `work:...`
+    /// - Any plain token -> case-insensitive match across title/artist/album/composer/orchestra/label/tags
+    pub fn matches_query(&self, raw_query: &str) -> bool {
+        let trimmed = raw_query.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let haystack = self.search_text();
+        for tok in trimmed.split_whitespace() {
+            let low = tok.to_lowercase();
+            if let Some(tag) = low.strip_prefix('#') {
+                if !tag.is_empty()
+                    && !self
+                        .custom_tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(tag))
+                {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(rest) = low.strip_prefix("dr>=")
+                && let Ok(n) = rest.parse::<u8>()
+            {
+                if self.dr_score.unwrap_or(0) < n {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(rest) = low.strip_prefix("dr<=")
+                && let Ok(n) = rest.parse::<u8>()
+            {
+                if !self.dr_score.is_some_and(|d| d <= n) {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(rest) = low.strip_prefix("dr=")
+                && let Ok(n) = rest.parse::<u8>()
+            {
+                if self.dr_score != Some(n) {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(rest) = low.strip_prefix("rate>=").or_else(|| low.strip_prefix("sr>="))
+                && let Ok(v) = rest.parse::<u32>()
+            {
+                let hz = if v <= 1000 { v * 1000 } else { v };
+                if self.sample_rate.unwrap_or(0) < hz {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(rest) = low.strip_prefix("bits>=")
+                && let Ok(b) = rest.parse::<u32>()
+            {
+                if self.bit_depth.unwrap_or(0) < b {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(rest) = low.strip_prefix("rating>=")
+                && let Ok(r) = rest.parse::<u8>()
+            {
+                if self.rating < r {
+                    return false;
+                }
+                continue;
+            }
+            if let Some((k, v)) = low.split_once(':')
+                && !v.is_empty()
+            {
+                let matched = match k {
+                    "codec" => self.codec.to_lowercase().contains(v),
+                    "composer" => self
+                        .composer
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(v),
+                    "artist" => self.artist.to_lowercase().contains(v),
+                    "album" => self.album.to_lowercase().contains(v),
+                    "label" => self
+                        .label
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(v),
+                    "genre" => self
+                        .genre
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(v),
+                    "year" => self
+                        .year
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(v),
+                    "work" => self
+                        .work
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(v),
+                    _ => haystack.contains(&low),
+                };
+                if !matched {
+                    return false;
+                }
+                continue;
+            }
+            if !haystack.contains(&low) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[derive(Default)]
@@ -627,5 +752,57 @@ mod tests {
         assert!((parse_gain_db("+2.50dB").unwrap() - 2.50).abs() < 1e-4);
         assert!((parse_gain_db("-0.15 DB").unwrap() - (-0.15)).abs() < 1e-4);
         assert!(parse_gain_db("invalid").is_none());
+    }
+
+    #[test]
+    fn power_search_evaluates_dr_rate_codec_composer_and_hashtags() {
+        let t = Track {
+            id: 1,
+            path: PathBuf::from("/music/beethoven.flac"),
+            title: "Piano Sonata No. 14".into(),
+            artist: "Maurizio Pollini".into(),
+            album: "Beethoven Sonatas".into(),
+            album_artist: None,
+            track_number: Some(1),
+            disc_number: Some(1),
+            year: Some("1991".into()),
+            genre: Some("Classical".into()),
+            duration: Some(360.0),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+            channels: Some(2),
+            codec: "FLAC".into(),
+            nominal_bitrate: None,
+            cover_path: None,
+            cue_start: None,
+            cue_end: None,
+            rg_track_gain_db: None,
+            rg_track_peak: None,
+            rg_album_gain_db: None,
+            rg_album_peak: None,
+            lyrics: None,
+            composer: Some("Ludwig van Beethoven".into()),
+            conductor: None,
+            orchestra: None,
+            work: Some("Op. 27 No. 2".into()),
+            label: Some("Deutsche Grammophon".into()),
+            catalog_number: None,
+            comment: None,
+            custom_tags: vec!["reference".into(), "solo-piano".into()],
+            dr_score: Some(14),
+            integrated_lufs: Some(-20.1),
+            true_peak_dbtp: Some(-1.5),
+            effective_bandwidth_hz: Some(41_000.0),
+            authenticity: Some("AuthenticHiRes".into()),
+            play_count: 3,
+            last_played_at: Some(100),
+            rating: 5,
+            added_at: 10,
+        };
+        assert!(t.matches_query("composer:beethoven dr>=12 rate>=96 #reference"));
+        assert!(t.matches_query("codec:flac label:grammophon rating>=5 work:27"));
+        assert!(!t.matches_query("dr>=16"));
+        assert!(!t.matches_query("rate>=192"));
+        assert!(!t.matches_query("#vinyl"));
     }
 }

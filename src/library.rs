@@ -27,6 +27,16 @@ pub struct Playlist {
     pub track_ids: Vec<u64>,
 }
 
+/// Persistent chronological play history / scrobble entry stored in the Library Database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayHistoryEntry {
+    pub track_id: u64,
+    pub played_at: u64,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+}
+
 /// Curated multi-album / multi-track Collection (box sets, themes, audiophile references, eras).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Collection {
@@ -314,6 +324,8 @@ pub struct Library {
     pub collections: Vec<Collection>,
     #[serde(default)]
     pub saved_views: Vec<SavedView>,
+    #[serde(default)]
+    pub play_history: Vec<PlayHistoryEntry>,
     /// O(1) lookup index (`track.id -> index in tracks`); rebuilt automatically on load/mutate.
     #[serde(skip)]
     id_index: HashMap<u64, usize>,
@@ -338,6 +350,7 @@ impl Default for Library {
             playlists: Vec::new(),
             collections: Vec::new(),
             saved_views: Vec::new(),
+            play_history: Vec::new(),
             id_index: HashMap::new(),
         }
     }
@@ -419,13 +432,29 @@ impl Library {
     }
 
     pub fn increment_play_count(&mut self, id: u64) {
-        if let Some(t) = self.get_by_id_mut(id) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let entry = if let Some(t) = self.get_by_id_mut(id) {
             t.play_count = t.play_count.saturating_add(1);
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
             t.last_played_at = Some(now);
+            Some(PlayHistoryEntry {
+                track_id: id,
+                played_at: now,
+                title: t.title.clone(),
+                artist: t.artist.clone(),
+                album: t.album.clone(),
+            })
+        } else {
+            None
+        };
+        if let Some(ev) = entry {
+            self.play_history.push(ev);
+            if self.play_history.len() > 2000 {
+                let excess = self.play_history.len() - 2000;
+                self.play_history.drain(..excess);
+            }
         }
     }
 

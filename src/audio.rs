@@ -23,7 +23,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
-use crate::dsd::{DsdPcmDecoder, RawCdBinDecoder, is_dsd_path, is_raw_cd_bin};
+use crate::dsd::{DsdDopReader, DsdPcmDecoder, RawCdBinDecoder, is_dsd_path, is_raw_cd_bin};
 use crate::dsp::{RealtimeDsp, SharedDspParams};
 use crate::exclusive::ExclusiveDeviceGuard;
 use crate::plugins::{DspConfig, OversamplingMode, ResamplerQuality};
@@ -255,6 +255,7 @@ pub enum AudioCommand {
         quality: ResamplerQuality,
     },
     SetExclusiveMode(bool),
+    SetDsdDop(bool),
     Shutdown,
 }
 
@@ -445,6 +446,7 @@ impl AudioHandle {
         let _ = self
             .commands
             .send(AudioCommand::SetExclusiveMode(cfg.exclusive_mode));
+        let _ = self.commands.send(AudioCommand::SetDsdDop(cfg.dsd_dop));
     }
 
     pub fn visual_tap(&self) -> Arc<VisualTap> {
@@ -678,6 +680,7 @@ struct AudioEnginePrefs {
     oversampling: OversamplingMode,
     resampler_quality: ResamplerQuality,
     exclusive_mode: bool,
+    dsd_dop: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -704,6 +707,7 @@ fn run_audio_thread(
         oversampling: OversamplingMode::Native,
         resampler_quality: ResamplerQuality::LinearPhaseStudio,
         exclusive_mode: false,
+        dsd_dop: false,
     };
     let mut next = commands.recv();
     while let Ok(command) = next {
@@ -789,6 +793,10 @@ fn run_audio_thread(
             }
             AudioCommand::SetExclusiveMode(excl) => {
                 prefs.exclusive_mode = excl;
+                next = commands.recv();
+            }
+            AudioCommand::SetDsdDop(dop) => {
+                prefs.dsd_dop = dop;
                 next = commands.recv();
             }
             AudioCommand::Stop => {
@@ -1265,6 +1273,27 @@ fn play_file(
     dsp: &Arc<SharedDspParams>,
     prefs: &mut AudioEnginePrefs,
 ) -> Result<PlaybackExit> {
+    // True Native DSD over PCM (DoP v1.1) bit-exact I32 Exclusive DAC path when enabled & supported
+    if prefs.dsd_dop
+        && prefs.exclusive_mode
+        && bit_perfect.load(Ordering::Relaxed)
+        && direct_volume_lock.load(Ordering::Relaxed)
+        && is_dsd_path(&spec.path)
+        && let Some(exit) = try_play_dsd_dop(
+            device,
+            device_name.clone(),
+            spec.clone(),
+            commands,
+            events,
+            bit_perfect,
+            direct_volume_lock,
+            visual_tap,
+            prefs,
+        )
+    {
+        return Ok(exit);
+    }
+
     let mut decoder = DecoderState::open(&spec.path)?;
     let initial_file_pos = spec.file_start_secs();
     let mut ram_buf: Option<RamTrackBuffer> = if prefs.ram_playback && prefs.ram_max_bytes > 0 {
@@ -1591,6 +1620,23 @@ fn play_file(
                     let changed = prefs.exclusive_mode != excl;
                     prefs.exclusive_mode = excl;
                     if changed {
+                        let pos = calc_position(
+                            played_now,
+                            track_origin_frame,
+                            track_origin_secs,
+                            prefs.speed,
+                        );
+                        visual_tap.set_active(false);
+                        let mut reopen = spec;
+                        reopen.start_offset = pos;
+                        reopen.start_paused = paused;
+                        return Ok(PlaybackExit::ReopenSpec(reopen));
+                    }
+                }
+                AudioCommand::SetDsdDop(dop) => {
+                    let changed = prefs.dsd_dop != dop;
+                    prefs.dsd_dop = dop;
+                    if changed && is_dsd_path(&spec.path) {
                         let pos = calc_position(
                             played_now,
                             track_origin_frame,
@@ -1966,6 +2012,285 @@ fn format_sample_format_label(fmt: SampleFormat) -> String {
         SampleFormat::I8 => "8-bit int".into(),
         SampleFormat::U8 => "8-bit uint".into(),
         other => format!("{other}"),
+    }
+}
+
+/// Attempts native bit-exact DSD over PCM (DoP v1.1 — 0x05/0xFA 24-bit in I32) playback when
+/// Exclusive Mode + Bit-Perfect + 0.0 dBFS Direct Volume Lock are active and the DAC supports
+/// `SampleFormat::I32` at `176.4 kHz` (DSD64) or `352.8 kHz` (DSD128).
+/// Returns `None` if hardware cannot accept DoP I32 so `play_file` transparently falls back to 64-bit FIR PCM.
+#[allow(clippy::too_many_arguments)]
+fn try_play_dsd_dop(
+    device: &Device,
+    device_name: String,
+    spec: PlaybackSpec,
+    commands: &Receiver<AudioCommand>,
+    events: &Sender<AudioEvent>,
+    bit_perfect: &Arc<AtomicBool>,
+    direct_volume_lock: &Arc<AtomicBool>,
+    visual_tap: &Arc<VisualTap>,
+    prefs: &mut AudioEnginePrefs,
+) -> Option<PlaybackExit> {
+    let mut reader = DsdDopReader::open(&spec.path).ok()?;
+    let dop_rate = reader.dop_sample_rate;
+
+    // Verify hardware supports stereo I32 at exact DoP rate
+    let supports_i32_dop = device
+        .supported_output_configs()
+        .ok()?
+        .any(|r| {
+            r.sample_format() == SampleFormat::I32
+                && r.channels() == 2
+                && dop_rate >= r.min_sample_rate()
+                && dop_rate <= r.max_sample_rate()
+        });
+    if !supports_i32_dop {
+        return None;
+    }
+
+    let exclusive_guard = ExclusiveDeviceGuard::acquire(&device_name, dop_rate, true, true);
+    let exclusive_active = exclusive_guard.status.hog_acquired;
+    let hw_rate_switched = exclusive_guard.status.hw_rate_switched;
+
+    let stream_cfg = StreamConfig {
+        channels: 2,
+        sample_rate: dop_rate,
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let rb_samples = (dop_rate as usize) * 2 * BUFFER_SECONDS;
+    let (mut dop_prod, mut dop_cons) = HeapRb::<i32>::new(rb_samples).split();
+    let (mut vis_prod, mut vis_cons) = HeapRb::<f32>::new(rb_samples).split();
+    let played_frames = Arc::new(AtomicU64::new(0));
+    let seek_gen = Arc::new(AtomicU64::new(0));
+
+    let cb_played = Arc::clone(&played_frames);
+    let cb_seek_gen = Arc::clone(&seek_gen);
+    let cb_vis = Arc::clone(visual_tap);
+    let cb_events = events.clone();
+    let mut cb_gen = 0u64;
+    let mut cb_vis_cursor = 0usize;
+    let mut idle_marker_toggle = false;
+
+    let stream = device
+        .build_output_stream(
+            stream_cfg,
+            move |data: &mut [i32], _| {
+                let g = cb_seek_gen.load(Ordering::Acquire);
+                if g != cb_gen {
+                    dop_cons.clear();
+                    vis_cons.clear();
+                    cb_gen = g;
+                }
+                let mut sum_sq_l = 0.0_f32;
+                let mut sum_sq_r = 0.0_f32;
+                let mut sum_lr = 0.0_f32;
+                let mut pk_l = 0.0_f32;
+                let mut pk_r = 0.0_f32;
+                let mut fcnt = 0usize;
+
+                for frame in data.chunks_exact_mut(2) {
+                    if dop_cons.occupied_len() >= 2 {
+                        frame[0] = dop_cons.try_pop().unwrap_or(0x0569_6900_u32 as i32);
+                        frame[1] = dop_cons.try_pop().unwrap_or(0x0569_6900_u32 as i32);
+                        let vl = vis_cons.try_pop().unwrap_or(0.0);
+                        let vr = vis_cons.try_pop().unwrap_or(0.0);
+                        cb_vis.push_callback_frame(&mut cb_vis_cursor, vl, vr);
+                        sum_sq_l += vl * vl;
+                        sum_sq_r += vr * vr;
+                        sum_lr += vl * vr;
+                        pk_l = pk_l.max(vl.abs());
+                        pk_r = pk_r.max(vr.abs());
+                        fcnt += 1;
+                    } else {
+                        // Valid DoP silence word (0x6969 DSD idle alternating 0x05 / 0xFA markers)
+                        let sil: i32 = if idle_marker_toggle {
+                            0xFA69_6900_u32 as i32
+                        } else {
+                            0x0569_6900_u32 as i32
+                        };
+                        idle_marker_toggle = !idle_marker_toggle;
+                        frame[0] = sil;
+                        frame[1] = sil;
+                    }
+                }
+                if fcnt > 0 {
+                    cb_played.fetch_add(fcnt as u64, Ordering::Relaxed);
+                    let inv = 1.0 / fcnt as f32;
+                    let rl = (sum_sq_l * inv).sqrt();
+                    let rr = (sum_sq_r * inv).sqrt();
+                    let corr = if sum_sq_l > 1e-9 && sum_sq_r > 1e-9 {
+                        (sum_lr / (sum_sq_l * sum_sq_r).sqrt()).clamp(-1.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    cb_vis.commit(cb_vis_cursor, rl, rr, pk_l, pk_r, corr);
+                }
+            },
+            move |err| {
+                let _ = cb_events.send(AudioEvent::Error(format!("DoP output error: {err}")));
+            },
+            None,
+        )
+        .ok()?;
+
+    let initial_pos = spec.file_start_secs();
+    if initial_pos > 0.05 {
+        let _ = reader.seek(initial_pos);
+    }
+    visual_tap.set_sample_rate(dop_rate);
+    let mut paused = spec.start_paused;
+    if !paused {
+        if stream.play().is_err() {
+            return None;
+        }
+        visual_tap.set_active(true);
+    } else {
+        let _ = stream.pause();
+        visual_tap.set_active(false);
+    }
+
+    let _ = events.send(AudioEvent::Started {
+        source_sample_rate: reader.info.sample_rate_hz,
+        output_sample_rate: dop_rate,
+        output_format: format!("DoP v1.1 24-bit ({})", reader.info.dsd_label),
+        channels: 2,
+        bit_depth: Some(1),
+        duration: Some(reader.info.duration_secs),
+        device_name,
+        bit_perfect: true,
+        exclusive_active,
+        hw_rate_switched,
+        rg_gain_db: None,
+        ram_bytes: None,
+        oversampling: OversamplingMode::Native,
+        resampler_quality: prefs.resampler_quality,
+    });
+
+    let mut origin_secs = spec.start_offset.max(0.0);
+    let mut origin_frame = 0u64;
+    let mut written_frames = 0u64;
+    let mut eof = false;
+    let mut last_pos_emit = Instant::now();
+    let mut dop_buf = Vec::with_capacity(4096);
+    let mut vis_buf = Vec::with_capacity(4096);
+
+    loop {
+        let played_now = played_frames.load(Ordering::Relaxed);
+        let cur_pos = origin_secs + played_now.saturating_sub(origin_frame) as f64 / dop_rate as f64;
+
+        // If user disables Bit-Perfect or Direct Volume Lock mid-stream, reopen safely as PCM
+        if !bit_perfect.load(Ordering::Relaxed) || !direct_volume_lock.load(Ordering::Relaxed) {
+            visual_tap.set_active(false);
+            let mut reopen = spec;
+            reopen.start_offset = cur_pos;
+            reopen.start_paused = paused;
+            drop(stream);
+            drop(exclusive_guard);
+            return Some(PlaybackExit::ReopenSpec(reopen));
+        }
+
+        while let Ok(cmd) = commands.try_recv() {
+            match cmd {
+                AudioCommand::Pause => {
+                    paused = true;
+                    let _ = stream.pause();
+                    visual_tap.set_active(false);
+                }
+                AudioCommand::Resume => {
+                    paused = false;
+                    let _ = stream.play();
+                    visual_tap.set_active(true);
+                }
+                AudioCommand::Stop => {
+                    visual_tap.set_active(false);
+                    drop(stream);
+                    drop(exclusive_guard);
+                    return Some(PlaybackExit::Stopped);
+                }
+                AudioCommand::Seek(secs) => {
+                    let target = secs.clamp(0.0, reader.info.duration_secs.max(0.0));
+                    let _ = reader.seek(target);
+                    seek_gen.fetch_add(1, Ordering::Release);
+                    origin_secs = target;
+                    origin_frame = played_frames.load(Ordering::Relaxed);
+                    written_frames = origin_frame;
+                    eof = false;
+                    let _ = events.send(AudioEvent::Position(target));
+                }
+                AudioCommand::SetDsdDop(false) | AudioCommand::SetExclusiveMode(false) => {
+                    if let AudioCommand::SetDsdDop(v) = cmd {
+                        prefs.dsd_dop = v;
+                    } else {
+                        prefs.exclusive_mode = false;
+                    }
+                    visual_tap.set_active(false);
+                    let mut reopen = spec;
+                    reopen.start_offset = cur_pos;
+                    reopen.start_paused = paused;
+                    drop(stream);
+                    drop(exclusive_guard);
+                    return Some(PlaybackExit::ReopenSpec(reopen));
+                }
+                AudioCommand::SelectDevice(name) => {
+                    prefs.preferred_device = name;
+                    visual_tap.set_active(false);
+                    let mut reopen = spec;
+                    reopen.start_offset = cur_pos;
+                    reopen.start_paused = paused;
+                    drop(stream);
+                    drop(exclusive_guard);
+                    return Some(PlaybackExit::ReopenSpec(reopen));
+                }
+                AudioCommand::Play(_) | AudioCommand::Shutdown => {
+                    visual_tap.set_active(false);
+                    drop(stream);
+                    drop(exclusive_guard);
+                    return Some(PlaybackExit::Command(cmd));
+                }
+                AudioCommand::PreloadNext(next) => prefs.next_spec = next,
+                AudioCommand::SetGapless(v) => prefs.gapless_enabled = v,
+                AudioCommand::SetCrossfade(v) => prefs.crossfade_secs = v,
+                AudioCommand::SetSpeed(v) => prefs.speed = v,
+                AudioCommand::SetAbLoop(v) => prefs.ab_loop = v,
+                AudioCommand::SetReplayGainLinear(_) => {}
+                AudioCommand::SetRamPlayback { enabled, max_mb } => {
+                    prefs.ram_playback = enabled;
+                    prefs.ram_max_bytes = (max_mb as usize) * 1024 * 1024;
+                }
+                AudioCommand::SetOversampling { mode, quality } => {
+                    prefs.oversampling = mode;
+                    prefs.resampler_quality = quality;
+                }
+                AudioCommand::SetExclusiveMode(true) | AudioCommand::SetDsdDop(true) => {}
+            }
+        }
+
+        if !eof && dop_prod.vacant_len() >= 4096 {
+            match reader.read_dop_frames(2048, &mut dop_buf, &mut vis_buf) {
+                Ok(0) => eof = true,
+                Ok(n) => {
+                    for (&dw, &vw) in dop_buf.iter().zip(vis_buf.iter()) {
+                        let _ = dop_prod.try_push(dw);
+                        let _ = vis_prod.try_push(vw);
+                    }
+                    written_frames += n as u64;
+                }
+                Err(_) => eof = true,
+            }
+        } else {
+            thread::sleep(Duration::from_millis(8));
+        }
+
+        if !paused && last_pos_emit.elapsed() >= POSITION_UPDATE_INTERVAL {
+            let _ = events.send(AudioEvent::Position(cur_pos));
+            last_pos_emit = Instant::now();
+        }
+        if eof && played_frames.load(Ordering::Relaxed) >= written_frames {
+            visual_tap.set_active(false);
+            drop(stream);
+            drop(exclusive_guard);
+            return Some(PlaybackExit::Ended);
+        }
     }
 }
 

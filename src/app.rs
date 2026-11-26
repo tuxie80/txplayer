@@ -201,6 +201,7 @@ struct ArtworkGalleryModal {
 enum SmartView {
     HiRes,
     RecentlyAdded,
+    RecentlyPlayed,
     MostPlayed,
     TopRated,
 }
@@ -210,6 +211,7 @@ impl SmartView {
         match self {
             SmartView::HiRes => "Hi-Res Masters",
             SmartView::RecentlyAdded => "Recently Added",
+            SmartView::RecentlyPlayed => "Recently Played",
             SmartView::MostPlayed => "Most Played",
             SmartView::TopRated => "Top Rated",
         }
@@ -222,8 +224,10 @@ enum BrowseMode {
     Albums,
     Artists,
     Composers,
+    Works,
     Genres,
     Labels,
+    Years,
     Folders,
 }
 
@@ -533,8 +537,10 @@ struct VisibleCacheKey {
     album_filter: Option<(String, String)>,
     artist_filter: Option<String>,
     composer_filter: Option<String>,
+    work_filter: Option<String>,
     genre_filter: Option<String>,
     label_filter: Option<String>,
+    year_filter: Option<String>,
     quality_filter: QualityFilter,
     sort: SortMode,
     sort_ascending: bool,
@@ -573,8 +579,10 @@ pub struct TxPlayerApp {
     album_filter: Option<(String, String)>,
     artist_filter: Option<String>,
     composer_filter: Option<String>,
+    work_filter: Option<String>,
     genre_filter: Option<String>,
     label_filter: Option<String>,
+    year_filter: Option<String>,
     quality_filter: QualityFilter,
     sort: SortMode,
     sort_ascending: bool,
@@ -606,8 +614,10 @@ pub struct TxPlayerApp {
     cached_albums: Arc<Vec<AlbumGroup>>,
     cached_artists: Arc<Vec<(String, usize, usize)>>,
     cached_composers: Arc<Vec<(String, usize, usize)>>,
+    cached_works: Arc<Vec<(String, usize, usize)>>,
     cached_genres: Arc<Vec<(String, usize, usize)>>,
     cached_labels: Arc<Vec<(String, usize, usize)>>,
+    cached_years: Arc<Vec<(String, usize, usize)>>,
     cached_dirs: Arc<Vec<(PathBuf, usize)>>,
     cached_stats_rev: u64,
     cached_stats_lib_id: u64,
@@ -843,8 +853,10 @@ impl TxPlayerApp {
             album_filter: None,
             artist_filter: None,
             composer_filter: None,
+            work_filter: None,
             genre_filter: None,
             label_filter: None,
+            year_filter: None,
             quality_filter: QualityFilter::All,
             sort: preferences.sort_mode,
             sort_ascending: preferences.sort_ascending,
@@ -870,8 +882,10 @@ impl TxPlayerApp {
             cached_albums: Arc::new(Vec::new()),
             cached_artists: Arc::new(Vec::new()),
             cached_composers: Arc::new(Vec::new()),
+            cached_works: Arc::new(Vec::new()),
             cached_genres: Arc::new(Vec::new()),
             cached_labels: Arc::new(Vec::new()),
+            cached_years: Arc::new(Vec::new()),
             cached_dirs: Arc::new(Vec::new()),
             cached_stats_rev: 0,
             cached_stats_lib_id: 0,
@@ -1150,8 +1164,10 @@ impl TxPlayerApp {
             album_filter: self.album_filter.clone(),
             artist_filter: self.artist_filter.clone(),
             composer_filter: self.composer_filter.clone(),
+            work_filter: self.work_filter.clone(),
             genre_filter: self.genre_filter.clone(),
             label_filter: self.label_filter.clone(),
+            year_filter: self.year_filter.clone(),
             quality_filter: self.quality_filter,
             sort: self.sort,
             sort_ascending: self.sort_ascending,
@@ -1168,8 +1184,10 @@ impl TxPlayerApp {
         let mut album_idx: HashMap<(String, String), usize> = HashMap::new();
         let mut artist_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
         let mut composer_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+        let mut work_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
         let mut genre_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
         let mut label_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+        let mut year_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
         let mut dir_counts: HashMap<PathBuf, usize> = HashMap::new();
         for tr in &tracks {
             let akey = (tr.album.clone(), tr.artist.clone());
@@ -1213,6 +1231,25 @@ impl TxPlayerApp {
                 le.0 += 1;
                 le.1.insert(tr.album.clone());
             }
+            if let Some(ref w) = tr.work
+                && !w.trim().is_empty()
+            {
+                let we = work_counts
+                    .entry(w.trim().to_string())
+                    .or_insert_with(|| (0, HashSet::new()));
+                we.0 += 1;
+                we.1.insert(tr.album.clone());
+            }
+            if let Some(ref yr) = tr.year {
+                let y4: String = yr.trim().chars().take(4).collect();
+                if y4.len() == 4 && y4.chars().all(|c| c.is_ascii_digit()) {
+                    let ye = year_counts
+                        .entry(y4)
+                        .or_insert_with(|| (0, HashSet::new()));
+                    ye.0 += 1;
+                    ye.1.insert(tr.album.clone());
+                }
+            }
             if let Some(parent) = tr.path.parent() {
                 *dir_counts.entry(parent.to_path_buf()).or_insert(0) += 1;
             }
@@ -1238,14 +1275,26 @@ impl TxPlayerApp {
             .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
             .collect();
         labels.sort_by_key(|a| a.0.to_lowercase());
+        let mut works: Vec<(String, usize, usize)> = work_counts
+            .into_iter()
+            .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
+            .collect();
+        works.sort_by_key(|a| a.0.to_lowercase());
+        let mut years: Vec<(String, usize, usize)> = year_counts
+            .into_iter()
+            .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
+            .collect();
+        years.sort_by(|a, b| b.0.cmp(&a.0));
         let mut dirs: Vec<(PathBuf, usize)> = dir_counts.into_iter().collect();
         dirs.sort_by(|a, b| a.0.cmp(&b.0));
 
         self.cached_albums = Arc::new(album_groups);
         self.cached_artists = Arc::new(artists);
         self.cached_composers = Arc::new(composers);
+        self.cached_works = Arc::new(works);
         self.cached_genres = Arc::new(genres);
         self.cached_labels = Arc::new(labels);
+        self.cached_years = Arc::new(years);
         self.cached_dirs = Arc::new(dirs);
         self.cached_visible = Arc::new(tracks);
         self.visible_cache_key = Some(key);
@@ -1294,23 +1343,36 @@ impl TxPlayerApp {
                         .is_none_or(|l| track.label.as_deref().map(str::trim) == Some(l.as_str()))
                 })
                 .filter(|track| {
+                    self.work_filter
+                        .as_ref()
+                        .is_none_or(|w| track.work.as_deref().map(str::trim) == Some(w.as_str()))
+                })
+                .filter(|track| {
+                    self.year_filter.as_ref().is_none_or(|y| {
+                        track
+                            .year
+                            .as_deref()
+                            .is_some_and(|ty| ty.trim().starts_with(y.as_str()))
+                    })
+                })
+                .filter(|track| {
                     self.album_filter.is_some() || self.quality_filter.matches(track)
                 })
-                .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                .filter(|track| track.matches_query(&query))
                 .cloned()
                 .collect(),
             View::Favorites => lib
                 .tracks
                 .iter()
                 .filter(|track| lib.favorites.contains(&track.id))
-                .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                .filter(|track| track.matches_query(&query))
                 .cloned()
                 .collect(),
             View::Queue => self
                 .current_queue
                 .iter()
                 .filter_map(|id| self.track(*id))
-                .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                .filter(|track| track.matches_query(&query))
                 .cloned()
                 .collect(),
             View::Playlist(pl_id) => lib
@@ -1319,7 +1381,7 @@ impl TxPlayerApp {
                     pl.track_ids
                         .iter()
                         .filter_map(|id| self.track(*id))
-                        .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                        .filter(|track| track.matches_query(&query))
                         .cloned()
                         .collect()
                 })
@@ -1330,7 +1392,7 @@ impl TxPlayerApp {
                     col.track_ids
                         .iter()
                         .filter_map(|id| self.track(*id))
-                        .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                        .filter(|track| track.matches_query(&query))
                         .cloned()
                         .collect()
                 })
@@ -1341,7 +1403,7 @@ impl TxPlayerApp {
                     lib.tracks
                         .iter()
                         .filter(|track| sv.matches(track))
-                        .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                        .filter(|track| track.matches_query(&query))
                         .cloned()
                         .collect()
                 })
@@ -1353,16 +1415,26 @@ impl TxPlayerApp {
                     .filter(|track| match smart {
                         SmartView::HiRes => track.is_hires(),
                         SmartView::RecentlyAdded => true,
+                        SmartView::RecentlyPlayed => track.last_played_at.is_some(),
                         SmartView::MostPlayed => track.play_count > 0,
                         SmartView::TopRated => track.rating >= 4,
                     })
-                    .filter(|track| query.is_empty() || track.search_text().contains(&query))
+                    .filter(|track| track.matches_query(&query))
                     .cloned()
                     .collect();
                 match smart {
                     SmartView::RecentlyAdded => {
                         list.sort_by(|a, b| b.added_at.cmp(&a.added_at).then(a.title.cmp(&b.title)));
                         list.truncate(100);
+                    }
+                    SmartView::RecentlyPlayed => {
+                        list.sort_by(|a, b| {
+                            b.last_played_at
+                                .unwrap_or(0)
+                                .cmp(&a.last_played_at.unwrap_or(0))
+                                .then(a.title.cmp(&b.title))
+                        });
+                        list.truncate(150);
                     }
                     SmartView::MostPlayed => {
                         list.sort_by(|a, b| {
@@ -4017,6 +4089,22 @@ impl TxPlayerApp {
                     self.view == View::Smart(SmartView::RecentlyAdded),
                     View::Smart(SmartView::RecentlyAdded),
                 );
+                let recent_played_count = self
+                    .store
+                    .active()
+                    .tracks
+                    .iter()
+                    .filter(|t| t.last_played_at.is_some())
+                    .count()
+                    .min(150);
+                self.nav_row(
+                    ui,
+                    "Recently Played",
+                    Icon::Queue,
+                    recent_played_count,
+                    self.view == View::Smart(SmartView::RecentlyPlayed),
+                    View::Smart(SmartView::RecentlyPlayed),
+                );
                 self.nav_row(
                     ui,
                     "Most Played",
@@ -4973,16 +5061,20 @@ impl TxPlayerApp {
                     || self.album_filter.is_some()
                     || self.artist_filter.is_some()
                     || self.composer_filter.is_some()
+                    || self.work_filter.is_some()
                     || self.genre_filter.is_some()
-                    || self.label_filter.is_some())
+                    || self.label_filter.is_some()
+                    || self.year_filter.is_some())
                 && pill_button(ui, "× All Tracks", None, PillStyle::Active, &p).clicked()
             {
                 self.folder_filter = None;
                 self.album_filter = None;
                 self.artist_filter = None;
                 self.composer_filter = None;
+                self.work_filter = None;
                 self.genre_filter = None;
                 self.label_filter = None;
+                self.year_filter = None;
             }
 
             if let View::Playlist(pl_id) = self.view {
@@ -5386,6 +5478,18 @@ impl TxPlayerApp {
                         .color(p.accent)
                         .size(10.5),
                 );
+            } else if let Some(ref work) = self.work_filter {
+                ui.label(
+                    RichText::new(format!("·  Work: {work}"))
+                        .color(p.accent)
+                        .size(10.5),
+                );
+            } else if let Some(ref yr) = self.year_filter {
+                ui.label(
+                    RichText::new(format!("·  Year: {yr}"))
+                        .color(p.accent)
+                        .size(10.5),
+                );
             } else if let Some(folder) = &self.folder_filter {
                 ui.label(
                     RichText::new(format!("·  {}", folder.display()))
@@ -5396,12 +5500,14 @@ impl TxPlayerApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Library Browse Mode switcher (Tracks | Albums | Artists | Composers | Genres | Labels | Folders)
+                // Library Browse Mode switcher (Tracks | Albums | Artists | Composers | Works | Genres | Labels | Years | Folders)
                 if self.view == View::Library {
                     for (mode, label, icon) in [
                         (BrowseMode::Folders, "Folders", Icon::Folder),
+                        (BrowseMode::Years, "Years", Icon::Refresh),
                         (BrowseMode::Labels, "Labels", Icon::Info),
                         (BrowseMode::Genres, "Genres", Icon::Sliders),
+                        (BrowseMode::Works, "Works", Icon::List),
                         (BrowseMode::Composers, "Composers", Icon::Playlist),
                         (BrowseMode::Artists, "Artists", Icon::Playlist),
                         (BrowseMode::Albums, "Albums", Icon::Grid),
@@ -5425,8 +5531,10 @@ impl TxPlayerApp {
                                 self.album_filter = None;
                                 self.artist_filter = None;
                                 self.composer_filter = None;
+                                self.work_filter = None;
                                 self.genre_filter = None;
                                 self.label_filter = None;
+                                self.year_filter = None;
                             }
                         }
                     }
@@ -5455,8 +5563,10 @@ impl TxPlayerApp {
             && self.album_filter.is_none()
             && self.artist_filter.is_none()
             && self.composer_filter.is_none()
+            && self.work_filter.is_none()
             && self.genre_filter.is_none()
             && self.label_filter.is_none()
+            && self.year_filter.is_none()
             && self.browse_mode != BrowseMode::Tracks;
 
         if show_grid_browser {
@@ -5464,8 +5574,10 @@ impl TxPlayerApp {
                 BrowseMode::Albums => self.albums_grid_view(ui, &tracks, list_h),
                 BrowseMode::Artists => self.artists_browser_view(ui, &tracks, list_h),
                 BrowseMode::Composers => self.composers_browser_view(ui, &tracks, list_h),
+                BrowseMode::Works => self.works_browser_view(ui, &tracks, list_h),
                 BrowseMode::Genres => self.genres_browser_view(ui, &tracks, list_h),
                 BrowseMode::Labels => self.labels_browser_view(ui, &tracks, list_h),
+                BrowseMode::Years => self.years_browser_view(ui, &tracks, list_h),
                 BrowseMode::Folders => self.folders_tree_view(ui, &tracks, list_h),
                 BrowseMode::Tracks => {}
             }
@@ -6005,6 +6117,128 @@ impl TxPlayerApp {
             });
         if let Some(lbl) = pick {
             self.label_filter = Some(lbl);
+            self.browse_mode = BrowseMode::Tracks;
+        }
+    }
+
+    fn works_browser_view(&mut self, ui: &mut Ui, tracks: &[Track], max_h: f32) {
+        let p = self.palette;
+        if tracks.is_empty() {
+            self.empty_state(ui);
+            return;
+        }
+        let works = Arc::clone(&self.cached_works);
+        if works.is_empty() {
+            ui.add_space(32.0);
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    RichText::new("No Work / Opus tags found yet. Set \"Work / Opus\" in Tag Editor or scan classical recordings.")
+                        .size(11.5)
+                        .color(p.muted),
+                );
+            });
+            return;
+        }
+        let mut pick: Option<String> = None;
+        ScrollArea::vertical()
+            .id_salt("works_list_scroll")
+            .max_height(max_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing.y = 3.0;
+                let w = ui.available_width();
+                for (name, t_cnt, a_cnt) in works.iter() {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    ui.painter().rect_filled(
+                        rect,
+                        6.0,
+                        if resp.hovered() { p.hover } else { p.surface },
+                    );
+                    ui.painter().text(
+                        pos2(rect.left() + 14.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        name,
+                        FontId::proportional(12.0),
+                        p.text,
+                    );
+                    ui.painter().text(
+                        pos2(rect.right() - 14.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{a_cnt} recording(s) · {t_cnt} movement(s)"),
+                        FontId::monospace(10.0),
+                        p.muted,
+                    );
+                    if resp.clicked() {
+                        pick = Some(name.clone());
+                    }
+                }
+            });
+        if let Some(wk) = pick {
+            self.work_filter = Some(wk);
+            self.browse_mode = BrowseMode::Tracks;
+        }
+    }
+
+    fn years_browser_view(&mut self, ui: &mut Ui, tracks: &[Track], max_h: f32) {
+        let p = self.palette;
+        if tracks.is_empty() {
+            self.empty_state(ui);
+            return;
+        }
+        let years = Arc::clone(&self.cached_years);
+        if years.is_empty() {
+            ui.add_space(32.0);
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    RichText::new("No Year tags found in tracks yet.")
+                        .size(11.5)
+                        .color(p.muted),
+                );
+            });
+            return;
+        }
+        let mut pick: Option<String> = None;
+        ScrollArea::vertical()
+            .id_salt("years_list_scroll")
+            .max_height(max_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing.y = 3.0;
+                let w = ui.available_width();
+                for (name, t_cnt, a_cnt) in years.iter() {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    ui.painter().rect_filled(
+                        rect,
+                        6.0,
+                        if resp.hovered() { p.hover } else { p.surface },
+                    );
+                    ui.painter().text(
+                        pos2(rect.left() + 14.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        name,
+                        FontId::monospace(12.5),
+                        p.accent_bright,
+                    );
+                    ui.painter().text(
+                        pos2(rect.right() - 14.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{a_cnt} album(s) · {t_cnt} track(s)"),
+                        FontId::monospace(10.0),
+                        p.muted,
+                    );
+                    if resp.clicked() {
+                        pick = Some(name.clone());
+                    }
+                }
+            });
+        if let Some(yr) = pick {
+            self.year_filter = Some(yr);
             self.browse_mode = BrowseMode::Tracks;
         }
     }
@@ -8741,6 +8975,13 @@ impl TxPlayerApp {
                                 self.store.save();
                             }
                         }
+                        TrackInfoAction::AddCustomTag(tag) => {
+                            if self.store.active_mut().add_custom_tag(&[tid], &tag) > 0 {
+                                self.mark_library_dirty();
+                                self.store.save();
+                                self.set_status(format!("Added tag #{}", tag.trim_start_matches('#')));
+                            }
+                        }
                     }
                 }
             } else {
@@ -8879,12 +9120,14 @@ impl TxPlayerApp {
         if self.show_library_insights {
             let lib = self.store.active();
             let stats = lib.compute_stats();
+            let history = lib.play_history.clone();
             let lib_name = lib.name.clone();
             let schema_ver = self.store.schema_version;
             let (keep, act) = modals::show_library_insights_modal(
                 context,
                 &lib_name,
                 &stats,
+                &history,
                 schema_ver,
                 &p,
             );
