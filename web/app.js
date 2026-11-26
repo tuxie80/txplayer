@@ -150,14 +150,14 @@
     var mouse = { x: -1e4, y: -1e4 };
 
     var GLYPH_DEFS = [
-      { kind: 'wave', fx: 0.82, fy: 0.22, size: 390, tint: '45, 212, 191',  alpha: 0.30, amp: 24, period: 62000, phase: 0.0 },
-      { kind: 'ring', fx: 0.11, fy: 0.58, size: 260, tint: '230, 184, 92',  alpha: 0.16, amp: 30, period: 82000, phase: 2.1 },
-      { kind: 'wave', fx: 0.68, fy: 0.84, size: 310, tint: '77, 168, 255',  alpha: 0.13, amp: 28, period: 74000, phase: 4.0 },
-      { kind: 'ring', fx: 0.34, fy: 0.38, size: 175, tint: '45, 212, 191',  alpha: 0.11, amp: 20, period: 92000, phase: 1.4 }
+      { kind: 'wave', fx: 0.82, fy: 0.22, size: 390, tint: '45, 212, 191',  alpha: 0.28, amp: 24, period: 62000, phase: 0.0 },
+      { kind: 'ring', fx: 0.11, fy: 0.58, size: 260, tint: '45, 212, 191',  alpha: 0.14, amp: 30, period: 82000, phase: 2.1 },
+      { kind: 'wave', fx: 0.68, fy: 0.84, size: 310, tint: '94, 234, 212',  alpha: 0.12, amp: 28, period: 74000, phase: 4.0 },
+      { kind: 'ring', fx: 0.34, fy: 0.38, size: 175, tint: '45, 212, 191',  alpha: 0.10, amp: 20, period: 92000, phase: 1.4 }
     ];
     var GLYPH_DEFS_SM = [
       { kind: 'wave', fx: 0.85, fy: 0.18, size: 230, tint: '45, 212, 191', alpha: 0.22, amp: 16, period: 62000, phase: 0.0 },
-      { kind: 'ring', fx: 0.12, fy: 0.76, size: 170, tint: '230, 184, 92', alpha: 0.12, amp: 18, period: 82000, phase: 2.1 }
+      { kind: 'ring', fx: 0.12, fy: 0.76, size: 170, tint: '94, 234, 212', alpha: 0.11, amp: 18, period: 82000, phase: 2.1 }
     ];
 
     function sampleAcousticGlyph(kind, size) {
