@@ -297,16 +297,17 @@ impl PrecisionPianoAnalyzer {
 
             let mut residual = clean;
             let global_peak = residual.iter().copied().fold(0.0_f32, f32::max);
-            let stop_floor = (global_peak * 0.08).max(0.0008);
+            // Sensitive floor so whisper-quiet pp/ppp right-hand arpeggios still register over sustained bass octaves
+            let stop_floor = (global_peak * 0.032).max(0.00025);
 
-            // Detect up to 10 simultaneous polyphonic voices (10 fingers!)
-            for _voice in 0..10 {
+            // Detect up to 12 simultaneous polyphonic voices (sustained pedal bass + arpeggio + melody)
+            for _voice in 0..12 {
                 let mut best_key = None;
                 let mut best_score = 0.0_f32;
 
                 for k in 0..PIANO_KEYS {
                     let f0 = residual[k];
-                    if f0 < stop_floor * 0.45 && k >= 18 {
+                    if f0 < stop_floor * 0.40 && k >= 18 {
                         continue;
                     }
                     let weights = if k < 18 {
@@ -330,30 +331,32 @@ impl PrecisionPianoAnalyzer {
                             } else {
                                 0.0
                             };
-                            let peak_bonus = if mag >= left_m * 0.92 && mag >= right_m * 0.92 {
+                            let peak_bonus = if mag >= left_m * 0.90 && mag >= right_m * 0.90 {
                                 1.0
                             } else {
-                                0.45
+                                0.48
                             };
                             salience += mag * weights[hi] * peak_bonus;
                             weight_sum += weights[hi];
-                            if mag > stop_floor * 0.65 {
+                            if mag > stop_floor * 0.55 {
                                 active_harmonics += 1;
                             }
                         }
                     }
 
                     if weight_sum > 0.0 {
-                        let mut score = salience / weight_sum;
-                        // Require fundamental presence for mid/upper notes, and harmonic corroboration below C6
-                        if k >= 18 && f0 < stop_floor * 0.5 {
+                        // Anchor salience to the fundamental so mellow pp felt-hammer notes (few upper partials)
+                        // are not penalized by 2.4x compared to bright ff notes, while still rewarding harmonic support!
+                        let mut score = salience / 1.48;
+                        // Require fundamental presence for mid/upper notes, gentle corroboration below C5
+                        if k >= 18 && f0 < stop_floor * 0.45 {
                             score *= 0.25;
                         }
-                        if k < 60 && active_harmonics < 2 {
-                            score *= 0.55;
+                        if k < 52 && active_harmonics < 2 {
+                            score *= 0.72;
                         }
-                        // Mild upper-register perceptual lift so treble melody cuts through left-hand chords
-                        let reg_tilt = 0.88 + (k as f32 / (PIANO_KEYS - 1) as f32) * 0.95;
+                        // Mild upper-register perceptual lift so delicate melody & arpeggios cut through bass pedal
+                        let reg_tilt = 0.88 + (k as f32 / (PIANO_KEYS - 1) as f32) * 1.05;
                         score *= reg_tilt;
 
                         if score > best_score {
@@ -371,29 +374,48 @@ impl PrecisionPianoAnalyzer {
                 }
 
                 // Store detected fundamental amplitude (normalized back from tilt)
-                let reg_tilt = 0.88 + (k as f32 / (PIANO_KEYS - 1) as f32) * 0.95;
+                let reg_tilt = 0.88 + (k as f32 / (PIANO_KEYS - 1) as f32) * 1.05;
                 let true_amp = best_score / reg_tilt;
-                raw_note_amp[k] = raw_note_amp[k].max(true_amp * 1.45);
+                raw_note_amp[k] = raw_note_amp[k].max(true_amp * 1.15);
 
-                // Subtract this note's harmonic template from the residual spectrum
+                // Subtract this note's harmonic template conservatively with acoustic envelope tracking:
+                // 1) A mellow pp strike whose lower overtones have died out cannot cancel unrelated upper harmonics.
+                // 2) If an upper harmonic slot (3rd+ partial, e.g. G#3/C#4 over C#2 bass) has its OWN 2nd harmonic,
+                //    it is a real played upper voice rather than a passive bass overtone — preserve it!
                 let weights = if k < 18 {
                     &HARM_WEIGHTS_BASS
                 } else {
                     &HARM_WEIGHTS_MID
                 };
                 let fund_energy = residual[k].max(true_amp);
+                let mut envelope_cap = fund_energy * 1.15;
                 for (hi, &off) in HARM_OFFSETS.iter().enumerate() {
                     let idx = k + off;
                     if idx < CQT_SEMITONES {
-                        let sub = fund_energy * weights[hi] * 1.15;
-                        residual[idx] = (residual[idx] - sub).max(0.0);
-                        // Also damp immediate semitone bleed around cancelled overtones
+                        let cur_e = residual[idx];
+                        let cancel_scale = if hi == 0 { 1.10 } else { 0.96 };
+                        let mut sub = (fund_energy * weights[hi] * cancel_scale).min(envelope_cap);
+                        if hi >= 2 {
+                            let own_h2 = if idx + 12 < CQT_SEMITONES {
+                                residual[idx + 12]
+                            } else {
+                                0.0
+                            };
+                            if cur_e > 0.0 && own_h2 >= cur_e * 0.22 {
+                                sub = sub.min(cur_e * 0.32);
+                            }
+                        }
+                        if hi >= 1 {
+                            // Track observed partial rolloff so missing intermediate partials prevent over-cancelling higher bins
+                            envelope_cap = envelope_cap.min(cur_e.max(sub) * 1.15);
+                        }
+                        residual[idx] = (cur_e - sub).max(0.0);
                         if hi > 0 {
                             if idx > 0 {
-                                residual[idx - 1] = (residual[idx - 1] - sub * 0.35).max(0.0);
+                                residual[idx - 1] = (residual[idx - 1] - sub * 0.25).max(0.0);
                             }
                             if idx + 1 < CQT_SEMITONES {
-                                residual[idx + 1] = (residual[idx + 1] - sub * 0.35).max(0.0);
+                                residual[idx + 1] = (residual[idx + 1] - sub * 0.25).max(0.0);
                             }
                         }
                     }
@@ -405,16 +427,16 @@ impl PrecisionPianoAnalyzer {
             }
         }
 
-        // 4) Convert to perceptual meter (0..1) + compute hammer-strike positive onset flux
+        // 4) Convert to wide-dynamic perceptual meter (ppp -64 dB .. ff -6 dB) + subtle onset flux
         for k in 0..PIANO_KEYS {
             let key_frac = k as f32 / (PIANO_KEYS - 1) as f32;
-            let tilt = 0.92 + key_frac * 1.15;
-            let level = amp_to_meter(raw_note_amp[k] * tilt, sensitivity * 1.25);
+            let tilt = 0.92 + key_frac * 1.18;
+            let level = piano_amp_to_meter(raw_note_amp[k] * tilt, sensitivity * 1.15);
             let flux = (level - self.prev_detected[k]).max(0.0);
             self.prev_detected[k] = level;
             out_levels[k] = level;
             out_onsets[k] = if flux > 0.14 {
-                (flux * 2.2).clamp(0.0, 1.0)
+                (flux * 2.0).clamp(0.0, 1.0)
             } else {
                 0.0
             };
@@ -591,13 +613,13 @@ impl VisualizerState {
         let t_start = Instant::now();
         let dt = dt.clamp(0.004, 0.1);
         let decay = (-dt * 7.2).exp();
-        // Smooth musical response for piano harmonics (less frantic flicker)
-        let piano_attack = 1.0 - (-dt * 18.0).exp();
-        let piano_decay = (-dt * 4.4).exp();
-        let onset_decay = (-dt * 10.0).exp();
-        // Weighted physical keybed travel: responsive finger downstroke, graceful damper return
-        let key_down = 1.0 - (-dt * 24.0).exp();
-        let key_up = 1.0 - (-dt * 8.5).exp();
+        // Calm, meditative legato piano envelope (velvety damper-pedal bloom, zero jarring flicker)
+        let piano_attack = 1.0 - (-dt * 11.0).exp();
+        let piano_decay = (-dt * 2.4).exp();
+        let onset_decay = (-dt * 7.5).exp();
+        // Weighted physical keybed travel: poised finger touch & unhurried damper return
+        let key_down = 1.0 - (-dt * 13.5).exp();
+        let key_up = 1.0 - (-dt * 3.8).exp();
         let peak_drop = dt * 0.24;
         let attack = 1.0 - (-dt * 34.0).exp();
 
@@ -742,7 +764,7 @@ impl VisualizerState {
 
                         let key_frac = key as f32 / (PIANO_KEYS - 1) as f32;
                         let tilt = 0.85 + key_frac * 1.45;
-                        let level = amp_to_meter(raw * tilt, self.sensitivity);
+                        let level = piano_amp_to_meter(raw * tilt, self.sensitivity);
                         let prev = self.piano_levels[key];
                         self.piano_levels[key] = smooth(prev, level, piano_attack, piano_decay);
                         self.piano_onsets[key] =
@@ -757,19 +779,21 @@ impl VisualizerState {
                 }
             }
 
-            // Schmitt-trigger hysteresis + weighted key-travel physics:
-            // Eliminates threshold chatter/blinking so keys depress smoothly like real fingers!
+            // Unified sensitive Schmitt-trigger + continuous dynamic key travel:
+            // Even whisper-quiet pp notes (>= 0.085) visibly touch & depress their key,
+            // and BOTH the above-key resonance plume and the keybed share this exact state (zero missed keys!).
             for key in 0..PIANO_KEYS {
                 let lvl = self.piano_levels[key];
                 if self.piano_key_held[key] {
-                    if lvl < 0.17 {
+                    if lvl < 0.048 {
                         self.piano_key_held[key] = false;
                     }
-                } else if lvl >= 0.30 {
+                } else if lvl >= 0.085 {
                     self.piano_key_held[key] = true;
                 }
                 let target_press = if self.piano_key_held[key] {
-                    ((lvl - 0.15) / 0.70).clamp(0.48, 1.0)
+                    // Continuous dynamic range: pp (~0.24) -> mf (~0.58) -> ff (1.0)
+                    (0.20 + ((lvl - 0.05) / 0.88).clamp(0.0, 1.0) * 0.80).clamp(0.20, 1.0)
                 } else {
                     0.0
                 };
@@ -778,7 +802,7 @@ impl VisualizerState {
                     cur + (target_press - cur) * key_down
                 } else {
                     let next = cur + (target_press - cur) * key_up;
-                    if next < 0.005 { 0.0 } else { next }
+                    if next < 0.008 { 0.0 } else { next }
                 };
             }
 
@@ -1094,12 +1118,12 @@ impl VisualizerState {
                         ppp,
                     );
                     let x0 = snap_px(cx - w * 0.5, ppp);
-                    let col = studio_meter_color(energy, 0.0, palette);
-                    let alpha = ((energy * fade * 235.0).round() as u8).clamp(32, 245);
+                    let col = piano_dynamic_color(energy, palette);
+                    let alpha = ((0.35 + energy * 0.65) * fade * 225.0).round().clamp(26.0, 235.0) as u8;
                     let bar = Rect::from_min_max(pos2(x0, y_top), pos2(x0 + w, y_bot));
                     painter.rect_filled(
                         bar,
-                        0.8,
+                        1.0,
                         Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), alpha),
                     );
                 }
@@ -1142,29 +1166,39 @@ impl VisualizerState {
             ),
         );
 
-        // Octave gridlines (C1..C7) aligned strictly to the LEFT boundary of each C key (between B and C!)
+        // Quiet, atmospheric octave reference lines (C1..C7) aligned strictly to each C key boundary
         if with_keyboard {
             for octave in 1..=7 {
                 let midi = 12 * (octave + 1);
                 let x = white_key_left_x(midi - 21, ribbon_rect);
                 painter.line_segment(
                     [pos2(x, ribbon_rect.top()), pos2(x, ribbon_rect.bottom())],
-                    Stroke::new(0.7, palette.border.gamma_multiply(0.55)),
+                    Stroke::new(0.6, palette.border.gamma_multiply(0.32)),
                 );
                 painter.text(
                     pos2(x + 3.0, ribbon_rect.top() + 2.0),
                     Align2::LEFT_TOP,
                     format!("C{octave}"),
-                    FontId::monospace(8.5),
-                    palette.faint,
+                    FontId::monospace(8.0),
+                    palette.faint.gamma_multiply(0.75),
                 );
             }
-            for f in [0.33_f32, 0.66] {
-                let y = ribbon_rect.bottom() - ribbon_rect.height() * f;
-                painter.line_segment(
-                    [pos2(ribbon_rect.left(), y), pos2(ribbon_rect.right(), y)],
-                    Stroke::new(0.6, palette.border.gamma_multiply(0.35)),
-                );
+            // Whisper-quiet dynamic legend (pp · mf · ff) on top-left so color = loudness is immediately intuitive
+            if ribbon_rect.height() >= 34.0 && ribbon_rect.width() >= 320.0 {
+                let ly = ribbon_rect.top() + 8.0;
+                let mut lx = ribbon_rect.left() + 4.0;
+                for (lbl, dyn_v) in [("pp", 0.16_f32), ("mf", 0.52), ("ff", 0.92)] {
+                    let c = piano_dynamic_color(dyn_v, palette);
+                    painter.circle_filled(pos2(lx + 3.0, ly), 2.5, c);
+                    painter.text(
+                        pos2(lx + 8.0, ly),
+                        Align2::LEFT_CENTER,
+                        lbl,
+                        FontId::monospace(8.0),
+                        palette.faint.gamma_multiply(0.85),
+                    );
+                    lx += 26.0;
+                }
             }
         }
 
@@ -1173,55 +1207,75 @@ impl VisualizerState {
         let white_w = ribbon_rect.width() / 52.0;
         let col_w = snap_px(
             if with_keyboard {
-                (white_w * 0.54).max(2.0)
+                (white_w * 0.56).max(2.2)
             } else {
-                (ribbon_rect.width() / n as f32 * 0.70).max(1.5)
+                (ribbon_rect.width() / n as f32 * 0.72).max(1.6)
             },
             ppp,
         );
         let bottom_y = snap_px(ribbon_rect.bottom(), ppp);
-        let max_h = (ribbon_rect.height() - 4.0).max(4.0);
+        let max_h = (ribbon_rect.height() - 6.0).max(4.0);
 
-        // Smooth per-key harmonic columns (no onset strobe flashing!)
+        // Serene, meditative vertical resonance plumes strictly coupled 1:1 to touched keys!
+        // Every plume uses the exact same activation (`piano_key_press`) and dynamic color (`pp` dark -> `ff` bright)
+        // as the key directly underneath — zero orphaned columns and zero jumpy peak ticks!
         for i in 0..n {
-            let val = self.piano_levels[i].clamp(0.0, 1.0);
+            let press = self.piano_key_press[i].clamp(0.0, 1.0);
+            let dyn_lvl = if with_keyboard {
+                // Strictly unified with keybed press so no column ever floats above an unpressed key
+                if press <= 0.015 {
+                    0.0
+                } else {
+                    (self.piano_levels[i] * 0.75 + press * 0.25).clamp(0.0, 1.0)
+                }
+            } else {
+                self.piano_levels[i].clamp(0.0, 1.0)
+            };
+            if dyn_lvl <= 0.025 {
+                continue;
+            }
             let cx = if with_keyboard {
                 key_center_x(i, ribbon_rect)
             } else {
                 ribbon_rect.left() + (i as f32 / (n - 1) as f32) * ribbon_rect.width()
             };
+            // Gentle perceptual height curve: pp rises modestly, mf floats gracefully, ff blooms tall
+            let plume_h = (dyn_lvl.powf(0.82) * max_h).max(3.0);
+            let top_y = (bottom_y - plume_h).max(ribbon_rect.top() + 2.0);
+            let col = piano_dynamic_color(dyn_lvl, palette);
+
+            // 1) Wide soft atmospheric halo (gives a calm, candlelit resonance feel)
+            let halo_w = col_w * 2.0;
+            let halo_alpha = ((0.10 + dyn_lvl * 0.16) * 255.0).round().clamp(14.0, 56.0) as u8;
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(cx - halo_w * 0.5, top_y + plume_h * 0.12),
+                    pos2(cx + halo_w * 0.5, bottom_y),
+                ),
+                halo_w * 0.45,
+                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), halo_alpha),
+            );
+
+            // 2) Smooth central resonance plume with soft feathered crown
+            let core_alpha = ((0.28 + dyn_lvl * 0.48) * 255.0).round().clamp(48.0, 195.0) as u8;
             let x0 = snap_px(cx - col_w * 0.5, ppp);
+            painter.rect_filled(
+                Rect::from_min_max(pos2(x0, top_y), pos2(x0 + col_w, bottom_y)),
+                (col_w * 0.45).min(3.5),
+                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), core_alpha),
+            );
 
-            if val > 0.03 {
-                let top_y = snap_px(bottom_y - val * max_h, ppp);
-                let col = lerp_color(palette.accent, palette.accent_bright, (val * 0.7).clamp(0.0, 1.0));
-                let stem = Rect::from_min_max(pos2(x0, top_y), pos2(x0 + col_w, bottom_y));
-                let body_alpha = if palette.is_light { 145 } else { 125 };
-                painter.rect_filled(
-                    stem,
-                    1.0,
-                    Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), body_alpha),
-                );
-                let cap_h = (bottom_y - top_y).min(snap_px(2.0, ppp));
-                let cap = Rect::from_min_max(pos2(x0, top_y), pos2(x0 + col_w, top_y + cap_h));
-                painter.rect_filled(cap, 0.5, col);
-            }
-
-            let pk = self.piano_peaks[i];
-            if pk > 0.14 && with_keyboard {
-                let py = snap_px(bottom_y - pk * max_h, ppp);
-                let tick_h = snap_px(1.5, ppp);
-                painter.rect_filled(
-                    Rect::from_min_max(pos2(x0, py), pos2(x0 + col_w, py + tick_h)),
-                    0.0,
-                    Color32::from_rgba_unmultiplied(
-                        palette.accent_bright.r(),
-                        palette.accent_bright.g(),
-                        palette.accent_bright.b(),
-                        170,
-                    ),
-                );
-            }
+            // 3) Warm base pool resting right above the touched key so eye links plume <-> key effortlessly
+            let base_h = (plume_h * 0.28).clamp(2.5, 10.0);
+            let base_alpha = ((0.40 + dyn_lvl * 0.52) * 255.0).round().clamp(70.0, 230.0) as u8;
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(x0, (bottom_y - base_h).max(top_y)),
+                    pos2(x0 + col_w, bottom_y),
+                ),
+                (col_w * 0.35).min(2.5),
+                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), base_alpha),
+            );
         }
 
         if with_keyboard && show_chord {
@@ -1286,15 +1340,22 @@ impl VisualizerState {
                 } else {
                     Color32::from_rgb(28, 33, 37)
                 };
-                // Calm single-hue depression tint (never bright strobe/blinking!)
-                let face_fill = lerp_color(base_face, palette.accent, press * 0.56);
-                let lip_fill = lerp_color(base_lip, palette.accent, press * 0.32);
+                // Dynamics-aware color shading: pp = deep dark muted tint, mf = rich accent, ff = luminous bright/gold!
+                let dyn_lvl = (self.piano_levels[k] * 0.75 + press * 0.25).clamp(0.0, 1.0);
+                let dyn_col = piano_dynamic_color(dyn_lvl, palette);
+                let tint_strength = if press > 0.015 {
+                    (0.36 + dyn_lvl * 0.54).clamp(0.0, 0.90) * press.sqrt()
+                } else {
+                    0.0
+                };
+                let face_fill = lerp_color(base_face, dyn_col, tint_strength);
+                let lip_fill = lerp_color(base_lip, dyn_col, tint_strength * 0.55);
 
                 painter.rect_filled(key_r, 1.8, lip_fill);
                 painter.rect_filled(face_r, 1.5, face_fill);
 
                 // Recessed depth shadow at the top & sides when key sinks below its neighbors
-                if press > 0.04 {
+                if press > 0.02 {
                     let sh_alpha = (press * if palette.is_light { 58.0 } else { 95.0 }).round() as u8;
                     let shadow_col = Color32::from_rgba_unmultiplied(0, 0, 0, sh_alpha);
                     let top_sh = Rect::from_min_max(
@@ -1315,20 +1376,22 @@ impl VisualizerState {
                         Color32::from_rgba_unmultiplied(0, 0, 0, sh_alpha / 2),
                     );
 
-                    // Subtle soft fingertip touch pad positioned cleanly above C1..C8 key labels
-                    if white_w >= 8.0 && press > 0.15 {
-                        let pad_r = (white_w * 0.21).clamp(1.8, 3.6);
+                    // Soft fingertip touch pad scaled smoothly by dynamics (subtle on pp, luminous on ff)
+                    if white_w >= 8.0 && press > 0.08 {
+                        let pad_r = (white_w * (0.16 + dyn_lvl * 0.08)).clamp(1.6, 3.6);
                         let min_clearance = if midi.is_multiple_of(12) { 12.5 } else { 5.5 };
                         let pad_y = (face_r.bottom() - (face_r.height() * 0.32).max(min_clearance))
                             .max(face_r.top() + pad_r + 3.0);
-                        let pad_alpha = ((press - 0.15) * 155.0).clamp(0.0, 135.0) as u8;
+                        let pad_col = lerp_color(dyn_col, palette.accent_bright, 0.35 + dyn_lvl * 0.45);
+                        let pad_alpha = ((0.30 + dyn_lvl * 0.58) * 255.0 * press.sqrt())
+                            .clamp(0.0, 210.0) as u8;
                         painter.circle_filled(
                             pos2(face_r.center().x, pad_y),
                             pad_r,
                             Color32::from_rgba_unmultiplied(
-                                palette.accent_bright.r(),
-                                palette.accent_bright.g(),
-                                palette.accent_bright.b(),
+                                pad_col.r(),
+                                pad_col.g(),
+                                pad_col.b(),
                                 pad_alpha,
                             ),
                         );
@@ -1394,22 +1457,31 @@ impl VisualizerState {
                     Color32::from_rgb(24, 29, 34)
                 };
 
-                let body_fill = lerp_color(ebony_body, palette.accent, press * 0.36);
-                let face_fill = lerp_color(ebony_top, palette.accent_bright, press * 0.62);
+                let dyn_lvl = (self.piano_levels[k] * 0.75 + press * 0.25).clamp(0.0, 1.0);
+                let dyn_col = piano_dynamic_color(dyn_lvl, palette);
+                let tint_strength = if press > 0.015 {
+                    (0.42 + dyn_lvl * 0.50).clamp(0.0, 0.92) * press.sqrt()
+                } else {
+                    0.0
+                };
+                let body_fill = lerp_color(ebony_body, dyn_col, tint_strength * 0.52);
+                let face_fill = lerp_color(ebony_top, dyn_col, tint_strength);
 
                 painter.rect_filled(key_r, 1.2, body_fill);
                 painter.rect_filled(top_face, 1.0, face_fill);
 
-                if press > 0.15 && bw >= 5.0 {
-                    let dot_r = (bw * 0.24).clamp(1.4, 2.8);
-                    let dot_alpha = ((press - 0.15) * 175.0).clamp(0.0, 155.0) as u8;
+                if press > 0.08 && bw >= 5.0 {
+                    let dot_r = (bw * (0.18 + dyn_lvl * 0.08)).clamp(1.3, 2.8);
+                    let dot_alpha = ((0.32 + dyn_lvl * 0.55) * 255.0 * press.sqrt())
+                        .clamp(0.0, 200.0) as u8;
+                    let dot_col = lerp_color(dyn_col, palette.accent_bright, 0.55);
                     painter.circle_filled(
                         pos2(top_face.center().x, top_face.bottom() - 3.5),
                         dot_r,
                         Color32::from_rgba_unmultiplied(
-                            palette.on_accent().r(),
-                            palette.on_accent().g(),
-                            palette.on_accent().b(),
+                            dot_col.r(),
+                            dot_col.g(),
+                            dot_col.b(),
                             dot_alpha,
                         ),
                     );
@@ -1826,7 +1898,7 @@ fn detect_chord_and_notes(levels: &[f32; PIANO_KEYS]) -> String {
     let mut active: Vec<(usize, f32)> = levels
         .iter()
         .enumerate()
-        .filter(|&(_, &v)| v > 0.30)
+        .filter(|&(_, &v)| v > 0.14)
         .map(|(k, &v)| (k, v))
         .collect();
     if active.is_empty() {
@@ -1906,6 +1978,42 @@ fn detect_chord_and_notes(levels: &[f32; PIANO_KEYS]) -> String {
         Some((_, chord)) => format!("{chord}  ·  {notes_str}"),
         None => notes_str,
     }
+}
+
+/// Musical dynamics color gradient for concert piano touch:
+/// - `pp / p` (0.0..0.35): Deep, calm, darker muted studio hue
+/// - `mp / mf` (0.35..0.72): Rich, expressive theme accent
+/// - `f / ff` (0.72..1.0): Bright, luminous accent warming gently toward gold on peaks
+fn piano_dynamic_color(dyn_level: f32, palette: &Palette) -> Color32 {
+    let v = dyn_level.clamp(0.0, 1.0);
+    let soft_deep = if palette.is_light {
+        lerp_color(palette.muted, palette.accent, 0.50)
+    } else {
+        lerp_color(palette.accent_dark, palette.accent, 0.34)
+    };
+    if v < 0.35 {
+        lerp_color(soft_deep, palette.accent, (v / 0.35) * 0.72)
+    } else if v < 0.72 {
+        let t = (v - 0.35) / 0.37;
+        lerp_color(
+            lerp_color(soft_deep, palette.accent, 0.72),
+            palette.accent_bright,
+            t * 0.85,
+        )
+    } else {
+        let t = (v - 0.72) / 0.28;
+        lerp_color(palette.accent_bright, palette.hires_gold, t * 0.72)
+    }
+}
+
+/// Wide-dynamic perceptual meter tailored for classical solo piano (ppp -64 dB .. ff -6 dB).
+fn piano_amp_to_meter(amp: f32, sensitivity: f32) -> f32 {
+    let scaled = amp * sensitivity;
+    if scaled <= 3e-5 {
+        return 0.0;
+    }
+    let db = 20.0 * scaled.log10();
+    ((db + 64.0) / 58.0).clamp(0.0, 1.0)
 }
 
 /// Disciplined single-hue mastering meter ramp: calm theme accent rising to accent_bright,
@@ -2133,6 +2241,55 @@ mod tests {
         assert!(
             exact_hits >= 82,
             "Expected >=82/88 exact single-key hits across full piano range, got {exact_hits}/88 (within ±1: {within_one_semi}/88)"
+        );
+    }
+
+    #[test]
+    fn detects_quiet_moonlight_arpeggio_and_scales_dynamics_brightness() {
+        let mut analyzer = PrecisionPianoAnalyzer::new();
+        let sr = 48_000_u32;
+        // Simulate Beethoven Moonlight Sonata 1st mvt: warm C#2 bass + whisper-quiet pp G#3, C#4, E4 triplet
+        let freqs_amps: &[(usize, f32)] = &[
+            (37, 0.08),  // C#2 sustained bass
+            (56, 0.010), // G#3 soft pp arpeggio
+            (61, 0.012), // C#4 soft pp arpeggio
+            (64, 0.011), // E4 soft pp arpeggio
+        ];
+        for (i, slot) in analyzer.raw_mono.iter_mut().enumerate() {
+            let t = i as f32 / sr as f32;
+            let mut s = 0.0_f32;
+            for &(midi, amp) in freqs_amps {
+                let f = 440.0 * 2.0_f32.powf((midi as f32 - 69.0) / 12.0);
+                s += amp * (TAU * f * t).sin() + amp * 0.45 * (TAU * 2.0 * f * t).sin();
+            }
+            *slot = s;
+        }
+        let mut levels = [0.0_f32; PIANO_KEYS];
+        let mut onsets = [0.0_f32; PIANO_KEYS];
+        analyzer.analyze(sr, true, 1.15, &mut levels, &mut onsets);
+
+        // Every single quiet pp arpeggio note must register above key-engagement threshold (0.085)!
+        for &(midi, _) in freqs_amps {
+            let k = midi - 21;
+            assert!(
+                levels[k] >= 0.085,
+                "Quiet note MIDI {midi} should engage keybed (>= 0.085), got {}",
+                levels[k]
+            );
+        }
+
+        // Verify dynamics color gradient gets visibly brighter from pp -> mf -> ff
+        let pal = crate::theme::ThemeId::StudioReference.palette();
+        let lum = |c: Color32| 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
+        let c_pp = piano_dynamic_color(0.15, &pal);
+        let c_mf = piano_dynamic_color(0.55, &pal);
+        let c_ff = piano_dynamic_color(0.95, &pal);
+        assert!(
+            lum(c_pp) < lum(c_mf) && lum(c_mf) < lum(c_ff),
+            "Expected luminance pp ({:.1}) < mf ({:.1}) < ff ({:.1})",
+            lum(c_pp),
+            lum(c_mf),
+            lum(c_ff)
         );
     }
 }
