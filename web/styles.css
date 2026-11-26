@@ -316,13 +316,47 @@ h2 .gold, h1 .gold { color: var(--gold); }
   transition: border-color 0.2s ease;
 }
 .hero-shot:hover { border-color: var(--accent-50); }
-.hero-shot img { display: block; width: 100%; height: auto; }
+.hero-shot img, .hero-shot video { display: block; width: 100%; height: auto; }
+.hero-shot video { aspect-ratio: 16 / 9; background: #0b1114; }
 .hero-shot figcaption {
   padding: 0.72rem 1.1rem;
   font-size: 0.84rem;
   color: var(--muted);
   border-top: 1px solid var(--line-soft);
 }
+
+/* ---------- topic roadmap pills & overview grid ---------- */
+.topic-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 1.35rem;
+}
+.topic-chip {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  background: rgba(15, 25, 31, 0.75);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.28rem 0.72rem;
+}
+.topic-chip b { color: var(--gold); font-weight: 600; margin-right: 0.35rem; }
+.overview-grid { grid-template-columns: repeat(3, 1fr); }
+.overview-card .topic-num {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 0.35rem;
+}
+.shot-item.compact-frame { max-width: 520px; }
+@media (max-width: 980px) { .overview-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 620px) { .overview-grid { grid-template-columns: 1fr; } }
 
 /* ---------- ticker ---------- */
 .ticker {

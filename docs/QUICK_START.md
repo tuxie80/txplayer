@@ -1,4 +1,4 @@
-# TxPlayer — Quick Start & First Steps (`v1.10.0`)
+# TxPlayer — Quick Start & First Steps (`v1.11.0`)
 
 Welcome to **TxPlayer** — a 100% free, native Rust audiophile music player, real-time 88-key concert piano & acoustic visualizer, and offline master music library database for **macOS, Windows, and Linux**.
 

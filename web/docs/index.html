@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxPlayer Documentation &amp; Quick Start · v1.10.0</title>
+<title>TxPlayer Documentation &amp; Quick Start · v1.11.0</title>
 <link rel="icon" type="image/png" href="favicon.png">
-<meta name="description" content="Complete Quick Start, First Steps, and Technical Reference Manual for TxPlayer v1.10.0 — bit-perfect Rust audiophile player, 64-bit DSP &amp; FFT convolution, 88-key piano visualizer, and master library database.">
+<meta name="description" content="Complete Quick Start, First Steps, and Technical Reference Manual for TxPlayer v1.11.0 — bit-perfect Rust audiophile player, 64-bit DSP &amp; FFT convolution, Pitch-Locked Practice, Blind ABX Lab, LAN Mobile Remote, 88-key piano visualizer, and master library database.">
 <style>
 @font-face { font-family:'Space Grotesk'; src:url('../fonts/space-grotesk.woff2') format('woff2'); font-weight:300 700; font-display:swap; }
 @font-face { font-family:'Inter'; src:url('../fonts/inter.woff2') format('woff2'); font-weight:100 900; font-display:swap; }
@@ -123,7 +123,7 @@ table.ref tr:hover td{background:var(--bg2)}
   <a class="brand" href="../">
     <span class="logo">Tx</span>
     <span>TxPlayer Docs</span>
-    <span class="ver-badge">v1.10.0</span>
+    <span class="ver-badge">v1.11.0</span>
   </a>
   <div class="top-actions">
     <input class="global-search" id="docSearch" type="search" placeholder="Filter docs, shortcuts, query tokens…" aria-label="Filter documentation sections">
@@ -161,8 +161,8 @@ table.ref tr:hover td{background:var(--bg2)}
       <li><a href="#troubleshooting">Data, Backups &amp; Helpers</a></li>
     </ul>
     <div class="nav-foot">
-      TxPlayer <strong>v1.10.0</strong><br>
-      Pure Rust · Zero Cloud<br>
+      TxPlayer <strong>v1.11.0</strong><br>
+      Press <strong>F1</strong> in-app for Quick Guide<br>
       <a href="../">tuxie.eu/txplayer</a>
     </div>
   </aside>
@@ -267,12 +267,13 @@ table.ref tr:hover td{background:var(--bg2)}
       <p>Every DSP processor executes in <strong>64-bit <code>f64</code></strong> precision directly inside the real-time audio callback with zero heap allocations and zero mutexes.</p>
 
       <figure>
-        <img src="../img/solarized-dark-dsp.png" alt="TxPlayer Settings Audio and DSP Panel">
-        <figcaption>Settings → Audio &amp; DSP: interactive frequency-response canvas, 10-band EQ, AutoEQ PEQ, partitioned FFT Convolution IR, Crossfeed, Mastering Console, and output dither.</figcaption>
+        <img src="../img/settings-dsp-interactive.jpg" alt="TxPlayer Settings Audio, Interactive EQ Canvas and DSP Panel">
+        <figcaption>Settings → Audio &amp; DSP: interactive drag-to-shape 10-band EQ canvas, AutoEQ PEQ, partitioned FFT Convolution IR, Crossfeed, Mastering Console, Pitch-Locked Practice &amp; Concert Tuning (A=440/432/415 Hz).</figcaption>
       </figure>
 
       <ul>
         <li><strong>Interactive Drag-to-Shape 10-Band EQ Canvas:</strong> Drag any of the 10 glowing frequency nodes (<code>31 Hz – 16 kHz</code>) directly on the <code>20 Hz – 20 kHz</code> response curve (<code>-12..+12 dB</code> in <code>0.5 dB</code> steps) with live floating <code>Hz · dB</code> telemetry. Double-click any node to snap back to <code>0.0 dB</code>.</li>
+        <li><strong>Pitch-Preserving Practice &amp; Concert Tuning:</strong> Lock-free dual-tap Hann-windowed stereo pitch shifter keeps original musical pitch when slowing down (<code>0.75× – 1.5×</code>), supports real-time <code>±12 semitone</code> transpose, and switches concert reference pitch between <code>A=440 Hz</code>, <code>A=432 Hz</code> (Verdi), and <code>A=415 Hz</code> (Baroque).</li>
         <li><strong>16-Band Parametric EQ &amp; AutoEQ Import:</strong> Click <em>Import AutoEQ (.txt)</em> to load EqualizerAPO / Oratory1990 headphone target curves (<code>Preamp</code>, <code>PK</code>, <code>LSC</code>, <code>HSC</code>), plotted together with the 10-band EQ.</li>
         <li><strong>Partitioned FFT Stereo Convolution Engine (<code>.wav</code> IR):</strong> Lock-free 64-bit overlap-add FFT convolver (<code>512</code>-sample blocks, up to <code>16,384</code> taps). Choose built-in <em>Analog Warmth</em>, <em>Intimate Chamber</em>, or <em>Mastering Air</em> presets, or click <strong>Load .WAV IR…</strong> for custom 16/24/32-bit int/float mono or stereo IRs with automatic resampling, <strong>Wet/Dry Mix</strong>, and <strong>IR Gain</strong>.</li>
         <li><strong>Headphone Crossfeed Presets:</strong> <em>Gentle</em>, <em>Chu Moy</em>, <em>Jan Meier</em>, and <em>Bauer Studio</em> (700 Hz head-shadow acoustic cross-bleed).</li>
@@ -311,6 +312,8 @@ table.ref tr:hover td{background:var(--bg2)}
         <li><strong>Per-Track Timestamp Bookmarks (<kbd>⌘B</kbd> / <kbd>Ctrl+B</kbd>):</strong> Save persistent timestamp bookmarks for long symphonies, operas, or concerts; jump back to any mark from the Signal Path popover.</li>
         <li><strong>Sleep Timer:</strong> Choose <code>15m</code>, <code>30m</code>, <code>60m</code>, or <code>End of Track</code> via Signal Path or <kbd>⌘K</kbd> with a gentle 5-second volume fade-out.</li>
         <li><strong>100% Local "Similar Radio":</strong> Right-click any track → <em>Start Local Radio (Similar Tracks)</em> (or <kbd>⌘K</kbd>) to build a 40-track offline queue scored by Composer (+50), Genre (+25), Artist (+22), shared <code>#tags</code> (+18 each), Label (+14), Decade (+10), Hi-Res tier, and Rating.</li>
+        <li><strong>Loudness-Matched Blind ABX Comparison Lab:</strong> Right-click any track → <em>Blind ABX Lab → Load as Master A / B</em> (or <kbd>⌘K</kbd> → <em>Blind ABX Lab</em>). Automatically trims the louder master using EBU R128 Integrated LUFS (<code>0.1 dB</code> accuracy), switches seamlessly between <code>A</code>, <code>B</code>, and randomized blind <code>X</code> at identical timestamps, and computes the exact upper-tail binomial <code>p-value</code>!</li>
+        <li><strong>100% Local LAN Mobile Remote:</strong> Enable in <em>Settings → Modules</em> (or <kbd>⌘K</kbd> → <em>Start Local LAN Mobile Remote</em>) to open a mobile-first dark studio Web Remote at <code>http://&lt;LAN-IP&gt;:7878</code> from any phone or tablet on your local Wi-Fi — zero cloud, zero accounts.</li>
         <li><strong>Synced Lyrics Drawer (<kbd>L</kbd>):</strong> Displays time-synced <code>.lrc</code> lyrics alongside playback.</li>
       </ul>
     </section>
@@ -417,13 +420,14 @@ table.ref tr:hover td{background:var(--bg2)}
           <thead><tr><th>Action</th><th>macOS</th><th>Windows / Linux</th></tr></thead>
           <tbody>
             <tr><td><strong>Command Palette</strong> (jump to anything)</td><td><kbd>⌘K</kbd></td><td><kbd>Ctrl+K</kbd></td></tr>
+            <tr><td><strong>Built-In Quick Guide &amp; Shortcuts</strong></td><td><kbd>F1</kbd></td><td><kbd>F1</kbd></td></tr>
             <tr><td>Focus Power-Search bar</td><td><kbd>⌘F</kbd></td><td><kbd>Ctrl+F</kbd></td></tr>
             <tr><td>Open Settings</td><td><kbd>⌘,</kbd></td><td><kbd>Ctrl+,</kbd></td></tr>
             <tr><td>Play / Pause (freezes Piano Visualizer)</td><td><kbd>Space</kbd></td><td><kbd>Space</kbd></td></tr>
             <tr><td><strong>Instant DSP A/B Comparison</strong></td><td><kbd>D</kbd></td><td><kbd>D</kbd></td></tr>
             <tr><td>Toggle Audio DSP On/Off</td><td><kbd>E</kbd></td><td><kbd>E</kbd></td></tr>
             <tr><td>Toggle Concert Visualizer Stage</td><td><kbd>V</kbd></td><td><kbd>V</kbd></td></tr>
-            <tr><td>Switch Visualizer Mode</td><td><kbd>1</kbd>–<kbd>5</kbd></td><td><kbd>1</kbd>–<kbd>5</kbd></td></tr>
+            <tr><td>Switch Visualizer Mode</td><td><kbd>1</kbd>–<kbd>6</kbd></td><td><kbd>1</kbd>–<kbd>6</kbd></td></tr>
             <tr><td>Set A–B Loop Point A / Point B / Clear</td><td><kbd>[</kbd> / <kbd>]</kbd> / <kbd>\</kbd></td><td><kbd>[</kbd> / <kbd>]</kbd> / <kbd>\</kbd></td></tr>
             <tr><td>Drop Timestamp Bookmark</td><td><kbd>⌘B</kbd></td><td><kbd>Ctrl+B</kbd></td></tr>
             <tr><td>Toggle Synced Lyrics Drawer</td><td><kbd>L</kbd></td><td><kbd>L</kbd></td></tr>
@@ -443,8 +447,12 @@ table.ref tr:hover td{background:var(--bg2)}
   --theme &lt;name&gt;          # solarized-dark, studio-reference, obsidian-studio, nord, ...
   --vis-mode &lt;mode&gt;       # piano | roll | spectrum | spectrogram | scope | vu
   --open-settings &lt;tab&gt;   # appearance | visualizer | audio | plugins | library
+  --open-insights         # Open Library Insights analytics modal directly
+  --open-abx              # Open Blind ABX Comparison Lab modal directly
+  --open-help             # Open built-in F1 Quick Guide directly
   --compact | --full      # Force Compact Mini-Player or Full window layout
-  --demo-piano            # Launch with frozen Chopin Cm9 piano voicing demo</code></pre>
+  --demo-piano            # Launch with frozen Chopin Cm9 piano voicing demo
+  --demo-spectrogram      # Launch with live harmonic acoustic spectrogram demo</code></pre>
     </section>
 
     <!-- TROUBLESHOOTING -->

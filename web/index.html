@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TxPlayer — Audiophile Rust Music Player, 88-Key Piano Visualizer &amp; Master Library</title>
 <link rel="icon" type="image/png" href="favicon.png">
-<meta name="description" content="TxPlayer is a fast, 100% free native Rust audiophile music player, 88-key Precision CQT concert piano visualizer, 64-bit DSP &amp; FFT convolution suite, and offline master music library database for macOS, Windows, and Linux.">
+<meta name="description" content="TxPlayer v1.11.0 is a 100% free native Rust audiophile music player, 88-key Precision CQT piano &amp; spectrogram visualizer, 64-bit DSP &amp; FFT convolution suite, Blind ABX Lab, LAN Remote, and master library database for macOS, Windows, and Linux.">
 <link rel="preload" href="fonts/space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="styles.css?v=1">
+<link rel="stylesheet" href="styles.css?v=2">
 </head>
 <body>
 
@@ -20,14 +20,14 @@
     <a class="brand" href="#top">
       <span class="brand-mark">Tx</span>
       <span class="brand-name">TxPlayer</span>
-      <span class="brand-ver">v1.10.0</span>
+      <span class="brand-ver">v1.11.0</span>
     </a>
     <nav class="nav-links" id="navLinks">
-      <a href="#showcase">Signal &amp; Query</a>
-      <a href="#install">First Steps</a>
-      <a href="#formats">Formats</a>
       <a href="#features">Features</a>
       <a href="#screenshots">Screenshots</a>
+      <a href="#showcase">Signal &amp; Query</a>
+      <a href="#formats">Formats</a>
+      <a href="#install">First Steps</a>
       <a href="#docs">Docs</a>
       <a href="#integrity">Integrity</a>
     </nav>
@@ -43,17 +43,18 @@
         <p class="kicker reveal">Audiophile music player &amp; master library · macOS · Windows · Linux</p>
         <h1 class="reveal">One player.<br><span class="acc">Every bit-perfect</span><br><span class="gold">note &amp; record.</span></h1>
         <p class="hero-sub reveal">
-          TxPlayer is a native Rust audiophile music player built with <code>eframe / egui</code>,
+          TxPlayer is a native Rust audiophile player built with <code>eframe / egui</code>,
           <code>Symphonia SIMD</code>, <code>CPAL</code>, and <code>Rubato</code>.
-          Bit-perfect Exclusive DAC playback and live native <strong>DSD over PCM (DoP v1.1)</strong>,
-          a lock-free <strong>64-bit DSP &amp; FFT Convolution</strong> engine, a real-time
-          <strong>88-key Precision CQT piano visualizer</strong>, and a relational classical &amp; collector
-          music database — in an 8.5&nbsp;MB binary. <strong>100% local, zero cloud, zero subscriptions.</strong>
+          Bit-perfect Exclusive DAC &amp; native <strong>DSD over PCM (DoP v1.1)</strong>,
+          lock-free <strong>64-bit DSP, FFT Convolution &amp; Pitch-Locked Practice</strong>,
+          an <strong>88-key Precision CQT piano &amp; live spectrogram stage</strong>,
+          a <strong>Blind ABX Lab</strong>, <strong>LAN Mobile Remote</strong>, and an offline
+          relational collector library — in ~8.5&nbsp;MB. <strong>100% local, zero cloud.</strong>
         </p>
         <div class="hero-actions reveal">
-          <a class="btn btn-primary" href="docs/#quick-start">5-Minute Quick Start ↗</a>
-          <a class="btn btn-ghost" href="docs/">Full Documentation ↗</a>
-          <a class="btn btn-ghost" href="#screenshots">Screenshots</a>
+          <a class="btn btn-primary" href="#screenshots">See Compact &amp; Classic Views</a>
+          <a class="btn btn-ghost" href="docs/#quick-start">5-Min Quick Start ↗</a>
+          <a class="btn btn-ghost" href="docs/">Full Docs ↗</a>
         </div>
         <ul class="hero-platforms reveal" aria-label="Available on macOS, Windows and Linux">
           <li>
@@ -73,39 +74,39 @@
 
       <div class="steps reveal">
         <div class="step-card">
-          <p class="step-label"><b>1</b> Drop Music &amp; Listen Bit-Perfect</p>
-          <p class="step-note" style="margin-top:0">Drag any folder onto TxPlayer. Open <strong>Signal Path</strong> or <code>⌘,</code> → <strong>Audio &amp; DSP</strong> to enable Exclusive DAC, Direct <code>0.0 dBFS</code> Lock, or native <strong>DoP v1.1</strong>.</p>
-        </div>
-        <div class="step-card">
-          <p class="step-label"><b>2</b> Build &amp; Run Native Release (Rust 1.95+)</p>
+          <p class="step-label"><b>1</b> Build &amp; Run Native Binary (Rust 1.95+)</p>
           <div class="term">
             <span class="term-prompt" aria-hidden="true">$</span>
-            <code>cargo run --release</code>
+            <code>cargo test &amp;&amp; cargo run --release</code>
             <button class="term-copy" type="button" aria-label="Copy build command" title="Copy to clipboard"><svg class="ic ic-copy" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="4.5" width="8" height="10" rx="1.5"/><path d="M2.5 11.5v-8A1.5 1.5 0 0 1 4 2h7"/></svg><svg class="ic ic-check" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7-8"/></svg></button>
           </div>
         </div>
         <div class="step-card">
-          <p class="step-label"><b>3</b> Package Signed macOS App &amp; DMG</p>
+          <p class="step-label"><b>2</b> Package Signed macOS App &amp; DMG</p>
           <div class="term">
             <span class="term-prompt" aria-hidden="true">$</span>
             <code>./scripts/package-macos.sh</code>
             <button class="term-copy" type="button" aria-label="Copy macOS package command" title="Copy to clipboard"><svg class="ic ic-copy" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="4.5" width="8" height="10" rx="1.5"/><path d="M2.5 11.5v-8A1.5 1.5 0 0 1 4 2h7"/></svg><svg class="ic ic-check" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7-8"/></svg></button>
           </div>
         </div>
+        <div class="step-card">
+          <p class="step-label"><b>3</b> Press F1 Inside TxPlayer Anytime</p>
+          <p class="step-note" style="margin-top:0">Built-in <strong>Quick Guide, Shortcuts &amp; Power-Search</strong> overlay ships right inside the app, plus <a href="docs/#quick-start">complete online docs ↗</a>.</p>
+        </div>
       </div>
     </div>
 
     <dl class="hero-stats reveal">
-      <div class="stat-gold"><dt>64-bit</dt><dd>lock-free DSP &amp; FFT IR</dd></div>
-      <div><dt>88 keys</dt><dd>Precision CQT piano stage</dd></div>
-      <div class="stat-gold"><dt>DoP v1.1</dt><dd>native DSD64–DSD512</dd></div>
-      <div><dt>~8.5 MB</dt><dd>native Rust binary</dd></div>
-      <div><dt>50 / 50</dt><dd>automated unit tests</dd></div>
+      <div class="stat-gold"><dt>64-bit</dt><dd>lock-free DSP, FFT IR &amp; Pitch</dd></div>
+      <div><dt>6 modes</dt><dd>Piano CQT · Spectrogram · VU</dd></div>
+      <div class="stat-gold"><dt>DoP v1.1</dt><dd>native DSD64–512 &amp; SACD .iso</dd></div>
+      <div><dt>9 themes</dt><dd>Compact &amp; Classic layouts</dd></div>
+      <div><dt>55 / 55</dt><dd>automated unit tests</dd></div>
     </dl>
 
-    <figure class="hero-shot reveal" data-lightbox="img/solarized-dark-piano.png" tabindex="0">
-      <img src="img/solarized-dark-piano.png" alt="TxPlayer — Solarized Dark with 88-Key Concert Piano &amp; Harmonic Ribbon">
-      <figcaption>TxPlayer running Solarized Dark — real-time 88-Key Precision CQT Piano Visualizer with live chord readout, harmonic cancellation, and full-bleed custom studio chrome. Click to enlarge.</figcaption>
+    <figure class="hero-shot reveal" style="cursor:default">
+      <video src="img/txplayer-tour.mp4?v=1" poster="img/classic-piano-studio.jpg" controls playsinline preload="metadata" muted loop aria-label="TxPlayer v1.11.0 guided visual tour of the real native application"></video>
+      <figcaption>TxPlayer v1.11.0 guided visual tour — 100% real captures of Compact Mini-Player, 88-Key Piano, Live Acoustic Spectrogram, Interactive EQ Canvas, Library Insights, Blind ABX Lab, F1 Quick Guide, and Studio Themes.</figcaption>
     </figure>
   </div>
 </section>
@@ -113,20 +114,346 @@
 <!-- ================= TICKER ================= -->
 <div class="ticker" aria-hidden="true">
   <div class="ticker-track">
-    <span>FLAC · ALAC · WAV · AIFF</span><span>Native DSD64–DSD512</span><span>DoP v1.1 Transport</span><span>WavPack · Monkey's Audio · Opus</span><span>SACD .iso TOC Inspector</span><span>64-Bit FFT Convolution (.wav IR)</span><span>Interactive 10-Band EQ Canvas</span><span>AutoEQ / Oratory1990 PEQ</span><span>EBU R128 LUFS &amp; True Peak</span><span>TrueHz / DR Authenticity Auditor</span><span>88-Key Precision CQT Piano</span><span>Live Acoustic Spectrogram</span><span>Master Library DB v2</span><span>HTML &amp; Markdown Dossiers</span>
-    <span>FLAC · ALAC · WAV · AIFF</span><span>Native DSD64–DSD512</span><span>DoP v1.1 Transport</span><span>WavPack · Monkey's Audio · Opus</span><span>SACD .iso TOC Inspector</span><span>64-Bit FFT Convolution (.wav IR)</span><span>Interactive 10-Band EQ Canvas</span><span>AutoEQ / Oratory1990 PEQ</span><span>EBU R128 LUFS &amp; True Peak</span><span>TrueHz / DR Authenticity Auditor</span><span>88-Key Precision CQT Piano</span><span>Live Acoustic Spectrogram</span><span>Master Library DB v2</span><span>HTML &amp; Markdown Dossiers</span>
+    <span>Bit-Perfect Exclusive DAC</span><span>Native DoP v1.1 &amp; SACD .iso</span><span>Interactive 10-Band EQ Canvas</span><span>64-Bit FFT Convolution (.wav IR)</span><span>Pitch-Locked Practice &amp; A=432/415 Hz</span><span>88-Key Precision CQT Piano</span><span>Live Acoustic Spectrogram</span><span>Loudness-Matched Blind ABX Lab</span><span>Master Library DB v2</span><span>HTML &amp; Markdown Dossiers</span><span>100% Local LAN Mobile Remote</span><span>Built-In F1 Quick Guide</span>
+    <span>Bit-Perfect Exclusive DAC</span><span>Native DoP v1.1 &amp; SACD .iso</span><span>Interactive 10-Band EQ Canvas</span><span>64-Bit FFT Convolution (.wav IR)</span><span>Pitch-Locked Practice &amp; A=432/415 Hz</span><span>88-Key Precision CQT Piano</span><span>Live Acoustic Spectrogram</span><span>Loudness-Matched Blind ABX Lab</span><span>Master Library DB v2</span><span>HTML &amp; Markdown Dossiers</span><span>100% Local LAN Mobile Remote</span><span>Built-In F1 Quick Guide</span>
   </div>
 </div>
+
+<!-- ================= FEATURES (OVERVIEW FIRST -> TECHNICAL TOPICS AFTER) ================= -->
+<section class="section" id="features">
+  <div class="section-inner">
+    <p class="kicker reveal">Features by topic</p>
+    <h2 class="reveal">Start with the overview.<br><span class="acc">Dive into any technical layer.</span></h2>
+    <p class="section-lead reveal">TxPlayer spans five clear pillars — from pure bit-perfect playback to collector-grade database curation. Scan the <strong>Overview</strong> first, then pick any topic tab for full technical details.</p>
+
+    <div class="topic-strip reveal" aria-label="Five product topics">
+      <span class="topic-chip"><b>01</b>Audio &amp; Bit-Perfect</span>
+      <span class="topic-chip"><b>02</b>64-Bit DSP &amp; Practice</span>
+      <span class="topic-chip"><b>03</b>6 Concert Visualizers</span>
+      <span class="topic-chip"><b>04</b>Master Library DB</span>
+      <span class="topic-chip"><b>05</b>Audits, ABX &amp; Remote</span>
+    </div>
+
+    <div class="tabs reveal" id="featTabs">
+      <div class="tab-bar" role="tablist" aria-label="Feature topics">
+        <button class="tab-btn" type="button" role="tab" id="ftab-overview" aria-controls="fpane-overview" aria-selected="true">Overview</button>
+        <button class="tab-btn" type="button" role="tab" id="ftab-audio" aria-controls="fpane-audio" aria-selected="false" tabindex="-1">01 · Audio &amp; DoP</button>
+        <button class="tab-btn" type="button" role="tab" id="ftab-dsp" aria-controls="fpane-dsp" aria-selected="false" tabindex="-1">02 · DSP &amp; Practice</button>
+        <button class="tab-btn" type="button" role="tab" id="ftab-vis" aria-controls="fpane-vis" aria-selected="false" tabindex="-1">03 · Visualizers</button>
+        <button class="tab-btn" type="button" role="tab" id="ftab-db" aria-controls="fpane-db" aria-selected="false" tabindex="-1">04 · Library DB</button>
+        <button class="tab-btn" type="button" role="tab" id="ftab-tools" aria-controls="fpane-tools" aria-selected="false" tabindex="-1">05 · Audits, ABX &amp; Remote</button>
+      </div>
+
+      <!-- OVERVIEW TAB (DEFAULT) -->
+      <div class="tab-pane" role="tabpanel" id="fpane-overview" aria-labelledby="ftab-overview">
+        <div class="card-grid overview-grid">
+          <article class="card overview-card">
+            <span class="topic-num">Topic 01 · Playback</span>
+            <h3>Pure Bit-Perfect &amp; Native DSD</h3>
+            <ul class="dots">
+              <li>Native Rust playback for FLAC, ALAC, WAV, AIFF, DSD64–512, WavPack, Monkey's Audio, Opus, CUE &amp; SACD <code>.iso</code></li>
+              <li>Exclusive DAC access, hardware clock matching, Play-from-RAM &amp; live <strong>DoP v1.1</strong> transport</li>
+              <li>Live 5-stage <strong>Signal Path Inspector</strong> with fidelity verdict banner</li>
+            </ul>
+          </article>
+          <article class="card overview-card">
+            <span class="topic-num">Topic 02 · Sound &amp; Practice</span>
+            <h3>64-Bit Studio DSP &amp; Pitch-Lock</h3>
+            <ul class="dots">
+              <li><strong>Drag-to-shape 10-band EQ canvas</strong>, AutoEQ headphone import &amp; <code>.wav</code> FFT Convolution</li>
+              <li><strong>Pitch-Locked Practice Mode</strong> (slow down to 0.75× in original key), ±12 st transpose &amp; A=432/415 Hz tuning</li>
+              <li>Press <code>D</code> anytime for instant <strong>DSP A/B</strong> bypass comparison</li>
+            </ul>
+          </article>
+          <article class="card overview-card">
+            <span class="topic-num">Topic 03 · Instrumentation</span>
+            <h3>6 Real-Time Concert Visualizers</h3>
+            <ul class="dots">
+              <li><strong>88-Key Precision CQT Piano</strong> with harmonic cancellation, chord readout &amp; Pause-Freeze study</li>
+              <li><strong>Live Acoustic Spectrogram</strong> (2D sonogram), Piano Roll &amp; 64-Band Spectrum RTA</li>
+              <li><strong>Stereo Scope + Goniometer</strong> &amp; Mastering VU with live EBU R128 LUFS + True Peak</li>
+            </ul>
+          </article>
+          <article class="card overview-card">
+            <span class="topic-num">Topic 04 · Curation</span>
+            <h3>Master Relational Library DB</h3>
+            <ul class="dots">
+              <li>9 browse facets (Composers, Works, Labels, Years…), Multi-Disc Album Hero, Booklets &amp; Liner Notes</li>
+              <li>Curated Collections, 16-field Visual Smart Views &amp; 14-operator <strong>Power-Search</strong></li>
+              <li>Off-thread <strong>Batch Tag Transforms</strong> &amp; print-ready HTML/Markdown catalog dossiers</li>
+            </ul>
+          </article>
+          <article class="card overview-card">
+            <span class="topic-num">Topic 05 · Verification &amp; Control</span>
+            <h3>Audits, Blind ABX &amp; LAN Remote</h3>
+            <ul class="dots">
+              <li><strong>TrueHz / DR Authenticity Auditor</strong> &amp; parallel EBU R128 ReplayGain scanner with inline <code>DR</code> pills</li>
+              <li><strong>Loudness-Matched Blind ABX Lab</strong> with exact binomial <code>p-value</code> statistics</li>
+              <li>Opt-in <strong>Local LAN Mobile Remote</strong> (control from phone on Wi-Fi) &amp; built-in <code>F1</code> Quick Guide</li>
+            </ul>
+          </article>
+          <article class="card overview-card">
+            <span class="topic-num">Ergonomics · Daily Driver</span>
+            <h3>Compact &amp; Classic — 9 Themes</h3>
+            <ul class="dots">
+              <li>Instant switch between sleek <strong>Compact Mini-Player</strong> and full <strong>Classic Studio</strong> layout (<code>⌘⇧M</code>)</li>
+              <li>9 curated themes (<em>Studio Reference</em>, <em>Solarized Dark/Light</em>, <em>Nord</em>, <em>Tokyo Night</em>, <em>Catppuccin</em>…)</li>
+              <li>A–B Section Looper (<code>[</code>/<code>]</code>), Bookmarks (<code>⌘B</code>), Sleep Timer &amp; <code>⌘K</code> Command Palette</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+
+      <!-- TOPIC 01 TECHNICAL -->
+      <div class="tab-pane" role="tabpanel" id="fpane-audio" aria-labelledby="ftab-audio" hidden>
+        <div class="card-grid feature-grid">
+          <article class="card feat-card">
+            <h3>Bit-Perfect Exclusive DAC &amp; DoP v1.1</h3>
+            <ul class="dots">
+              <li><strong>CoreAudio / WASAPI / ALSA:</strong> Exclusive Hog Mode, native hardware clock switching &amp; Direct <code>0.0 dBFS</code> volume lock</li>
+              <li><strong>Live DSD over PCM (DoP v1.1):</strong> Streams 1-bit DSD64 (176.4&nbsp;kHz) &amp; DSD128 (352.8&nbsp;kHz) in <code>0x05/0xFA</code> 24-bit <code>I32</code> frames with automatic 64-bit LUT FIR PCM fallback</li>
+              <li><strong>Per-Device Profiles &amp; RAM Buffer:</strong> Auto-switches audio profiles when changing DAC/headphones; Play-from-RAM pre-buffers entire tracks</li>
+            </ul>
+          </article>
+          <article class="card feat-card">
+            <h3>Multi-Track SACD .iso &amp; Archive Codecs</h3>
+            <ul class="dots">
+              <li><strong>Scarlet Book SACD <code>.iso</code>:</strong> Pure-Rust <code>SACDMTOC</code> + <code>TWOCHTOC</code> / <code>SACDTRL1</code> / <code>SACDTRL2</code> / <code>SACDTTxt</code> track parser with direct uncompressed DSD64 playback</li>
+              <li><strong>Archive Formats:</strong> Pure-Rust WavPack (<code>.wv</code>), Monkey's Audio (<code>.ape</code>) &amp; Opus (<code>.opus</code>) header/APEv2/OpusTags probers + streaming decode</li>
+              <li><strong>Synchronous Oversampling &amp; Gapless:</strong> Integer <code>2×/4×/Max</code> Rubato Blackman-Harris Sinc oversampling + pure gapless transitions or 0.5–6s crossfade</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+
+      <!-- TOPIC 02 TECHNICAL -->
+      <div class="tab-pane" role="tabpanel" id="fpane-dsp" aria-labelledby="ftab-dsp" hidden>
+        <div class="card-grid feature-grid">
+          <article class="card feat-card">
+            <h3>Interactive EQ Canvas &amp; Partitioned FFT Convolution</h3>
+            <ul class="dots">
+              <li><strong>Drag-to-Shape 10-Band EQ:</strong> Drag all 10 nodes (<code>31 Hz – 16 kHz</code>) directly on the live <code>20 Hz – 20 kHz</code> response curve; double-click any node to snap to <code>0.0 dB</code></li>
+              <li><strong>AutoEQ / Oratory1990 PEQ:</strong> Up to 16-band parametric headphone profiles imported from standard <code>.txt</code> files</li>
+              <li><strong>Partitioned FFT Convolver:</strong> Lock-free 64-bit overlap-add stereo engine (<code>512</code>-sample blocks, up to <code>16,384</code> taps) with <em>Analog Warmth</em>, <em>Intimate Chamber</em>, <em>Mastering Air</em> &amp; custom <code>.wav</code> IR loading</li>
+            </ul>
+          </article>
+          <article class="card feat-card">
+            <h3>Pitch-Locked Practice, Tuning &amp; Mastering Console</h3>
+            <ul class="dots">
+              <li><strong>Pitch-Preserving Practice DSP:</strong> Lock-free dual-tap Hann-windowed stereo pitch shifter keeps original musical key at <code>0.75× – 1.5×</code> speed</li>
+              <li><strong>Transpose &amp; Concert Tuning:</strong> Live <code>±12 semitone</code> transpose + instant <code>A=440 Hz</code>, <code>A=432 Hz</code> (Verdi), and <code>A=415 Hz</code> (Baroque) reference pitch</li>
+              <li><strong>Mastering Console &amp; Dither:</strong> Constant-power L/R Balance, Mono fold-down, Ø Polarity invert, L↔R swap, Bauer/Meier/Chu Moy crossfeed, TPDF/noise-shaped dither &amp; <code>D</code> hotkey DSP A/B</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+
+      <!-- TOPIC 03 TECHNICAL -->
+      <div class="tab-pane" role="tabpanel" id="fpane-vis" aria-labelledby="ftab-vis" hidden>
+        <div class="card-grid feature-grid">
+          <article class="card feat-card">
+            <h3>88-Key Precision CQT Piano &amp; Piano Roll</h3>
+            <ul class="dots">
+              <li><strong>Multi-Rate Butterworth CQT:</strong> 3 anti-aliased decimation stages (<code>1× / ÷4 / ÷16</code>, auto-scaled for Hi-Res) with Railsback piano stretch tuning</li>
+              <li><strong>10-Voice Iterative Harmonic Cancellation:</strong> Subtracts modeled overtones to eliminate octave &amp; fifth ghost keys</li>
+              <li><strong>Dynamics &amp; Pause-Freeze:</strong> Weighted key depression, <code>pp → ff</code> color shading, live chord readout, and frozen chord state when paused</li>
+            </ul>
+          </article>
+          <article class="card feat-card">
+            <h3>Spectrogram, 64-Band RTA, Scope &amp; Mastering VU</h3>
+            <ul class="dots">
+              <li><strong>Live Acoustic Spectrogram (Sonogram):</strong> <code>96 × 64</code> scrolling 2D time-frequency thermal heatmap (<code>27.5 Hz – 18 kHz</code>) with log frequency grid &amp; live <code>PEAK Hz</code> badge</li>
+              <li><strong>Mastering VU &amp; EBU R128:</strong> Segmented stereo RMS/Peak VU + live Momentary (<code>400 ms</code>), Short-Term (<code>3 s</code>) LUFS, 4× True Peak (<code>dBTP</code>) &amp; Phase Correlation</li>
+              <li><strong>Direct 1–6 Hotkeys &amp; Telemetry:</strong> Press <code>V</code> to toggle stage, <code>1</code>–<code>6</code> to jump modes, and inspect live <code>ms/frame</code> compute cost in Settings → Modules</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+
+      <!-- TOPIC 04 TECHNICAL -->
+      <div class="tab-pane" role="tabpanel" id="fpane-db" aria-labelledby="ftab-db" hidden>
+        <div class="card-grid feature-grid">
+          <article class="card feat-card">
+            <h3>Relational Library DB v2 &amp; Classical Hierarchy</h3>
+            <ul class="dots">
+              <li><strong>Full Archival Schema:</strong> Composer, Conductor, Orchestra, Work/Opus, Record Label, Catalog #, Comment, <code>#custom-tags</code>, Album Liner Notes &amp; 2,000-play history</li>
+              <li><strong>9 Facets &amp; Album Hero:</strong> Tracks, Albums, Artists, Composers, Works, Genres, Labels, Years &amp; Folders + multi-disc dividers, <code>.pdf</code> Booklet launcher &amp; High-Res Scans Gallery</li>
+              <li><strong>Collections, Smart Views &amp; Power-Search:</strong> Color-coded drag-to-collection boxes, 16-field AND/OR Smart Query Builder &amp; 14 live Power-Search operators</li>
+            </ul>
+          </article>
+          <article class="card feat-card">
+            <h3>Batch Tag Transforms &amp; Portable Dossiers</h3>
+            <ul class="dots">
+              <li><strong>7 Off-Thread Batch Transforms:</strong> Filename → Tags, Swap Artist ↔ Composer, Strip Track #, Smart Title Case (preserves BWV/Op./Roman), Auto-Number 1..N, Find &amp; Replace All, + #Tag All</li>
+              <li><strong>Online Lookup &amp; Lossless Writes:</strong> MusicBrainz, iTunes (+ 600&nbsp;px cover art), AcoustID, local hash cache &amp; <code>ffmpeg -c copy</code> lossless tag writing</li>
+              <li><strong>Export Anywhere:</strong> Print-ready <strong>HTML Dossier</strong> (<code>.html</code>), album-grouped <strong>Markdown</strong> (<code>.md</code>), 25-column <strong>CSV</strong>, and full JSON Backup/Restore</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+
+      <!-- TOPIC 05 TECHNICAL -->
+      <div class="tab-pane" role="tabpanel" id="fpane-tools" aria-labelledby="ftab-tools" hidden>
+        <div class="card-grid feature-grid">
+          <article class="card feat-card">
+            <h3>TrueHz / DR Audits, ReplayGain &amp; Blind ABX Lab</h3>
+            <ul class="dots">
+              <li><strong>Batch Album TrueHz / DR Auditor:</strong> Verifies ultrasonic content above 22&nbsp;kHz and persists color-coded inline <code>DR</code> pills right into the track table</li>
+              <li><strong>Loudness-Matched Blind ABX Lab:</strong> Seamlessly switches between Master A, Master B &amp; blind X at identical timestamps with automatic EBU R128 attenuation &amp; exact binomial <code>p-value</code></li>
+              <li><strong>Database Health &amp; Local Radio:</strong> Fidelity-ranked duplicate cleaner (<code>BEST</code> master badge), missing-files pruner &amp; 100% offline Similar Radio queue generator</li>
+            </ul>
+          </article>
+          <article class="card feat-card">
+            <h3>Local LAN Mobile Remote &amp; Built-In F1 Help</h3>
+            <ul class="dots">
+              <li><strong>Opt-In Wi-Fi Web Remote:</strong> Pure-Rust local HTTP server (<code>Settings → Modules</code> or <code>⌘K</code>) lets any phone/tablet control playback, volume, seek, DSP A/B &amp; library search over local Wi-Fi</li>
+              <li><strong>Built-In F1 Quick Guide:</strong> Press <code>F1</code> anytime for a 4-tab in-app manual (First Steps, Shortcuts, Power-Search &amp; Audio/Practice)</li>
+              <li><strong>Interactive Insights Dashboard:</strong> Clickable Codec, Sample Rate, Recording Decades, DR Health, Top Composers &amp; Top Labels bar charts</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SCREENSHOTS (COMPACT BY DEFAULT!) ================= -->
+<section class="section section-alt" id="screenshots">
+  <div class="section-inner">
+    <p class="kicker reveal">Real native screenshots</p>
+    <h2 class="reveal">Compact by default.<br><span class="acc">Classic studio on demand.</span></h2>
+    <p class="section-lead reveal">16 authentic captures straight from TxPlayer <code>v1.11.0</code> across Compact Mini-Player, Classic Concert Visualizers, Settings &amp; Interactive DSP, Library Insights, Blind ABX Lab, F1 Help, and multiple studio themes. Click any image for full-screen Lightbox.</p>
+
+    <div class="tabs reveal" id="shotTabs">
+      <div class="tab-bar" role="tablist" aria-label="Screenshot categories">
+        <button class="tab-btn" type="button" role="tab" id="sh-compact" aria-controls="shpane-compact" aria-selected="true">Compact Mode</button>
+        <button class="tab-btn" type="button" role="tab" id="sh-classic" aria-controls="shpane-classic" aria-selected="false" tabindex="-1">Classic &amp; Visualizers</button>
+        <button class="tab-btn" type="button" role="tab" id="sh-settings" aria-controls="shpane-settings" aria-selected="false" tabindex="-1">Settings &amp; DSP</button>
+        <button class="tab-btn" type="button" role="tab" id="sh-modals" aria-controls="shpane-modals" aria-selected="false" tabindex="-1">Insights, ABX &amp; Help</button>
+        <button class="tab-btn" type="button" role="tab" id="sh-themes" aria-controls="shpane-themes" aria-selected="false" tabindex="-1">Studio Themes</button>
+      </div>
+
+      <!-- TAB 1 (DEFAULT): COMPACT MODE -->
+      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-compact" aria-labelledby="sh-compact">
+        <figure class="shot-item compact-frame" data-lightbox="img/compact-studio-reference.jpg" tabindex="0">
+          <img src="img/compact-studio-reference.jpg" alt="TxPlayer Compact Mini-Player — Studio Reference theme">
+          <figcaption><strong>Compact Mini-Player · Studio Reference</strong><span>Clean desktop companion with live Signal Path pill, 1-click Classic switch, integrated queue/favorites tabs, and instant search.</span></figcaption>
+        </figure>
+        <figure class="shot-item compact-frame" data-lightbox="img/compact-solarized-dark.jpg" tabindex="0" hidden>
+          <img src="img/compact-solarized-dark.jpg" alt="TxPlayer Compact Mini-Player — Solarized Dark theme" loading="lazy">
+          <figcaption><strong>Compact Mini-Player · Solarized Dark</strong><span>Precision cyan &amp; warm amber palette with persistent custom window sizing and position memory.</span></figcaption>
+        </figure>
+        <figure class="shot-item compact-frame" data-lightbox="img/compact-tokyo-night.jpg" tabindex="0" hidden>
+          <img src="img/compact-tokyo-night.jpg" alt="TxPlayer Compact Mini-Player — Tokyo Night theme" loading="lazy">
+          <figcaption><strong>Compact Mini-Player · Tokyo Night</strong><span>Deep midnight indigo palette — toggle between Compact and Classic anytime with ⌘⇧M / Ctrl+Shift+M.</span></figcaption>
+        </figure>
+        <figure class="shot-item compact-frame" data-lightbox="img/compact-solarized-light.jpg" tabindex="0" hidden>
+          <img src="img/compact-solarized-light.jpg" alt="TxPlayer Compact Mini-Player — Solarized Light theme" loading="lazy">
+          <figcaption><strong>Compact Mini-Player · Solarized Light</strong><span>Warm parchment light theme for bright daytime desk setups.</span></figcaption>
+        </figure>
+        <div class="sv-controls">
+          <button class="sv-prev" type="button" aria-label="Previous screenshot">‹</button>
+          <span class="sv-count" aria-live="polite">1 / 4</span>
+          <button class="sv-next" type="button" aria-label="Next screenshot">›</button>
+        </div>
+      </div>
+
+      <!-- TAB 2: CLASSIC & VISUALIZERS -->
+      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-classic" aria-labelledby="sh-classic" hidden>
+        <figure class="shot-item" data-lightbox="img/classic-spectrogram-studio.jpg" tabindex="0">
+          <img src="img/classic-spectrogram-studio.jpg" alt="TxPlayer Classic — Live Acoustic Spectrogram &amp; Inline DR Pills" loading="lazy">
+          <figcaption><strong>Classic Studio · Live Acoustic Spectrogram &amp; Inline DR Badges</strong><span>Scrolling 2D time-frequency sonogram (27.5 Hz – 18 kHz) with PEAK Hz readout, 9 browse facets, and gold persisted DR14–DR19 track pills.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/classic-piano-studio.jpg" tabindex="0" hidden>
+          <img src="img/classic-piano-studio.jpg" alt="TxPlayer Classic — 88-Key Precision CQT Piano Visualizer" loading="lazy">
+          <figcaption><strong>Classic Studio · 88-Key Precision CQT Piano Visualizer</strong><span>Multi-rate Butterworth Constant-Q detection with 10-voice harmonic cancellation, dynamics color shading, and live Cm9 chord readout.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/classic-roll-solarized.jpg" tabindex="0" hidden>
+          <img src="img/classic-roll-solarized.jpg" alt="TxPlayer Classic — 88-Key Concert Piano Roll" loading="lazy">
+          <figcaption><strong>Classic Studio · 88-Key Concert Piano Roll (Solarized Dark)</strong><span>Scrolling real-time note waterfall rising off the grand piano keybed — pauses cleanly for musical study.</span></figcaption>
+        </figure>
+        <div class="sv-controls">
+          <button class="sv-prev" type="button" aria-label="Previous screenshot">‹</button>
+          <span class="sv-count" aria-live="polite">1 / 3</span>
+          <button class="sv-next" type="button" aria-label="Next screenshot">›</button>
+        </div>
+      </div>
+
+      <!-- TAB 3: SETTINGS & DSP -->
+      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-settings" aria-labelledby="sh-settings" hidden>
+        <figure class="shot-item" data-lightbox="img/settings-dsp-interactive.jpg" tabindex="0">
+          <img src="img/settings-dsp-interactive.jpg" alt="TxPlayer Settings — Audio, Interactive EQ Canvas &amp; DSP" loading="lazy">
+          <figcaption><strong>Settings → Audio &amp; DSP · Interactive Drag-to-Shape EQ &amp; AutoEQ</strong><span>Directly drag the 10 glowing frequency-band nodes on the live response canvas, import AutoEQ (.txt) or .WAV Convolution IRs, and save per-device profiles.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/settings-plugins-remote.jpg" tabindex="0" hidden>
+          <img src="img/settings-plugins-remote.jpg" alt="TxPlayer Settings — Modules, Tool Health &amp; LAN Remote" loading="lazy">
+          <figcaption><strong>Settings → Modules · Visualizer Engines, Tool Health &amp; LAN Mobile Remote</strong><span>Switch Precision CQT vs. FFT with ms/frame telemetry, verify optional ffmpeg/fpcalc/curl helpers, and enable the local Wi-Fi Remote.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/settings-appearance-themes.jpg" tabindex="0" hidden>
+          <img src="img/settings-appearance-themes.jpg" alt="TxPlayer Settings — Appearance &amp; 9 Studio Themes" loading="lazy">
+          <figcaption><strong>Settings → Appearance · 9 Curated Themes &amp; Progress Scrubber Styles</strong><span>Pick from 9 studio palettes, Acoustic Waveform / Precision Bars / Studio Rail scrubbers, row density, and Compact Mode defaults.</span></figcaption>
+        </figure>
+        <div class="sv-controls">
+          <button class="sv-prev" type="button" aria-label="Previous screenshot">‹</button>
+          <span class="sv-count" aria-live="polite">1 / 3</span>
+          <button class="sv-next" type="button" aria-label="Next screenshot">›</button>
+        </div>
+      </div>
+
+      <!-- TAB 4: INSIGHTS, ABX & F1 HELP -->
+      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-modals" aria-labelledby="sh-modals" hidden>
+        <figure class="shot-item" data-lightbox="img/modal-abx-lab.jpg" tabindex="0">
+          <img src="img/modal-abx-lab.jpg" alt="TxPlayer Loudness-Matched Blind ABX Comparison Lab" loading="lazy">
+          <figcaption><strong>Loudness-Matched Blind ABX Comparison Lab</strong><span>Automatic EBU R128 LUFS gain trim (0.1 dB accuracy) between Master A and Master B with seamless blind X trials and exact binomial p-value statistics.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/modal-insights.jpg" tabindex="0" hidden>
+          <img src="img/modal-insights.jpg" alt="TxPlayer Library Database &amp; Interactive Insights Dashboard" loading="lazy">
+          <figcaption><strong>Library Database &amp; Interactive Insights Dashboard</strong><span>Clickable Codec, Sample Rate, Recording Decades, DR Health, Top Composers &amp; Top Labels charts plus HTML Dossier, Markdown, CSV &amp; JSON Backup exports.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/modal-quick-help.jpg" tabindex="0" hidden>
+          <img src="img/modal-quick-help.jpg" alt="TxPlayer Built-In F1 Quick Guide &amp; Reference" loading="lazy">
+          <figcaption><strong>Built-In F1 Quick Guide &amp; Reference</strong><span>Always one keypress away: 5-Minute First Steps, Keyboard Shortcuts, Power-Search Tokens, and Audio/Practice Guide right inside the app.</span></figcaption>
+        </figure>
+        <div class="sv-controls">
+          <button class="sv-prev" type="button" aria-label="Previous screenshot">‹</button>
+          <span class="sv-count" aria-live="polite">1 / 3</span>
+          <button class="sv-next" type="button" aria-label="Next screenshot">›</button>
+        </div>
+      </div>
+
+      <!-- TAB 5: DIFFERENT THEMES -->
+      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-themes" aria-labelledby="sh-themes" hidden>
+        <figure class="shot-item" data-lightbox="img/theme-nord.jpg" tabindex="0">
+          <img src="img/theme-nord.jpg" alt="TxPlayer — Nord Studio Theme" loading="lazy">
+          <figcaption><strong>Nord · Arctic Polar Night &amp; Frost</strong><span>Full-bleed custom studio chrome and 88-key piano stage harmonized to Nord's calm arctic tones.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/theme-catppuccin.jpg" tabindex="0" hidden>
+          <img src="img/theme-catppuccin.jpg" alt="TxPlayer — Catppuccin Mocha Theme with Live Spectrogram" loading="lazy">
+          <figcaption><strong>Catppuccin Mocha · Warm Espresso &amp; Mauve</strong><span>Paired with the Live Acoustic Spectrogram and gold DR track quality badges.</span></figcaption>
+        </figure>
+        <figure class="shot-item" data-lightbox="img/theme-solarized-light.jpg" tabindex="0" hidden>
+          <img src="img/theme-solarized-light.jpg" alt="TxPlayer — Solarized Light Theme" loading="lazy">
+          <figcaption><strong>Solarized Light · Warm Parchment &amp; Crisp Teal</strong><span>High-legibility daytime palette across the entire library, piano keybed, and modals.</span></figcaption>
+        </figure>
+        <div class="sv-controls">
+          <button class="sv-prev" type="button" aria-label="Previous screenshot">‹</button>
+          <span class="sv-count" aria-live="polite">1 / 3</span>
+          <button class="sv-next" type="button" aria-label="Next screenshot">›</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
 
 <!-- ================= INTERACTIVE SHOWCASE ================= -->
 <section class="section" id="showcase">
   <div class="section-inner">
     <div class="editor-grid">
       <div class="editor-copy">
-        <p class="kicker reveal">Engineered for precision</p>
+        <p class="kicker reveal">Under the hood</p>
         <h2 class="reveal">Full transparency from<br><span class="acc">database to DAC.</span></h2>
-        <p class="reveal">Query your entire classical &amp; Hi-Res archive in milliseconds with structured <strong>Power-Search tokens</strong>, verify every single stage of your live <strong>5-Stage Signal Path</strong>, and clean messy album rips off-thread with <strong>Batch Tag Transforms</strong>.</p>
-        <p class="reveal">Every metric — from Dynamic Range (<code>DR</code>) and <code>LUFS</code> to ultrasonic TrueHz authenticity verdicts — is computed locally in pure Rust and persisted straight into your library database.</p>
+        <p class="reveal">Query your archive in milliseconds with structured <strong>Power-Search tokens</strong>, verify every stage of your live <strong>5-Stage Signal Path</strong>, and clean classical rips off-thread with <strong>Batch Tag Transforms</strong>.</p>
+        <p class="reveal">Every metric — Dynamic Range (<code>DR</code>), <code>LUFS</code>, TrueHz authenticity verdicts, and blind ABX <code>p-values</code> — is computed locally in pure Rust.</p>
         <div class="tabs reveal" id="showcaseTabs">
           <div class="tab-bar" role="tablist" aria-label="Technical showcase">
             <button class="tab-btn" type="button" role="tab" id="stab-query" aria-controls="spane-query" aria-selected="true">Power-Search</button>
@@ -154,15 +481,15 @@
 <span class="cl"><span class="cl-n">4</span><span class="cl-c"><span class="tk-c"># Find Deutsche Grammophon 24-bit FLAC masters rated 4★+</span></span></span>
 <span class="cl"><span class="cl-n">5</span><span class="cl-c"><span class="tk-k">label:</span><span class="tk-s">grammophon</span>  <span class="tk-k">codec:</span><span class="tk-t">flac</span>  <span class="tk-k">bits&gt;=</span><span class="tk-n">24</span>  <span class="tk-k">rating&gt;=</span><span class="tk-n">4</span></span></span>
 <span class="cl"><span class="cl-n">6</span><span class="cl-c"></span></span>
-<span class="cl"><span class="cl-n">7</span><span class="cl-c"><span class="tk-c"># Isolate specific opus / catalog works or native 1-bit DSD</span></span></span>
+<span class="cl"><span class="cl-n">7</span><span class="cl-c"><span class="tk-c"># Isolate opus works or imported SACD .iso DSD64 tracks</span></span></span>
 <span class="cl"><span class="cl-n">8</span><span class="cl-c"><span class="tk-k">work:</span><span class="tk-s">op.27</span>  <span class="tk-k">artist:</span><span class="tk-s">pollini</span></span></span>
-<span class="cl"><span class="cl-n">9</span><span class="cl-c"><span class="tk-k">codec:</span><span class="tk-t">dsd</span>  <span class="tk-k">year:</span><span class="tk-n">1977</span></span></span></pre>
+<span class="cl"><span class="cl-n">9</span><span class="cl-c"><span class="tk-k">codec:</span><span class="tk-t">dsd</span>  <span class="tk-f">#sacd</span></span></span></pre>
             </div>
             <div class="code-status">
               <span class="live">● O(1) indexed</span>
               <span>14 query operators</span>
               <span class="gold">DR · TrueHz · #tags</span>
-              <span style="margin-left:auto">⌘F to filter · ⌘K to jump</span>
+              <span style="margin-left:auto">⌘F to filter · F1 for Help</span>
             </div>
           </div>
         </div>
@@ -228,8 +555,29 @@
   </div>
 </section>
 
+<!-- ================= FORMATS ================= -->
+<section class="section section-alt" id="formats">
+  <div class="section-inner">
+    <p class="kicker reveal">Supported formats</p>
+    <h2 class="reveal">Every audiophile format, <span class="acc">played honestly.</span></h2>
+    <div class="format-row reveal" aria-label="Supported audio formats">
+      <span class="fmt-chip gold">DSD64–512</span>
+      <span class="fmt-chip gold">DoP v1.1</span>
+      <span class="fmt-chip gold">SACD .iso</span>
+      <span class="fmt-chip teal">FLAC 32-bit</span>
+      <span class="fmt-chip teal">ALAC</span>
+      <span class="fmt-chip teal">WAV · AIFF · CAF</span>
+      <span class="fmt-chip">WavPack .wv</span>
+      <span class="fmt-chip">Monkey's Audio .ape</span>
+      <span class="fmt-chip">Opus .opus</span>
+      <span class="fmt-chip">CUE Sheets</span>
+      <span class="fmt-chip">MP3 · AAC · OGG</span>
+    </div>
+  </div>
+</section>
+
 <!-- ================= FIRST STEPS & BUILD ================= -->
-<section class="section section-alt" id="install">
+<section class="section" id="install">
   <div class="section-inner">
     <p class="kicker reveal">First steps &amp; build</p>
     <h2 class="reveal">Up and listening <span class="acc">in minutes.</span></h2>
@@ -241,7 +589,7 @@
           <code>cargo test &amp;&amp; cargo run --release</code>
           <button class="term-copy" type="button" aria-label="Copy test and run command" title="Copy to clipboard"><svg class="ic ic-copy" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="4.5" width="8" height="10" rx="1.5"/><path d="M2.5 11.5v-8A1.5 1.5 0 0 1 4 2h7"/></svg><svg class="ic ic-check" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7-8"/></svg></button>
         </div>
-        <p>Requires Rust 1.95+ (Edition 2024). Produces a single stripped native binary (~8.5&nbsp;MB) with zero Electron or WebView dependencies.</p>
+        <p>Requires Rust 1.95+ (Edition 2024). Compiles a single stripped native binary (~8.5&nbsp;MB) with zero Electron or WebView overhead.</p>
       </div>
       <div class="card install-card reveal">
         <h3>2 · macOS App Bundle &amp; DMG</h3>
@@ -250,395 +598,57 @@
           <code>./scripts/package-macos.sh</code>
           <button class="term-copy" type="button" aria-label="Copy macOS script command" title="Copy to clipboard"><svg class="ic ic-copy" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="4.5" width="8" height="10" rx="1.5"/><path d="M2.5 11.5v-8A1.5 1.5 0 0 1 4 2h7"/></svg><svg class="ic ic-check" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7-8"/></svg></button>
         </div>
-        <p>Builds a signed <code>TxPlayer.app</code> with multi-resolution Retina <code>AppIcon.icns</code> and a distributable <code>TxPlayer.dmg</code>.</p>
+        <p>Produces a signed <code>TxPlayer.app</code> with multi-resolution Retina <code>AppIcon.icns</code> and a distributable <code>TxPlayer.dmg</code>.</p>
       </div>
       <div class="card install-card reveal">
-        <h3>3 · CLI Launch &amp; Demo Mode</h3>
+        <h3>3 · CLI Launch &amp; Quick Flags</h3>
         <div class="term">
           <span class="term-prompt" aria-hidden="true">$</span>
-          <code>txplayer --vis-mode spectrogram --theme studio-reference</code>
+          <code>txplayer --compact --theme studio-reference</code>
           <button class="term-copy" type="button" aria-label="Copy CLI example" title="Copy to clipboard"><svg class="ic ic-copy" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="4.5" width="8" height="10" rx="1.5"/><path d="M2.5 11.5v-8A1.5 1.5 0 0 1 4 2h7"/></svg><svg class="ic ic-check" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7-8"/></svg></button>
         </div>
-        <p>Pass files/folders directly, pick any of the 9 themes or 6 visualizers, or launch <code>--compact</code> for mini-player mode.</p>
-      </div>
-    </div>
-    <div class="card install-card reveal" style="margin-top:1.1rem;border-left:3px solid var(--gold)">
-      <h3 style="color:var(--gold)">Optional runtime helpers &amp; macOS Gatekeeper</h3>
-      <p>Core playback (FLAC, ALAC, WAV, AIFF, CAF, DSD64–512, MP3, AAC, OGG, CUE), all 64-bit DSP/Convolution, and all DR/TrueHz/EBU R128 analysis are <strong>100% pure Rust</strong>. Install optional <code>ffmpeg</code> for lossless file tag writing &amp; archive codecs (<code>.wv</code>, <code>.ape</code>, <code>.opus</code>) and <code>fpcalc</code> for AcoustID fingerprinting — verified live inside <strong>Settings → Plugins → Tool Health</strong>. On ad-hoc signed macOS builds, open via <strong>Right-Click → Open</strong> or <code>xattr -cr /Applications/TxPlayer.app</code>.</p>
-    </div>
-  </div>
-</section>
-
-<!-- ================= OVERVIEW ================= -->
-<section class="section" id="overview">
-  <div class="section-inner">
-    <p class="kicker reveal">Why TxPlayer</p>
-    <h2 class="reveal">Built for critical listening,<br>designed for <span class="acc">serious music archives.</span></h2>
-    <div class="two-col">
-      <div class="reveal">
-        <p>
-          Most audiophile players force a painful trade-off: pay recurring subscriptions for a
-          heavy cloud-tethered suite, or settle for bare-bones file browsers that ignore classical
-          metadata, real-time acoustic instrumentation, and database curation.
-        </p>
-        <p>
-          TxPlayer combines a <strong>bit-perfect native Rust audio engine</strong>, studio-grade
-          <strong>64-bit DSP &amp; FFT convolution</strong>, a concert-hall <strong>88-key Precision CQT
-          piano &amp; spectrogram stage</strong>, and a full <strong>relational collector library database</strong>
-          inside one calm, instant native desktop app. <strong>Nothing leaves your machine.</strong>
-        </p>
-      </div>
-      <ul class="diamond-list reveal">
-        <li>Pure Rust native core — zero Electron, zero Chromium, zero telemetry, ~8.5&nbsp;MB binary</li>
-        <li>Bit-perfect CoreAudio / WASAPI / ALSA output + native DoP v1.1 DSD transport</li>
-        <li>Lock-free 64-bit DSP: interactive EQ canvas, AutoEQ PEQ, .wav FFT Convolution &amp; Mastering Console</li>
-        <li>6 real-time visualizers including Precision CQT 88-Key Piano (with Pause-Freeze) &amp; Live Spectrogram</li>
-        <li>Master Library DB v2: Collections, 16-field Smart Views, TrueHz/DR audits &amp; HTML/Markdown dossiers</li>
-      </ul>
-    </div>
-  </div>
-</section>
-
-<!-- ================= FORMATS & AUDIO ENGINE ================= -->
-<section class="section section-alt" id="formats">
-  <div class="section-inner">
-    <p class="kicker reveal">Formats &amp; audio pipeline</p>
-    <h2 class="reveal">Every audiophile format, <span class="acc">played honestly.</span></h2>
-    <p class="section-lead reveal">From 16-bit Red Book FLAC and legacy CP1250 classical CUE sheets to 24-bit/384&nbsp;kHz studio masters, 1-bit DSD512, WavPack, Monkey's Audio, and SACD <code>.iso</code> discs.</p>
-
-    <div class="format-row reveal" aria-label="Supported audio formats">
-      <span class="fmt-chip gold">DSD64–512</span>
-      <span class="fmt-chip gold">DoP v1.1</span>
-      <span class="fmt-chip teal">FLAC 32-bit</span>
-      <span class="fmt-chip teal">ALAC</span>
-      <span class="fmt-chip teal">WAV · AIFF · CAF</span>
-      <span class="fmt-chip">WavPack .wv</span>
-      <span class="fmt-chip">Monkey's Audio .ape</span>
-      <span class="fmt-chip">Opus .opus</span>
-      <span class="fmt-chip">CUE Sheets</span>
-      <span class="fmt-chip gold">SACD .iso TOC</span>
-      <span class="fmt-chip">MP3 · AAC · OGG</span>
-    </div>
-
-    <div class="tabs reveal" id="formatTabs">
-      <div class="tab-bar" role="tablist" aria-label="Format categories">
-        <button class="tab-btn" type="button" role="tab" id="fmt-pcm" aria-controls="fpane-pcm" aria-selected="true">Hi-Res PCM &amp; Lossless</button>
-        <button class="tab-btn" type="button" role="tab" id="fmt-dsd" aria-controls="fpane-dsd" aria-selected="false" tabindex="-1">Native DSD &amp; SACD</button>
-        <button class="tab-btn" type="button" role="tab" id="fmt-arch" aria-controls="fpane-arch" aria-selected="false" tabindex="-1">Archive Codecs &amp; CUE</button>
-      </div>
-
-      <div class="tab-pane" role="tabpanel" id="fpane-pcm" aria-labelledby="fmt-pcm">
-        <div class="card-grid engines-grid">
-          <article class="card">
-            <h3>FLAC · ALAC · WAV · AIFF</h3>
-            <span class="engine-tag">Pure-Rust SIMD</span>
-            <p>Native Symphonia SIMD decoding up to 32-bit / 384&nbsp;kHz+ with sample-accurate gapless album transitions, Play-from-RAM pre-buffering, and live VBR/CBR telemetry.</p>
-          </article>
-          <article class="card">
-            <h3>Exclusive DAC &amp; Clock Sync</h3>
-            <span class="engine-tag gold">Bit-Perfect</span>
-            <p>Matches hardware DAC sample rates natively via CoreAudio Hog Mode / WASAPI / ALSA with optional Direct <code>0.0 dBFS</code> volume lock and saved per-device profiles.</p>
-          </article>
-          <article class="card">
-            <h3>Synchronous Oversampling</h3>
-            <span class="engine-tag">Rubato Sinc</span>
-            <p>Optional integer-multiple <code>2×</code>, <code>4×</code>, or <code>Max DAC</code> oversampling via Blackman-Harris Sinc filters (Fast, High, Ultra) paired with TPDF or 2nd-order noise-shaped dither.</p>
-          </article>
-        </div>
-      </div>
-
-      <div class="tab-pane" role="tabpanel" id="fpane-dsd" aria-labelledby="fmt-dsd" hidden>
-        <div class="card-grid engines-grid">
-          <article class="card">
-            <h3>Live DSD over PCM (DoP v1.1)</h3>
-            <span class="engine-tag gold">Native 1-Bit Path</span>
-            <p>Streams raw 1-bit DSD64 (176.4&nbsp;kHz) and DSD128 (352.8&nbsp;kHz) bit-identically via <code>0x05/0xFA</code> 24-bit <code>I32</code> frames with DSF LSB→MSB reversal and gold Signal Path verification.</p>
-          </article>
-          <article class="card">
-            <h3>64-Bit LUT FIR Decimator</h3>
-            <span class="engine-tag">DSD64 – DSD512</span>
-            <p>When using headphones, DSP, or non-DoP DACs, TxPlayer seamlessly decodes <code>.dsf</code> and <code>.dff</code> through a pure-Rust 64-bit Blackman-Harris LUT FIR PCM engine with ID3/cover extraction.</p>
-          </article>
-          <article class="card">
-            <h3>SACD .iso Master TOC Prober</h3>
-            <span class="engine-tag">Scarlet Book</span>
-            <p>Pure-Rust sector-510 <code>SACDMTOC</code> inspector built into Library Insights to read disc catalog metadata, Stereo/Multichannel area flags, and album info directly from SACD images.</p>
-          </article>
-        </div>
-      </div>
-
-      <div class="tab-pane" role="tabpanel" id="fpane-arch" aria-labelledby="fmt-arch" hidden>
-        <div class="card-grid engines-grid">
-          <article class="card">
-            <h3>WavPack (.wv) &amp; Monkey's (.ape)</h3>
-            <span class="engine-tag">Archive Lossless</span>
-            <p>Pure-Rust container header and full APEv2 classical/ReplayGain/cover tag probers with seamless lossless streaming playback, seeking, Play-from-RAM, and DR/TrueHz auditing.</p>
-          </article>
-          <article class="card">
-            <h3>Opus (.opus) &amp; Lossy Formats</h3>
-            <span class="engine-tag">Vorbis / OpusTags</span>
-            <p>Pure-Rust <code>OpusHead</code> and <code>OpusTags</code> metadata parser alongside native MP3, AAC/M4A, OGG/Vorbis, MKV, and WebM decoding.</p>
-          </article>
-          <article class="card">
-            <h3>Multi-Encoding CUE Sheets</h3>
-            <span class="engine-tag">UTF-8 · CP1250 · SJIS</span>
-            <p>Virtual multi-track album slicing supporting <code>REM COMPOSER</code>, <code>REM DATE</code>, <code>REM GENRE</code>, and legacy Central European / Japanese encodings cleanly.</p>
-          </article>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ================= FEATURES ================= -->
-<section class="section" id="features">
-  <div class="section-inner">
-    <p class="kicker reveal">Complete feature depth</p>
-    <h2 class="reveal">Every layer crafted <span class="acc">without compromise.</span></h2>
-
-    <div class="tabs reveal" id="featTabs">
-      <div class="tab-bar" role="tablist" aria-label="Feature groups">
-        <button class="tab-btn" type="button" role="tab" id="ftab-dsp" aria-controls="fpane-dsp" aria-selected="true">Audio Engine &amp; DSP</button>
-        <button class="tab-btn" type="button" role="tab" id="ftab-vis" aria-controls="fpane-vis" aria-selected="false" tabindex="-1">6 Concert Visualizers</button>
-        <button class="tab-btn" type="button" role="tab" id="ftab-db" aria-controls="fpane-db" aria-selected="false" tabindex="-1">Master Library DB</button>
-        <button class="tab-btn" type="button" role="tab" id="ftab-col" aria-controls="fpane-col" aria-selected="false" tabindex="-1">Collector &amp; Study</button>
-      </div>
-
-      <div class="tab-pane" role="tabpanel" id="fpane-dsp" aria-labelledby="ftab-dsp">
-        <div class="card-grid feature-grid">
-          <article class="card feat-card">
-            <h3>Interactive Drag-to-Shape 10-Band EQ &amp; AutoEQ</h3>
-            <ul class="dots">
-              <li><strong>Drag nodes directly on the live curve:</strong> 10 glowing control points (<code>31 Hz – 16 kHz</code>) on a <code>20 Hz – 20 kHz</code> response canvas with floating <code>Hz · dB</code> telemetry and double-click <code>0.0 dB</code> reset</li>
-              <li><strong>16-Band Parametric / AutoEQ Importer:</strong> Load standard Oratory1990 &amp; EqualizerAPO <code>.txt</code> headphone target curves alongside built-in reference profiles</li>
-              <li><strong>Instant DSP A/B Comparison:</strong> Press <code>D</code> anytime to flip between your active DSP chain and bit-identical bypass</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Partitioned FFT Stereo Convolution (.wav IR)</h3>
-            <ul class="dots">
-              <li><strong>Lock-free 64-bit overlap-add FFT engine:</strong> <code>512</code>-sample blocks up to <code>16,384</code> taps, zero audio-thread heap allocations</li>
-              <li><strong>Built-in Acoustic Presets:</strong> <em>Analog Warmth</em>, <em>Intimate Chamber</em>, and <em>Mastering Air</em></li>
-              <li><strong>Custom .WAV IR Loader:</strong> 16/24/32-bit int &amp; 32-bit float mono/stereo room-correction or hall IRs with automatic sample-rate resampling, Wet/Dry Mix, and IR Gain trim</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Mastering Console, Crossfeed &amp; Dither</h3>
-            <ul class="dots">
-              <li><strong>Mastering Console:</strong> Constant-power <code>L/R Balance</code> (double-click to center), <code>Mono</code> fold-down, <code>Ø Polarity</code> 180° invert, and <code>L ↔ R</code> channel swap</li>
-              <li><strong>Named Headphone Crossfeed:</strong> <em>Gentle</em>, <em>Chu Moy</em>, <em>Jan Meier</em>, and <em>Bauer Studio</em></li>
-              <li><strong>Output Dither &amp; Peak Protection:</strong> TPDF 16/24-bit, 2nd-order noise-shaped dither, and transparent <code>-0.7 dBFS</code> soft-knee limiter</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>ReplayGain &amp; Per-Device Profiles</h3>
-            <ul class="dots">
-              <li><strong>Batch Parallel EBU R128 Scanner:</strong> Pure-Rust multi-core Track &amp; Album loudness scanning (<code>-18 LUFS</code> reference) with peak guard</li>
-              <li><strong>Per-Device Audio Profiles:</strong> Automatically apply Bit-Perfect on your desktop USB DAC and AutoEQ + Crossfeed on your headphones</li>
-              <li><strong>Live Hot-Switch Output Routing:</strong> Switch audio outputs on the fly without stopping playback</li>
-            </ul>
-          </article>
-        </div>
-      </div>
-
-      <div class="tab-pane" role="tabpanel" id="fpane-vis" aria-labelledby="ftab-vis" hidden>
-        <div class="card-grid feature-grid">
-          <article class="card feat-card">
-            <h3>88-Key Precision CQT Piano &amp; Roll</h3>
-            <ul class="dots">
-              <li><strong>Multi-Rate Butterworth CQT:</strong> 3 decimation stages (<code>1×</code>, <code>÷4</code>, <code>÷16</code>, auto-scaled for Hi-Res) with Railsback stretch tuning</li>
-              <li><strong>10-Voice Harmonic Cancellation:</strong> Suppresses octave &amp; fifth overtone ghosts for crisp polyphonic piano clarity</li>
-              <li><strong>Dynamics &amp; Pause-Freeze:</strong> Weighted physical key travel, <code>pp → ff</code> color shading, live chord readout, and frozen keys when paused for musical study</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Live Acoustic Spectrogram (Sonogram)</h3>
-            <ul class="dots">
-              <li><strong>Scrolling 2D Time-Frequency Waterfall:</strong> <code>96</code> time columns × <code>64</code> logarithmic frequency bins (<code>27.5 Hz – 18 kHz</code>)</li>
-              <li><strong>Thermal-Gold Acoustic Heatmap:</strong> See piano overtones, violin vibrato, vocal formants, and upper-band energy live</li>
-              <li><strong>Precision Axis &amp; Peak Readout:</strong> Logarithmic frequency ticks (<code>100 Hz – 16 kHz</code>) plus live dominant <code>PEAK Hz</code> badge</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>64-Band Spectrum RTA &amp; Stereo Scope</h3>
-            <ul class="dots">
-              <li><strong>64-Band Spectrum RTA:</strong> Pixel-snapped logarithmic bars with peak-hold ticks and dB reference grid</li>
-              <li><strong>Stereo Scope &amp; M/S Goniometer:</strong> Zero-crossing triggered stereo waveform paired with a live phase vectorscope</li>
-              <li><strong>Mode-Gated DSP Efficiency:</strong> Only computes the math required for your active visualizer mode</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Mastering VU, Live LUFS &amp; Phase</h3>
-            <ul class="dots">
-              <li><strong>Segmented L/R Mastering VU:</strong> Simultaneous RMS and peak-hold telemetry in dBFS</li>
-              <li><strong>Real-Time EBU R128 Metering:</strong> Live Momentary (<code>400 ms</code>), Short-Term (<code>3 s</code>) LUFS, and 4× oversampled True Peak (<code>dBTP</code>)</li>
-              <li><strong>Stereo Phase Correlation:</strong> Instant <code>-1.0 .. +1.0</code> phase meter to catch polarity issues</li>
-            </ul>
-          </article>
-        </div>
-      </div>
-
-      <div class="tab-pane" role="tabpanel" id="fpane-db" aria-labelledby="ftab-db" hidden>
-        <div class="card-grid feature-grid">
-          <article class="card feat-card">
-            <h3>Relational Library Database v2</h3>
-            <ul class="dots">
-              <li><strong>Full Classical Schema:</strong> <code>Composer</code>, <code>Conductor</code>, <code>Orchestra</code>, <code>Work / Opus</code>, <code>Record Label</code>, <code>Catalog #</code>, <code>Comment</code>, and freeform <code>#custom-tags</code></li>
-              <li><strong>Permanent Audit Metrics:</strong> Persists <code>DR</code>, <code>LUFS</code>, <code>True Peak</code>, <code>Bandwidth</code>, and <code>TrueHz</code> verdicts plus inline color-coded <strong>DR pills</strong> in the track list</li>
-              <li><strong>Multiple Libraries &amp; Listening History:</strong> Isolated databases, rolling <code>.bak</code> safety, and a 2,000-play history log</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>9 Browse Facets &amp; Multi-Disc Album Hero</h3>
-            <ul class="dots">
-              <li><strong>9 Instant Facets:</strong> <code>Tracks · Albums · Artists · Composers · Works · Genres · Labels · Years · Folders</code></li>
-              <li><strong>Classical Album Hero:</strong> Visual <code>DISC 1 / DISC 2</code> dividers, persisted Album DR badge, inline <strong>Collector Liner Notes</strong>, <code>.pdf</code> Booklet launcher, and <strong>High-Res Scans Gallery</strong></li>
-              <li><strong>Multi-Facet Filter Chips:</strong> 1-click <code>All | Hi-Res | DSD | Lossless | ★★★★+</code> live chips</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Collections, Smart Views &amp; Power-Search</h3>
-            <ul class="dots">
-              <li><strong>Curated Collections:</strong> Color-coded multi-album boxes with drag-and-drop sidebar assignment</li>
-              <li><strong>Visual Smart Query Builder:</strong> Dynamic <code>Match ALL / ANY</code> rule views across 16 fields with live match preview</li>
-              <li><strong>14 Power-Search Operators:</strong> Instant live filtering by <code>composer:</code>, <code>dr&gt;=</code>, <code>rate&gt;=</code>, <code>bits&gt;=</code>, <code>codec:</code>, <code>label:</code>, <code>work:</code>, and <code>#tag</code></li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Interactive Insights &amp; Database Health</h3>
-            <ul class="dots">
-              <li><strong>Clickable Collector Charts:</strong> Codec, Sample Rate, Recording Decades Timeline, DR Health Histogram, Top Composers &amp; Top Labels — click any bar to filter</li>
-              <li><strong>Duplicate Quality Audit:</strong> Fidelity-ranked <code>BEST</code> master detection with 1-click <em>Keep Best Quality</em> and <em>Prune Missing Files</em></li>
-              <li><strong>100% Local Similar Radio:</strong> Zero-cloud queue generator ranking tracks by composer, tags, genre, label, era &amp; fidelity</li>
-            </ul>
-          </article>
-        </div>
-      </div>
-
-      <div class="tab-pane" role="tabpanel" id="fpane-col" aria-labelledby="ftab-col" hidden>
-        <div class="card-grid feature-grid">
-          <article class="card feat-card">
-            <h3>Tag Editor &amp; Batch Tag Transforms</h3>
-            <ul class="dots">
-              <li><strong>7 Off-Thread Batch Transforms:</strong> <em>Filename → Tags</em>, <em>Swap Artist ↔ Composer</em>, <em>Strip Track #</em>, <em>Smart Title Case</em>, <em>Auto-Number 1..N</em>, <em>Find &amp; Replace All</em>, and <em>+ #Tag All</em></li>
-              <li><strong>Online Metadata Matching:</strong> MusicBrainz, iTunes (+ 600&nbsp;px cover download), AcoustID, and instant local hash cache</li>
-              <li><strong>Lossless File Writes:</strong> Uses <code>ffmpeg -c copy</code> so audio streams are never re-encoded</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Portable HTML, Markdown &amp; CSV Catalogs</h3>
-            <ul class="dots">
-              <li><strong>Print-Ready HTML Dossier (<code>.html</code>):</strong> Self-contained dark/light print-styled catalog with KPI cards, Collector Liner Notes, gold DR badges &amp; tags</li>
-              <li><strong>Markdown Catalog (<code>.md</code>):</strong> Clean album-grouped tables ready for Obsidian, Notion, or GitHub</li>
-              <li><strong>Full CSV &amp; JSON Backup/Restore:</strong> 25-column RFC-4180 CSV plus portable full-database JSON backup &amp; 1-click restore</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>TrueHz Authenticity &amp; Spec Copy</h3>
-            <ul class="dots">
-              <li><strong>Batch Album TrueHz / DR Auditor:</strong> Verifies ultrasonic spectral content above 22&nbsp;kHz to distinguish authentic Hi-Res from upsampled CD rips</li>
-              <li><strong>1-Click Copy Audiophile Specs:</strong> Copy clean technical lines (<code>FLAC · 24-bit/96 kHz · DR13 · -16.4 LUFS</code>) directly to clipboard</li>
-              <li><strong>Synced Lyrics Drawer:</strong> Press <code>L</code> for live time-synced <code>.lrc</code> lyrics alongside playback</li>
-            </ul>
-          </article>
-          <article class="card feat-card">
-            <h3>Critical Listening &amp; Workflow Ergonomics</h3>
-            <ul class="dots">
-              <li><strong>A–B Section Looper:</strong> Mark Loop A (<code>[</code>) and Loop B (<code>]</code>) with a clickable golden transport pill + variable speed (<code>0.75× – 1.5×</code>)</li>
-              <li><strong>Bookmarks &amp; Sleep Timer:</strong> Per-track timestamp bookmarks (<code>⌘B</code>) and gentle 5-second fade-out sleep timer</li>
-              <li><strong>9 Studio Themes &amp; Compact Mode:</strong> Full-bleed custom chrome, persistent window geometry, and <code>⌘K</code> Command Palette</li>
-            </ul>
-          </article>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ================= SCREENSHOTS ================= -->
-<section class="section section-alt" id="screenshots">
-  <div class="section-inner">
-    <p class="kicker reveal">Shown, not told</p>
-    <h2 class="reveal">The real native app, <span class="acc">every pixel.</span></h2>
-    <p class="section-lead reveal">Zero mockups — real captures straight from TxPlayer's GPU-accelerated <code>egui</code> renderer. Step through the views or click any capture for full-screen inspection.</p>
-
-    <div class="tabs reveal" id="shotTabs">
-      <div class="tab-bar" role="tablist" aria-label="Screenshot categories">
-        <button class="tab-btn" type="button" role="tab" id="sh-vis" aria-controls="shpane-vis" aria-selected="true">Concert Visualizers</button>
-        <button class="tab-btn" type="button" role="tab" id="sh-dsp" aria-controls="shpane-dsp" aria-selected="false" tabindex="-1">Audio DSP &amp; Modules</button>
-      </div>
-
-      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-vis" aria-labelledby="sh-vis">
-        <figure class="shot-item" data-lightbox="img/solarized-dark-piano.png" tabindex="0">
-          <img src="img/solarized-dark-piano.png" alt="TxPlayer 88-Key Concert Piano &amp; Harmonic Ribbon">
-          <figcaption><strong>88-Key Precision CQT Piano &amp; Harmonic Ribbon</strong><span>Multi-rate Butterworth Constant-Q detection with 10-voice harmonic cancellation, weighted keybed travel, and live chord readout.</span></figcaption>
-        </figure>
-        <figure class="shot-item" data-lightbox="img/solarized-dark-roll.png" tabindex="0" hidden>
-          <img src="img/solarized-dark-roll.png" alt="TxPlayer 88-Key Concert Piano Roll" loading="lazy">
-          <figcaption><strong>88-Key Concert Piano Roll</strong><span>Scrolling real-time note waterfall rising off the 88-key keybed — freezes instantaneously on Pause for study.</span></figcaption>
-        </figure>
-        <div class="sv-controls">
-          <button class="sv-prev" type="button" aria-label="Previous screenshot">‹</button>
-          <span class="sv-count" aria-live="polite">1 / 2</span>
-          <button class="sv-next" type="button" aria-label="Next screenshot">›</button>
-        </div>
-      </div>
-
-      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-dsp" aria-labelledby="sh-dsp" hidden>
-        <figure class="shot-item" data-lightbox="img/solarized-dark-dsp.png" tabindex="0">
-          <img src="img/solarized-dark-dsp.png" alt="TxPlayer Real-Time 64-Bit Audio DSP Settings" loading="lazy">
-          <figcaption><strong>64-Bit Real-Time Audio &amp; DSP Suite</strong><span>Interactive drag-to-shape 10-band EQ canvas, AutoEQ PEQ, partitioned FFT Convolution (.wav IR), Crossfeed, Mastering Console, and Bit-Perfect / DoP v1.1 switches.</span></figcaption>
-        </figure>
-        <figure class="shot-item" data-lightbox="img/solarized-dark-plugins.png" tabindex="0" hidden>
-          <img src="img/solarized-dark-plugins.png" alt="TxPlayer Pluggable Modules &amp; Runtime Tool Health" loading="lazy">
-          <figcaption><strong>Pluggable Modules &amp; Runtime Tool Health</strong><span>Toggle visualizer modes, choose Precision CQT vs. Classic FFT with live ms/frame telemetry, and verify optional ffmpeg/fpcalc/curl helpers.</span></figcaption>
-        </figure>
-        <div class="sv-controls">
-          <button class="sv-prev" type="button" aria-label="Previous screenshot">‹</button>
-          <span class="sv-count" aria-live="polite">1 / 2</span>
-          <button class="sv-next" type="button" aria-label="Next screenshot">›</button>
-        </div>
+        <p>Launch straight into <code>--compact</code>, <code>--vis-mode spectrogram</code>, <code>--open-abx</code>, <code>--open-insights</code>, or <code>--open-help</code>.</p>
       </div>
     </div>
   </div>
 </section>
 
 <!-- ================= DOCUMENTATION ================= -->
-<section class="section" id="docs">
+<section class="section section-alt" id="docs">
   <div class="section-inner">
     <p class="kicker reveal">Documentation &amp; Quick Guide</p>
     <h2 class="reveal">Documented <span class="acc">to unlock every feature.</span></h2>
     <div class="docs-card reveal">
       <div class="docs-card-text">
-        <h3>Quick Start, First Steps &amp; Complete Technical Reference</h3>
+        <h3>Quick Start, First Steps &amp; Complete Reference Manual</h3>
         <ul class="dots">
-          <li><strong>5-Minute Quick Start</strong> — step-by-step first launch: adding folders, Bit-Perfect DAC &amp; DoP setup, DSP A/B, and Power-Search</li>
-          <li><strong>Audio Engine &amp; 64-Bit DSP Guide</strong> — interactive EQ nodes, AutoEQ import, <code>.wav</code> FFT convolution, crossfeed, dither &amp; Mastering Console</li>
-          <li><strong>Master Library &amp; Collector Playbook</strong> — Collections, 16-field Smart Views, Batch Tag Transforms, TrueHz/DR audits &amp; HTML/Markdown catalog export</li>
-          <li><strong>Complete Reference Tables</strong> — all 14 Power-Search tokens, 25+ keyboard shortcuts, CLI flags, and data/backup paths</li>
+          <li><strong>5-Minute Quick Start</strong> — adding folders, Bit-Perfect DAC &amp; DoP v1.1 setup, Pitch-Locked Practice, DSP A/B &amp; Power-Search</li>
+          <li><strong>Audio Engine &amp; 64-Bit DSP Guide</strong> — interactive EQ nodes, AutoEQ import, <code>.wav</code> FFT convolution, crossfeed, tuning &amp; Mastering Console</li>
+          <li><strong>Master Library &amp; Collector Playbook</strong> — Collections, Smart Views, Batch Tag Transforms, Blind ABX Lab, LAN Remote &amp; HTML/Markdown dossiers</li>
+          <li><strong>Complete Reference Tables</strong> — all 14 Power-Search tokens, 25+ keyboard shortcuts (<code>1</code>–<code>6</code>, <code>F1</code>, <code>D</code>, <code>[</code>/<code>]</code>), and CLI flags</li>
         </ul>
       </div>
       <div class="docs-card-action">
         <a class="btn btn-primary" href="docs/#quick-start">Read Quick Start ↗</a>
         <a class="btn btn-ghost" href="docs/">Open Full Manual ↗</a>
-        <p class="docs-note">Searchable online docs with Dark / Light toggle.</p>
+        <p class="docs-note">Built-in help ships inside the app too — press <code>F1</code>.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ================= INTEGRITY / GUARDRAILS ================= -->
-<section class="section section-alt" id="integrity">
+<!-- ================= INTEGRITY ================= -->
+<section class="section" id="integrity">
   <div class="section-inner">
     <p class="kicker reveal">Audiophile integrity</p>
     <h2 class="reveal">Bit-perfect by architecture,<br><span class="acc">private by default.</span></h2>
     <div class="card-grid safety-grid">
-      <article class="card reveal"><h3>Hard-Bypassed Bit-Perfect</h3><p>When Bit-Perfect or Native DoP v1.1 is active, every DSP biquad, convolver, dither, and gain stage is hard-bypassed — verified with unit-tested bit-identity checks.</p></article>
-      <article class="card reveal"><h3>Zero-Allocation Audio Thread</h3><p>All 64-bit EQ, AutoEQ PEQ, partitioned FFT convolution, crossfeed, and visual sidechain taps run lock-free with zero heap allocations inside the real-time callback.</p></article>
-      <article class="card reveal"><h3>100% Local &amp; Offline</h3><p>Your library database, play history, liner notes, Local Radio, and TrueHz/DR/LUFS analysis never touch a cloud server. No account, no license key, no telemetry.</p></article>
+      <article class="card reveal"><h3>Hard-Bypassed Bit-Perfect</h3><p>When Bit-Perfect or Native DoP v1.1 is active, every DSP biquad, convolver, pitch shifter, dither, and gain stage is hard-bypassed — verified with unit-tested bit-identity checks.</p></article>
+      <article class="card reveal"><h3>Zero-Allocation Audio Thread</h3><p>All 64-bit EQ, AutoEQ PEQ, partitioned FFT convolution, stereo pitch shifting, crossfeed, and visual sidechain taps run lock-free with zero heap allocations inside the real-time callback.</p></article>
+      <article class="card reveal"><h3>100% Local &amp; Offline</h3><p>Your library database, play history, liner notes, Local Radio, Blind ABX Lab, and LAN Mobile Remote never touch a cloud server. No account, no license key, no telemetry.</p></article>
       <article class="card reveal"><h3>Rolling Database Backups</h3><p>Every save rotates your previous database cleanly to <code>libraries.json.bak</code>, paired with 1-click portable JSON backup/restore and CSV/Markdown/HTML exports.</p></article>
       <article class="card reveal"><h3>Lossless Tag Writing</h3><p>Writing tags to audio files uses lossless stream copy (<code>ffmpeg -c copy</code>) — your FLAC, ALAC, or WAV audio frames are never decoded or re-encoded.</p></article>
-      <article class="card reveal"><h3>50 Automated Unit Tests</h3><p>Core DSP bit-identity, partitioned FFT impulse reconstruction, DoP v1.1 framing, SACD TOC parsing, Precision CQT accuracy, EBU R128 LUFS, and DB invariants are all unit tested.</p></article>
+      <article class="card reveal"><h3>55 Automated Unit Tests</h3><p>Bit-identity, partitioned FFT impulse reconstruction, pitch transposition, DoP v1.1 framing, multi-track SACD <code>.iso</code> decoding, binomial ABX p-values, and LAN HTTP dispatch are all unit tested.</p></article>
     </div>
   </div>
 </section>
@@ -647,7 +657,7 @@
 <footer class="footer">
   <div class="footer-inner">
     <div>
-      <p class="footer-brand">TxPlayer <span>v1.10.0</span></p>
+      <p class="footer-brand">TxPlayer <span>v1.11.0</span></p>
       <p class="footer-note">A 100% free, native Rust audiophile music player &amp; master library database.<br>Part of the <a href="https://tuxie.eu" target="_blank" rel="noopener">Tuxie</a> desktop tool family alongside <a href="https://tuxie.eu/txui" target="_blank" rel="noopener">TxUI</a>.</p>
     </div>
     <div class="footer-meta">
@@ -666,6 +676,6 @@
   <button class="lb-next" id="lbNext" aria-label="Next screenshot">›</button>
 </div>
 
-<script src="app.js?v=1"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>

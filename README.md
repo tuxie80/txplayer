@@ -6,7 +6,7 @@
 
 **A calm, native Rust audiophile music player, real-time 88-key concert piano & acoustic visualizer, and offline master music library database.**
 
-[![Version](https://img.shields.io/badge/version-1.10.0-2aa198?style=for-the-badge)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-1.11.0-2aa198?style=for-the-badge)](Cargo.toml)
 [![Website](https://img.shields.io/badge/web-tuxie.eu%2Ftxplayer-e6b85c?style=for-the-badge)](https://tuxie.eu/txplayer)
 [![Language](https://img.shields.io/badge/Rust-Edition%202024%20%7C%201.95%2B-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-268bd2?style=for-the-badge)](#multi-platform-build--packaging)
@@ -40,7 +40,7 @@
 
 ---
 
-## Features (`v1.10.0`)
+## Features (`v1.11.0`)
 
 ### Bit-Perfect Hi-Res Audio, Native DoP v1.1 & 64-Bit Studio DSP
 - **Wide Audiophile & Archive Format Support:** Native pure-Rust SIMD decoding for `FLAC`, `ALAC`, `WAV`, `AIFF`, `CAF`, `MP3`, `AAC`, `M4A`, `OGG/Vorbis`, `MKV`, `WebM`, native 1-bit `DSF` / `DFF` (DSD64–DSD512), `.cue` sheets (UTF-8 / CP1250 / Windows-1252 / Shift-JIS), plus extended archive support for **WavPack (`.wv`)**, **Monkey's Audio (`.ape`)**, **Opus (`.opus`)**, and Scarlet Book **SACD `.iso`** Master TOC inspection.
@@ -66,7 +66,7 @@
 - **Curated Collections, Visual Smart Query Builder & Power-Search:** Drag-to-collection boxes, 16-field AND/OR dynamic Smart Views, and instant Power-Search tokens (`composer:beethoven dr>=12 rate>=96 codec:flac label:dg #reference`).
 - **Batch Multi-Track Tag Transforms & Online Matcher:** MusicBrainz, iTunes (+ 600 px Cover Art), AcoustID, plus 1-click off-thread **Batch Transforms** (`Filename → Tags`, `Swap Artist ↔ Composer`, `Strip Track #`, `Smart Title Case`, `Auto-Number 1..N`, `Find & Replace All`, `+ #Tag All`).
 - **Quality Auditing & Portable Catalog Export:** Parallel pure-Rust **TrueHz / DR Authenticity Auditor**, **EBU R128 ReplayGain Scanner**, **Duplicate Quality Audit** (fidelity-ranked `BEST` master badge), **100% Local Similar Radio**, **Interactive Insights Analytics**, and 1-click export to print-ready **HTML Dossier (`.html`)**, **Markdown Catalog (`.md`)**, **CSV (`.csv`)**, and **JSON Backup/Restore**.
-- **Critical Listening & Polish:** A–B Section Looper (`[` / `]` / `\`) with clickable transport pill, Per-Track Bookmarks (`⌘B`), Sleep Timer with 5s fade-out, Synced Lyrics (`.lrc`), 1-Click Copy Audiophile Specs, 9 Studio Themes, Compact Mini-Player Mode, and `⌘K` / `Ctrl+K` Command Palette.
+- **Critical Listening, ABX Lab, LAN Remote & Polish:** Loudness-Matched **Blind ABX Comparison Lab** (EBU R128 LUFS trim + exact binomial `p-value`), **Pitch-Locked Practice DSP** (`0.75×–1.5×`, `±12 st` transpose, `A=440/432/415 Hz` concert tuning), Multi-Track **SACD `.iso`** direct playback, opt-in **100% Local LAN Mobile Remote**, built-in **`F1` Quick Guide**, A–B Section Looper (`[` / `]` / `\`), Per-Track Bookmarks (`⌘B`), Sleep Timer, Synced Lyrics, 9 Studio Themes, Compact Mini-Player Mode, and `⌘K` Command Palette.
 
 ---
 

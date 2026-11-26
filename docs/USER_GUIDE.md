@@ -1,4 +1,4 @@
-# TxPlayer — Complete User Guide & Technical Reference (`v1.10.0`)
+# TxPlayer — Complete User Guide & Technical Reference (`v1.11.0`)
 
 **TxPlayer** is a native Rust cross-platform (`macOS`, `Windows`, `Linux`) audiophile music player, real-time acoustic & 88-key concert piano visualizer, and relational master music library database. Zero Electron, zero WebView, zero cloud accounts, zero subscriptions — everything stays fast, local, and under your control.
 
