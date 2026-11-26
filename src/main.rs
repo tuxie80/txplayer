@@ -6,6 +6,7 @@ mod audio;
 mod cue;
 mod dsd;
 mod dsp;
+mod exclusive;
 mod icons;
 mod library;
 mod lyrics;

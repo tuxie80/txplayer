@@ -25,6 +25,7 @@ use symphonia::core::units::{Time, TimeBase};
 
 use crate::dsd::{DsdPcmDecoder, RawCdBinDecoder, is_dsd_path, is_raw_cd_bin};
 use crate::dsp::{RealtimeDsp, SharedDspParams};
+use crate::exclusive::ExclusiveDeviceGuard;
 use crate::plugins::{DspConfig, OversamplingMode, ResamplerQuality};
 
 const BUFFER_SECONDS: usize = 3;
@@ -222,6 +223,7 @@ pub enum AudioCommand {
         mode: OversamplingMode,
         quality: ResamplerQuality,
     },
+    SetExclusiveMode(bool),
     Shutdown,
 }
 
@@ -236,6 +238,8 @@ pub enum AudioEvent {
         duration: Option<f64>,
         device_name: String,
         bit_perfect: bool,
+        exclusive_active: bool,
+        hw_rate_switched: bool,
         rg_gain_db: Option<f32>,
         ram_bytes: Option<usize>,
         oversampling: OversamplingMode,
@@ -250,6 +254,8 @@ pub enum AudioEvent {
         duration: Option<f64>,
         device_name: String,
         bit_perfect: bool,
+        exclusive_active: bool,
+        hw_rate_switched: bool,
         rg_gain_db: Option<f32>,
         ram_bytes: Option<usize>,
         oversampling: OversamplingMode,
@@ -405,6 +411,9 @@ impl AudioHandle {
             mode: cfg.oversampling,
             quality: cfg.resampler_quality,
         });
+        let _ = self
+            .commands
+            .send(AudioCommand::SetExclusiveMode(cfg.exclusive_mode));
     }
 
     pub fn visual_tap(&self) -> Arc<VisualTap> {
@@ -637,6 +646,7 @@ struct AudioEnginePrefs {
     ram_max_bytes: usize,
     oversampling: OversamplingMode,
     resampler_quality: ResamplerQuality,
+    exclusive_mode: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -662,6 +672,7 @@ fn run_audio_thread(
         ram_max_bytes: 512 * 1024 * 1024,
         oversampling: OversamplingMode::Native,
         resampler_quality: ResamplerQuality::LinearPhaseStudio,
+        exclusive_mode: false,
     };
     let mut next = commands.recv();
     while let Ok(command) = next {
@@ -743,6 +754,10 @@ fn run_audio_thread(
             AudioCommand::SetOversampling { mode, quality } => {
                 prefs.oversampling = mode;
                 prefs.resampler_quality = quality;
+                next = commands.recv();
+            }
+            AudioCommand::SetExclusiveMode(excl) => {
+                prefs.exclusive_mode = excl;
                 next = commands.recv();
             }
             AudioCommand::Stop => {
@@ -1022,6 +1037,9 @@ struct OutputStream {
     sample_rate: u32,
     channels: usize,
     format_label: String,
+    exclusive_active: bool,
+    hw_rate_switched: bool,
+    _exclusive_guard: ExclusiveDeviceGuard,
     played_frames: Arc<AtomicU64>,
     seek_generation: Arc<AtomicU64>,
     reopen_needed: Arc<AtomicBool>,
@@ -1245,8 +1263,10 @@ fn play_file(
     };
     let (output, mut producer) = create_output_stream(
         device,
+        &device_name,
         decoder.source_sample_rate,
         effective_oversampling,
+        prefs.exclusive_mode,
         volume,
         rg_gain,
         linear_volume,
@@ -1258,6 +1278,8 @@ fn play_file(
     )?;
     let output_rate = output.sample_rate;
     let output_format_label = output.format_label.clone();
+    let exclusive_active = output.exclusive_active;
+    let hw_rate_switched = output.hw_rate_switched;
     visual_tap.set_sample_rate(output_rate);
 
     let mut track_origin_secs = spec.start_offset.max(0.0);
@@ -1285,6 +1307,8 @@ fn play_file(
         duration: eff_dur,
         device_name: device_name.clone(),
         bit_perfect: bp_active,
+        exclusive_active,
+        hw_rate_switched,
         rg_gain_db: if bit_perfect.load(Ordering::Relaxed) {
             None
         } else {
@@ -1361,6 +1385,8 @@ fn play_file(
                 duration: trans.duration,
                 device_name: device_name.clone(),
                 bit_perfect: bp,
+                exclusive_active,
+                hw_rate_switched,
                 rg_gain_db: if bit_perfect.load(Ordering::Relaxed) {
                     None
                 } else {
@@ -1516,6 +1542,23 @@ fn play_file(
                     let changed = prefs.oversampling != mode || prefs.resampler_quality != quality;
                     prefs.oversampling = mode;
                     prefs.resampler_quality = quality;
+                    if changed {
+                        let pos = calc_position(
+                            played_now,
+                            track_origin_frame,
+                            track_origin_secs,
+                            prefs.speed,
+                        );
+                        visual_tap.set_active(false);
+                        let mut reopen = spec;
+                        reopen.start_offset = pos;
+                        reopen.start_paused = paused;
+                        return Ok(PlaybackExit::ReopenSpec(reopen));
+                    }
+                }
+                AudioCommand::SetExclusiveMode(excl) => {
+                    let changed = prefs.exclusive_mode != excl;
+                    prefs.exclusive_mode = excl;
                     if changed {
                         let pos = calc_position(
                             played_now,
@@ -1898,8 +1941,10 @@ fn format_sample_format_label(fmt: SampleFormat) -> String {
 #[allow(clippy::too_many_arguments)]
 fn create_output_stream(
     device: &Device,
+    device_name: &str,
     source_rate: u32,
     oversampling: OversamplingMode,
+    exclusive_mode: bool,
     volume: &Arc<AtomicU32>,
     rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
@@ -1920,6 +1965,13 @@ fn create_output_stream(
         .collect();
     let target_rate = choose_target_sample_rate(source_rate, &rate_bounds, oversampling)
         .unwrap_or(source_rate);
+
+    // Acquire hardware Exclusive Hog Mode & native hardware DAC sample-rate clock BEFORE opening stream
+    let want_hw_clock = exclusive_mode
+        || bit_perfect.load(Ordering::Relaxed)
+        || oversampling != OversamplingMode::Native;
+    let exclusive_guard =
+        ExclusiveDeviceGuard::acquire(device_name, target_rate, exclusive_mode, want_hw_clock);
 
     let preferred_config = ranges_vec
         .into_iter()
@@ -1951,6 +2003,7 @@ fn create_output_stream(
     match open_with_config(
         device,
         &primary,
+        exclusive_guard,
         volume,
         rg_gain,
         linear_volume,
@@ -1961,7 +2014,7 @@ fn create_output_stream(
         events,
     ) {
         Ok(res) => Ok(res),
-        Err(primary_err) => {
+        Err((primary_err, guard_back)) => {
             let fallback = OutputConfig {
                 config: StreamConfig {
                     channels: default.channels(),
@@ -1979,6 +2032,7 @@ fn create_output_stream(
             open_with_config(
                 device,
                 &fallback,
+                guard_back,
                 volume,
                 rg_gain,
                 linear_volume,
@@ -1988,6 +2042,7 @@ fn create_output_stream(
                 dsp,
                 events,
             )
+            .map_err(|(e, _)| e)
         }
     }
 }
@@ -1996,6 +2051,7 @@ fn create_output_stream(
 fn open_with_config(
     device: &Device,
     output: &OutputConfig,
+    exclusive_guard: ExclusiveDeviceGuard,
     volume: &Arc<AtomicU32>,
     rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
@@ -2004,7 +2060,7 @@ fn open_with_config(
     visual_tap: &Arc<VisualTap>,
     dsp: &Arc<SharedDspParams>,
     events: &Sender<AudioEvent>,
-) -> Result<(OutputStream, HeapProd<f32>)> {
+) -> std::result::Result<(OutputStream, HeapProd<f32>), (anyhow::Error, ExclusiveDeviceGuard)> {
     let output_rate = output.config.sample_rate;
     let channels = output.config.channels as usize;
     let ring = HeapRb::<f32>::new(output_rate as usize * channels * BUFFER_SECONDS);
@@ -2015,7 +2071,7 @@ fn open_with_config(
 
     macro_rules! mk {
         ($ty:ty) => {
-            build_stream::<$ty>(
+            match build_stream::<$ty>(
                 device,
                 &output.config,
                 consumer,
@@ -2030,7 +2086,10 @@ fn open_with_config(
                 &seek_generation,
                 &reopen_needed,
                 events,
-            )?
+            ) {
+                Ok(s) => s,
+                Err(e) => return Err((e, exclusive_guard)),
+            }
         };
     }
 
@@ -2043,14 +2102,24 @@ fn open_with_config(
         SampleFormat::U16 => mk!(u16),
         SampleFormat::I8 => mk!(i8),
         SampleFormat::U8 => mk!(u8),
-        format => return Err(anyhow!("Unsupported output sample format: {format}")),
+        format => {
+            return Err((
+                anyhow!("Unsupported output sample format: {format}"),
+                exclusive_guard,
+            ));
+        }
     };
+    let exclusive_active = exclusive_guard.status.hog_acquired;
+    let hw_rate_switched = exclusive_guard.status.hw_rate_switched;
     Ok((
         OutputStream {
             stream,
             sample_rate: output_rate,
             channels,
             format_label: format_sample_format_label(output.format),
+            exclusive_active,
+            hw_rate_switched,
+            _exclusive_guard: exclusive_guard,
             played_frames,
             seek_generation,
             reopen_needed,

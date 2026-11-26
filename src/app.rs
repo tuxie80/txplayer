@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::analyzer::{AudioAnalysis, analyze_file};
 use crate::audio::{
-    AudioEvent, AudioHandle, PlaybackSpec, VisualTap, compute_waveform, list_output_devices,
+    AudioEvent, AudioHandle, PlaybackSpec, VisualTap, compute_waveform, default_output_device_name,
+    list_output_devices,
 };
 use crate::icons::{self, Icon};
 use crate::library::{LibraryStore, ScanEvent, cover_directory, reorder_vec_indices, scan};
@@ -30,8 +31,8 @@ use crate::modals::{
 use crate::platform::{FILE_MANAGER_NAME, MOD_SHORT, reveal_in_file_manager};
 use crate::playlist_io::{export_playlist, import_playlist_paths};
 use crate::plugins::{
-    EqPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
-    ToolHealth,
+    DeviceProfile, EqPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode,
+    ResamplerQuality, ToolHealth, parse_autoeq_txt,
 };
 use crate::theme::{self, Palette, ThemeId};
 use crate::tray::{SystemTrayBridge, TrayCommand};
@@ -259,6 +260,7 @@ enum DialogEvent {
         path: Option<PathBuf>,
         track_ids: Vec<u64>,
     },
+    ImportAutoEq(Option<PathBuf>),
 }
 
 #[derive(Clone)]
@@ -270,6 +272,8 @@ struct StreamInfo {
     bit_depth: Option<u32>,
     device_name: String,
     bit_perfect: bool,
+    exclusive_active: bool,
+    hw_rate_switched: bool,
     rg_gain_db: Option<f32>,
     ram_bytes: Option<usize>,
     oversampling: OversamplingMode,
@@ -2290,6 +2294,36 @@ impl TxPlayerApp {
         });
     }
 
+    fn import_autoeq_dialog(&mut self) {
+        if self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Import AutoEQ / Oratory1990 Parametric EQ (.txt)")
+            .add_filter("AutoEQ / EqualizerAPO", &["txt"]);
+        let events = self.dialog_sender.clone();
+        thread::spawn(move || {
+            let path = pollster::block_on(dialog.pick_file()).map(|h| h.path().to_path_buf());
+            let _ = events.send(DialogEvent::ImportAutoEq(path));
+        });
+    }
+
+    fn apply_device_profile_if_saved(&mut self, device_name: &str) -> bool {
+        let Some(profile) = self.plugins.device_profiles.get(device_name).cloned() else {
+            return false;
+        };
+        profile.apply_to(&mut self.plugins.dsp);
+        self.audio.update_dsp(&self.plugins.dsp);
+        self.apply_current_rg();
+        self.preload_next_track();
+        self.set_status(format!(
+            "Applied profile for \"{device_name}\" ({})",
+            profile.summary()
+        ));
+        true
+    }
+
     fn export_playlist_dialog(&mut self, default_name: &str, track_ids: Vec<u64>) {
         if self.dialog_open || track_ids.is_empty() {
             return;
@@ -2442,6 +2476,8 @@ impl TxPlayerApp {
                     duration,
                     device_name,
                     bit_perfect,
+                    exclusive_active,
+                    hw_rate_switched,
                     rg_gain_db,
                     ram_bytes,
                     oversampling,
@@ -2455,6 +2491,8 @@ impl TxPlayerApp {
                         bit_depth,
                         device_name,
                         bit_perfect,
+                        exclusive_active,
+                        hw_rate_switched,
                         rg_gain_db,
                         ram_bytes,
                         oversampling,
@@ -2490,6 +2528,8 @@ impl TxPlayerApp {
                     duration,
                     device_name,
                     bit_perfect,
+                    exclusive_active,
+                    hw_rate_switched,
                     rg_gain_db,
                     ram_bytes,
                     oversampling,
@@ -2509,6 +2549,8 @@ impl TxPlayerApp {
                         bit_depth,
                         device_name,
                         bit_perfect,
+                        exclusive_active,
+                        hw_rate_switched,
                         rg_gain_db,
                         ram_bytes,
                         oversampling,
@@ -2535,7 +2577,9 @@ impl TxPlayerApp {
                 }
                 AudioEvent::DeviceRouted(name) => {
                     self.available_devices = list_output_devices();
-                    self.set_status(format!("Audio output switched to {name}"));
+                    if !self.apply_device_profile_if_saved(&name) {
+                        self.set_status(format!("Audio output switched to {name}"));
+                    }
                 }
                 AudioEvent::Playing(playing) => {
                     self.playing = playing;
@@ -2668,6 +2712,36 @@ impl TxPlayerApp {
                                     .unwrap_or("playlist")
                             )),
                             Err(e) => self.set_status(format!("Export failed: {e}")),
+                        }
+                    }
+                }
+                DialogEvent::ImportAutoEq(maybe_path) => {
+                    if let Some(path) = maybe_path {
+                        match std::fs::read_to_string(&path) {
+                            Ok(text) => {
+                                let hint = path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("AutoEQ Profile");
+                                match parse_autoeq_txt(&text, hint) {
+                                    Ok((name, preamp_db, bands)) => {
+                                        let count = bands.len();
+                                        self.plugins.dsp.peq_profile_name = name.clone();
+                                        self.plugins.dsp.peq_preamp_db = preamp_db;
+                                        self.plugins.dsp.peq_bands = bands;
+                                        self.plugins.dsp.peq_enabled = true;
+                                        self.plugins.dsp.enabled = true;
+                                        self.plugins.dsp.bit_perfect_mode = false;
+                                        self.audio.update_dsp(&self.plugins.dsp);
+                                        self.set_status(format!(
+                                            "Loaded AutoEQ \"{name}\" ({count} bands, {:+.1} dB preamp)",
+                                            preamp_db
+                                        ));
+                                    }
+                                    Err(err) => self.set_status(format!("AutoEQ parse error: {err}")),
+                                }
+                            }
+                            Err(err) => self.set_status(format!("Could not read file: {err}")),
                         }
                     }
                 }
@@ -6550,7 +6624,9 @@ impl TxPlayerApp {
                                         format_sample_rate(info.output_rate)
                                     )
                                 };
-                                let dsp_tag = if info.bit_perfect {
+                                let dsp_tag = if info.exclusive_active {
+                                    " · EXCL"
+                                } else if info.bit_perfect {
                                     " · BIT-PERFECT"
                                 } else if dsp_on {
                                     " · DSP"
@@ -6792,11 +6868,31 @@ impl TxPlayerApp {
         }
         if let Some(dev) = settings_actions.device_changed {
             self.preferred_device = dev.clone();
+            let resolved_name = dev
+                .clone()
+                .or_else(default_output_device_name)
+                .unwrap_or_else(|| "System Default".into());
+            let applied = self.apply_device_profile_if_saved(&resolved_name);
             self.audio.select_device(dev.clone());
-            self.set_status(match dev {
-                Some(name) => format!("Switched output to {name}"),
-                None => "Switched output to System Default".into(),
-            });
+            if !applied {
+                self.set_status(match dev {
+                    Some(name) => format!("Switched output to {name}"),
+                    None => "Switched output to System Default".into(),
+                });
+            }
+        }
+        if let Some(dev_name) = settings_actions.save_device_profile {
+            let prof = DeviceProfile::capture_from(&self.plugins.dsp);
+            let sum = prof.summary();
+            self.plugins.device_profiles.insert(dev_name.clone(), prof);
+            self.set_status(format!("Saved audio profile for \"{dev_name}\" ({sum})"));
+        }
+        if let Some(dev_name) = settings_actions.clear_device_profile {
+            self.plugins.device_profiles.remove(&dev_name);
+            self.set_status(format!("Cleared saved profile for \"{dev_name}\""));
+        }
+        if settings_actions.import_autoeq {
+            self.import_autoeq_dialog();
         }
         if let Some(lin) = settings_actions.linear_vol_changed {
             self.audio.set_linear_volume(lin);
@@ -7219,11 +7315,18 @@ impl TxPlayerApp {
             &p,
         ) {
             self.preferred_device = chosen_device.clone();
+            let resolved_name = chosen_device
+                .clone()
+                .or_else(default_output_device_name)
+                .unwrap_or_else(|| "System Default".into());
+            let applied = self.apply_device_profile_if_saved(&resolved_name);
             self.audio.select_device(chosen_device.clone());
-            self.set_status(match chosen_device {
-                Some(dev) => format!("Switched output to {dev}"),
-                None => "Switched output to System Default".into(),
-            });
+            if !applied {
+                self.set_status(match chosen_device {
+                    Some(dev) => format!("Switched output to {dev}"),
+                    None => "Switched output to System Default".into(),
+                });
+            }
         }
 
         // 8) Signal Path & Live DSP Popover (anchored directly above telemetry)
@@ -7243,6 +7346,8 @@ impl TxPlayerApp {
                 variable_bitrate: self.variable_bitrate,
                 device_name: info.device_name.as_str(),
                 bit_perfect: info.bit_perfect,
+                exclusive_active: info.exclusive_active,
+                hw_rate_switched: info.hw_rate_switched,
                 rg_gain_db: info.rg_gain_db,
                 ram_bytes: info.ram_bytes,
                 oversampling: info.oversampling,
@@ -7977,7 +8082,9 @@ impl TxPlayerApp {
                             format_sample_rate(info.output_rate)
                         )
                     };
-                    let tag = if info.bit_perfect {
+                    let tag = if info.exclusive_active {
+                        " · EXCL"
+                    } else if info.bit_perfect {
                         " · BIT-PERFECT"
                     } else if dsp_on {
                         " · DSP"

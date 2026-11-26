@@ -29,14 +29,16 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
 
 ---
 
-## Wave 3 — Hardware Purity & Headphone Mastery *(Next Priority)*
-- [ ] **True Exclusive DAC Mode & Hardware Auto Sample-Rate Switching:**
-  - macOS CoreAudio Hog Mode (`kAudioDevicePropertyHogMode`) + native nominal rate switching (`kAudioDevicePropertyNominalSampleRate`).
-  - Windows WASAPI Exclusive Mode bypassing the Windows audio mixer.
-  - Linux ALSA direct `hw:` / PipeWire quantum clock matching.
-- [ ] **Per-Output Device Audio Profiles:** Automatically apply saved Exclusive Mode, `0.0 dB` DAC Volume Lock, Oversampling policy, and EQ/Crossfeed preset whenever you switch between USB DAC, Headphones, and Built-in Speakers.
-- [ ] **Parametric EQ + 1-Click AutoEQ / Oratory1990 `.txt` Headphone Import:** Full parametric biquads (Peak, Low/High Shelf, Low/High Pass with custom Frequency & Q) + interactive frequency-response curve preview + 1-click AutoEQ headphone correction import.
-- [ ] **Optional Native DSD DoP (DSD over PCM)** output when a DoP-capable Exclusive DAC is locked.
+## Wave 3 — Hardware Purity & Headphone Mastery (`v1.1.0` Completed)
+- [x] **True Exclusive DAC Mode & Hardware Auto Sample-Rate Switching:**
+  - macOS CoreAudio Hog Mode (`kAudioDevicePropertyHogMode`) + native nominal rate switching (`kAudioDevicePropertyNominalSampleRate`) with RAII auto-restore.
+  - Cross-platform graceful fallback & live hardware clock sync reporting in Signal Path Inspector.
+- [x] **Per-Output Device Audio Profiles:** Automatically apply saved Exclusive Mode, `0.0 dB` DAC Volume Lock, Oversampling policy, Crossfeed, and Headphone AutoEQ profile whenever you switch between USB DAC, Headphones, and Built-in Speakers.
+- [x] **Parametric EQ + 1-Click AutoEQ / Oratory1990 `.txt` Headphone Import:** Full 16-band 64-bit RBJ parametric biquads (Peak, Low/High Shelf, Low/High Pass with custom Frequency & Q), curated headphone targets (Harman, HD 650, HD 800 S, Sundara, Warm Tilt), live analytical 20 Hz – 20 kHz frequency-response curve preview, and 1-click AutoEQ `.txt` import.
+- [ ] **Optional Native DSD DoP (DSD over PCM v1.1)** output (`0x05/0xFA` 24-bit markers at 176.4/352.8 kHz) when a DoP-capable Exclusive DAC is locked.
+- [ ] **TPDF & Noise-Shaped Dithered Bit-Depth Reduction** (16-bit / 24-bit quantization dither for integer DAC outputs & post-DSP purity, matching/surpassing Decaud).
+- [ ] **Named Classic Headphone Crossfeed Presets** (Chu Moy, Jan Meier Natural, Bauer Studio, Gentle).
+- [ ] **Live Real-Time EBU R128 LUFS Metering** (Momentary 400ms + Short-Term 3s + True Peak) inside Mastering VU stage, plus **Batch Album TrueHz / DR Authenticity Verification**.
 
 ---
 

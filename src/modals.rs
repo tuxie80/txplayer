@@ -9,13 +9,14 @@ use eframe::egui::{
 
 use crate::analyzer::{AudioAnalysis, HiResVerdict};
 use crate::audio::{default_output_device_name, list_output_devices};
+use crate::dsp::compute_eq_response_curve;
 use crate::icons::{self, Icon};
 use crate::library::cover_directory;
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, reveal_in_file_manager};
 use crate::plugins::{
-    DspConfig, EQ_FREQ_LABELS, EqPreset, OversamplingMode, PianoEngineId, PluginConfig,
-    ReplayGainMode, ResamplerQuality, TagProviderConfig, ToolHealth,
+    DspConfig, EQ_FREQ_LABELS, EqPreset, HeadphonePreset, OversamplingMode, PianoEngineId,
+    PluginConfig, ReplayGainMode, ResamplerQuality, TagProviderConfig, ToolHealth,
 };
 use crate::tagger::{
     EditableTags, LookupStrategy, TagCandidate, TrackHashes, compute_fast_audio_hash,
@@ -700,6 +701,9 @@ pub struct SettingsViewActions {
     pub open_libraries: bool,
     pub prune_missing: bool,
     pub import_playlist: bool,
+    pub import_autoeq: bool,
+    pub save_device_profile: Option<String>,
+    pub clear_device_profile: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -739,6 +743,9 @@ pub fn show_settings_window(
         open_libraries: false,
         prune_missing: false,
         import_playlist: false,
+        import_autoeq: false,
+        save_device_profile: None,
+        clear_device_profile: None,
     };
     if !*open {
         return actions;
@@ -1193,6 +1200,207 @@ pub fn show_settings_window(
                         }
                     });
 
+                    // Per-Output Device Audio Profile Bar
+                    let active_dev_name = preferred_device
+                        .clone()
+                        .or_else(default_output_device_name)
+                        .unwrap_or_else(|| "System Default".to_string());
+                    ui.add_space(6.0);
+                    Frame::new()
+                        .fill(palette.surface)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .corner_radius(6.0)
+                        .inner_margin(Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new("DEVICE PROFILE")
+                                        .size(9.5)
+                                        .strong()
+                                        .color(palette.faint),
+                                );
+                                ui.label(
+                                    RichText::new(&active_dev_name)
+                                        .size(10.5)
+                                        .strong()
+                                        .color(palette.text),
+                                );
+                                if let Some(saved) = plugins.device_profiles.get(&active_dev_name) {
+                                    ui.label(
+                                        RichText::new(format!("({})", saved.summary()))
+                                            .size(10.0)
+                                            .monospace()
+                                            .color(palette.accent),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new("(No saved profile)")
+                                            .size(10.0)
+                                            .color(palette.muted),
+                                    );
+                                }
+                            });
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                if pill_button(
+                                    ui,
+                                    "Save Current Audio Setup for Device",
+                                    Some(Icon::Device),
+                                    PillStyle::Active,
+                                    palette,
+                                )
+                                .on_hover_text(
+                                    "Auto-applies Exclusive Mode, 0 dB Lock, Oversampling, Crossfeed & Headphone AutoEQ whenever this output is active",
+                                )
+                                .clicked()
+                                {
+                                    actions.save_device_profile = Some(active_dev_name.clone());
+                                }
+                                if plugins.device_profiles.contains_key(&active_dev_name)
+                                    && pill_button(
+                                        ui,
+                                        "Clear Profile",
+                                        Some(Icon::Close),
+                                        PillStyle::Danger,
+                                        palette,
+                                    )
+                                    .clicked()
+                                {
+                                    actions.clear_device_profile = Some(active_dev_name.clone());
+                                }
+                            });
+                        });
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // Headphone AutoEQ & 16-Band Parametric EQ
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("HEADPHONE AUTOEQ & PARAMETRIC EQ (64-BIT)")
+                                .size(10.0)
+                                .strong()
+                                .color(palette.faint),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if pill_button(
+                                ui,
+                                "Import AutoEQ .txt…",
+                                Some(Icon::FolderPlus),
+                                PillStyle::Secondary,
+                                palette,
+                            )
+                            .on_hover_text(
+                                "Import any Oratory1990 / AutoEQ / EqualizerAPO ParametricEQ .txt headphone correction profile",
+                            )
+                            .clicked()
+                            {
+                                actions.import_autoeq = true;
+                            }
+                            if !plugins.dsp.peq_bands.is_empty()
+                                && pill_button(
+                                    ui,
+                                    if plugins.dsp.peq_enabled && plugins.dsp.enabled {
+                                        "PEQ: On"
+                                    } else {
+                                        "PEQ: Off"
+                                    },
+                                    None,
+                                    if plugins.dsp.peq_enabled && plugins.dsp.enabled {
+                                        PillStyle::Accent
+                                    } else {
+                                        PillStyle::Secondary
+                                    },
+                                    palette,
+                                )
+                                .clicked()
+                            {
+                                plugins.dsp.peq_enabled = !plugins.dsp.peq_enabled;
+                                if plugins.dsp.peq_enabled {
+                                    plugins.dsp.enabled = true;
+                                    plugins.dsp.bit_perfect_mode = false;
+                                }
+                                actions.dsp_changed = true;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for &hp in HeadphonePreset::ALL {
+                            let active = plugins.dsp.peq_enabled
+                                && plugins.dsp.peq_profile_name == hp.profile().0;
+                            if pill_button(
+                                ui,
+                                hp.name(),
+                                None,
+                                if active {
+                                    PillStyle::Active
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                palette,
+                            )
+                            .clicked()
+                            {
+                                plugins.dsp.apply_headphone_preset(hp);
+                                actions.dsp_changed = true;
+                            }
+                        }
+                        if !plugins.dsp.peq_bands.is_empty()
+                            && pill_button(ui, "Clear PEQ", None, PillStyle::Danger, palette)
+                                .clicked()
+                        {
+                            plugins.dsp.peq_enabled = false;
+                            plugins.dsp.peq_profile_name.clear();
+                            plugins.dsp.peq_bands.clear();
+                            plugins.dsp.peq_preamp_db = 0.0;
+                            actions.dsp_changed = true;
+                        }
+                    });
+                    if !plugins.dsp.peq_bands.is_empty() {
+                        ui.add_space(4.0);
+                        let summary_line = plugins
+                            .dsp
+                            .peq_bands
+                            .iter()
+                            .filter(|b| b.enabled)
+                            .take(6)
+                            .map(|b| {
+                                format!(
+                                    "{} {:.0}Hz {:+.1}dB",
+                                    b.kind.short_label(),
+                                    b.freq_hz,
+                                    b.gain_db
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · Preamp {:+.1} dB · {} bands ({summary_line})",
+                                if plugins.dsp.peq_profile_name.is_empty() {
+                                    "Parametric Profile"
+                                } else {
+                                    &plugins.dsp.peq_profile_name
+                                },
+                                plugins.dsp.peq_preamp_db,
+                                plugins.dsp.peq_bands.len(),
+                            ))
+                            .size(9.8)
+                            .monospace()
+                            .color(if plugins.dsp.peq_enabled {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            }),
+                        );
+                    }
+
+                    // Live combined Graphic + Parametric Frequency Response Curve
+                    ui.add_space(6.0);
+                    paint_eq_response_graph(ui, &plugins.dsp, palette);
+
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(8.0);
@@ -1244,6 +1452,13 @@ pub fn show_settings_window(
                             .color(palette.faint),
                     );
                     ui.add_space(4.0);
+                    let prev_excl = plugins.dsp.exclusive_mode;
+                    aligned_checkbox_row(
+                        ui,
+                        &mut plugins.dsp.exclusive_mode,
+                        "Exclusive DAC Mode (macOS CoreAudio Hog Mode + Hardware Auto Clock Switching)",
+                        palette,
+                    );
                     let prev_bp = plugins.dsp.bit_perfect_mode;
                     aligned_checkbox_row(
                         ui,
@@ -1305,7 +1520,8 @@ pub fn show_settings_window(
                         "True Gapless Playback (zero-silence transition between tracks & CUE sheets)",
                         palette,
                     );
-                    if plugins.dsp.bit_perfect_mode != prev_bp
+                    if plugins.dsp.exclusive_mode != prev_excl
+                        || plugins.dsp.bit_perfect_mode != prev_bp
                         || plugins.dsp.direct_volume_lock != prev_dvl
                         || plugins.dsp.ram_playback != prev_ram
                         || plugins.dsp.gapless_enabled != prev_gap
@@ -3031,6 +3247,82 @@ pub fn paint_dsp_controls(ui: &mut Ui, dsp: &mut DspConfig, palette: &Palette) -
     changed
 }
 
+/// Paints a crisp 20 Hz .. 20 kHz analytical frequency response curve of the combined
+/// 10-band Graphic EQ + 16-band Parametric / AutoEQ headphone profile.
+fn paint_eq_response_graph(ui: &mut Ui, dsp: &DspConfig, palette: &Palette) {
+    let w = ui.available_width().max(220.0);
+    let h = 68.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 6.0, palette.background);
+    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, palette.border), StrokeKind::Inside);
+
+    let plot = Rect::from_min_max(
+        pos2(rect.left() + 8.0, rect.top() + 8.0),
+        pos2(rect.right() - 8.0, rect.bottom() - 15.0),
+    );
+    let zero_y = plot.center().y;
+    // Reference 0 dB / +6 dB / -6 dB lines
+    painter.line_segment(
+        [pos2(plot.left(), zero_y), pos2(plot.right(), zero_y)],
+        Stroke::new(0.8, palette.border_strong),
+    );
+    for frac in [0.25_f32, 0.75] {
+        let gy = plot.top() + plot.height() * frac;
+        painter.line_segment(
+            [pos2(plot.left(), gy), pos2(plot.right(), gy)],
+            Stroke::new(0.5, palette.border.gamma_multiply(0.5)),
+        );
+    }
+
+    let curve = compute_eq_response_curve(dsp, 96);
+    let active = dsp.enabled && !dsp.bit_perfect_mode;
+    let line_col = if active {
+        palette.accent_bright
+    } else {
+        palette.faint
+    };
+    let mut pts = Vec::with_capacity(curve.len());
+    for (i, &db) in curve.iter().enumerate() {
+        let x = plot.left() + (i as f32 / (curve.len() - 1).max(1) as f32) * plot.width();
+        let norm = (db / 12.0).clamp(-1.0, 1.0);
+        let y = (zero_y - norm * (plot.height() * 0.48)).clamp(plot.top(), plot.bottom());
+        pts.push(pos2(x, y));
+    }
+    if pts.len() >= 2 {
+        painter.add(egui::Shape::line(pts, Stroke::new(1.6, line_col)));
+    }
+
+    let axis_y = rect.bottom() - 7.0;
+    let log_min = 20.0_f32.ln();
+    let log_max = 20_000.0_f32.ln();
+    for (lbl, hz) in [
+        ("20", 20.0_f32),
+        ("100", 100.0),
+        ("500", 500.0),
+        ("2k", 2000.0),
+        ("8k", 8000.0),
+        ("20k", 20000.0),
+    ] {
+        let t = ((hz.ln() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
+        let x = plot.left() + t * plot.width();
+        let align = if hz <= 21.0 {
+            Align2::LEFT_CENTER
+        } else if hz >= 19_000.0 {
+            Align2::RIGHT_CENTER
+        } else {
+            Align2::CENTER_CENTER
+        };
+        painter.text(
+            pos2(x, axis_y),
+            align,
+            lbl,
+            FontId::monospace(8.5),
+            palette.faint,
+        );
+    }
+}
+
 pub struct SignalPathDisplay<'a> {
     pub codec: &'a str,
     pub source_rate: u32,
@@ -3042,6 +3334,8 @@ pub struct SignalPathDisplay<'a> {
     pub variable_bitrate: bool,
     pub device_name: &'a str,
     pub bit_perfect: bool,
+    pub exclusive_active: bool,
+    pub hw_rate_switched: bool,
     pub rg_gain_db: Option<f32>,
     pub ram_bytes: Option<usize>,
     pub oversampling: OversamplingMode,
@@ -3529,10 +3823,17 @@ pub fn show_signal_path_popover(
                 } else {
                     format!("Software Vol {:.0}%", s.volume * 100.0)
                 };
+                let excl_tag = if s.exclusive_active {
+                    "Exclusive Hog Mode"
+                } else if s.hw_rate_switched {
+                    "HW Clock Sync"
+                } else {
+                    "Shared"
+                };
                 stage_row(
                     ui,
                     "5",
-                    &format!("{AUDIO_BACKEND_NAME} Hardware Output"),
+                    &format!("{AUDIO_BACKEND_NAME} Hardware Output ({excl_tag})"),
                     format!(
                         "{} · {} · {} · {}",
                         s.device_name,
@@ -3540,7 +3841,7 @@ pub fn show_signal_path_popover(
                         format_sample_rate(s.output_rate),
                         vol_stage
                     ),
-                    if s.direct_volume_lock && s.bit_perfect {
+                    if s.exclusive_active || (s.direct_volume_lock && s.bit_perfect) {
                         palette.hires_gold
                     } else {
                         palette.accent_bright
