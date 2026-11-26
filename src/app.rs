@@ -36,8 +36,8 @@ use crate::platform::{
 };
 use crate::playlist_io::{export_playlist, import_playlist_paths};
 use crate::plugins::{
-    DeviceProfile, EqPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode,
-    ResamplerQuality, ToolHealth, parse_autoeq_txt,
+    DeviceProfile, EqPreset, IrPreset, OversamplingMode, PianoEngineId, PluginConfig,
+    ReplayGainMode, ResamplerQuality, ToolHealth, parse_autoeq_txt,
 };
 use crate::theme::{self, Palette, ThemeId};
 use crate::tray::{SystemTrayBridge, TrayCommand};
@@ -401,6 +401,7 @@ enum DialogEvent {
         track_ids: Vec<u64>,
     },
     ImportAutoEq(Option<PathBuf>),
+    ImportWavIr(Option<PathBuf>),
     ExportCsv(Option<PathBuf>),
     BackupDatabaseJson(Option<PathBuf>),
     RestoreDatabaseJson(Option<PathBuf>),
@@ -1606,6 +1607,26 @@ impl TxPlayerApp {
         self.start_current();
     }
 
+    fn start_local_radio(&mut self, seed_id: u64) {
+        let seed_title = self
+            .track(seed_id)
+            .map(|t| t.title.clone())
+            .unwrap_or_else(|| "Selected Track".into());
+        let radio_ids = self.store.active().build_similar_radio(seed_id, 40);
+        if radio_ids.len() <= 1 {
+            self.set_status("Add more tracks or tags to build a Local Radio queue".into());
+            return;
+        }
+        let similar_count = radio_ids.len().saturating_sub(1);
+        self.current_queue = radio_ids;
+        self.current_index = Some(0);
+        self.mark_queue_dirty();
+        self.start_current();
+        self.set_status(format!(
+            "Local Radio started from \"{seed_title}\" — {similar_count} similar tracks queued"
+        ));
+    }
+
     fn play_selected(&mut self, visible: &[Track]) {
         let ids = self.selected_ordered_ids(visible);
         if ids.is_empty() {
@@ -2692,6 +2713,21 @@ impl TxPlayerApp {
         });
     }
 
+    fn import_wav_ir_dialog(&mut self) {
+        if self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Load Convolution Impulse Response (.wav)")
+            .add_filter("WAV Impulse Response", &["wav", "wave"]);
+        let events = self.dialog_sender.clone();
+        thread::spawn(move || {
+            let path = pollster::block_on(dialog.pick_file()).map(|h| h.path().to_path_buf());
+            let _ = events.send(DialogEvent::ImportWavIr(path));
+        });
+    }
+
     fn apply_device_profile_if_saved(&mut self, device_name: &str) -> bool {
         let Some(profile) = self.plugins.device_profiles.get(device_name).cloned() else {
             return false;
@@ -3208,6 +3244,31 @@ impl TxPlayerApp {
                                 }
                             }
                             Err(err) => self.set_status(format!("Could not read file: {err}")),
+                        }
+                    }
+                }
+                DialogEvent::ImportWavIr(maybe_path) => {
+                    if let Some(path) = maybe_path {
+                        let name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Custom IR")
+                            .to_string();
+                        match crate::dsp::load_wav_ir(&path, 48_000) {
+                            Ok((l, _r)) => {
+                                let taps = l.len();
+                                self.plugins.dsp.ir_preset = IrPreset::CustomWav;
+                                self.plugins.dsp.ir_path = Some(path);
+                                self.plugins.dsp.ir_name = name.clone();
+                                self.plugins.dsp.ir_enabled = true;
+                                self.plugins.dsp.enabled = true;
+                                self.plugins.dsp.bit_perfect_mode = false;
+                                self.audio.update_dsp(&self.plugins.dsp);
+                                self.set_status(format!(
+                                    "Loaded Convolution IR \"{name}\" ({taps} taps @ 48 kHz)"
+                                ));
+                            }
+                            Err(err) => self.set_status(format!("WAV IR load error: {err}")),
                         }
                     }
                 }
@@ -7083,6 +7144,10 @@ impl TxPlayerApp {
                         ui.close();
                     }
                 }
+                if ui.button("Start Local Radio (Similar Tracks)").clicked() {
+                    ctx_action = Some(ContextMenuAction::StartLocalRadio(tid));
+                    ui.close();
+                }
                 if is_current {
                     let sac_lbl = if self.stop_after_current {
                         "✓ Stop After This Track"
@@ -7304,6 +7369,7 @@ impl TxPlayerApp {
                 let ids = self.selected_ordered_ids(visible);
                 self.enqueue_ids(&ids);
             }
+            ContextMenuAction::StartLocalRadio(id) => self.start_local_radio(id),
             ContextMenuAction::AddToPlaylist(pl_id) => {
                 let ids = self.selected_ordered_ids(visible);
                 let added = self
@@ -9004,6 +9070,9 @@ impl TxPlayerApp {
         if settings_actions.import_autoeq {
             self.import_autoeq_dialog();
         }
+        if settings_actions.import_wav_ir {
+            self.import_wav_ir_dialog();
+        }
         if let Some(lin) = settings_actions.linear_vol_changed {
             self.audio.set_linear_volume(lin);
         }
@@ -9959,6 +10028,12 @@ impl TxPlayerApp {
                 subtitle: "Parallel pure-Rust Track + Album loudness scan".into(),
                 action: PaletteCommand::ScanCurrentAlbumReplayGain,
             });
+            entries.push(PaletteEntry {
+                category: "RADIO",
+                label: "Start Local Radio from Current Track".into(),
+                subtitle: "100% offline similar-track queue (composer, tags, genre, era)".into(),
+                action: PaletteCommand::StartLocalRadio,
+            });
         }
         for (lbl, preset) in [
             ("Sleep Timer: 15 Minutes (Fade-Out)", SleepTimerPreset::Minutes(15)),
@@ -10192,6 +10267,13 @@ impl TxPlayerApp {
                         if ids.is_empty() { vec![cur.id] } else { ids },
                         is_alb,
                     );
+                }
+            }
+            PaletteCommand::StartLocalRadio => {
+                if let Some(cid) = self.current_id() {
+                    self.start_local_radio(cid);
+                } else {
+                    self.set_status("Play a track first to start Local Radio".into());
                 }
             }
         }
@@ -11493,6 +11575,11 @@ impl TxPlayerApp {
                                             ctx_action = Some(ContextMenuAction::AddToQueue);
                                             ui.close();
                                         }
+                                        if ui.button("Start Local Radio (Similar)").clicked() {
+                                            ctx_action =
+                                                Some(ContextMenuAction::StartLocalRadio(tid));
+                                            ui.close();
+                                        }
                                         ui.menu_button("Add to Playlist", |ui| {
                                             for (pl_id, pl_name) in &playlists_snap {
                                                 if ui.button(pl_name).clicked() {
@@ -12137,6 +12224,7 @@ enum ContextMenuAction {
     PlaySelected,
     PlayNext,
     AddToQueue,
+    StartLocalRadio(u64),
     AddToPlaylist(u64),
     NewPlaylistWithSelected,
     AddToCollection(u64),
@@ -12743,7 +12831,12 @@ fn paint_aligned_quality_badge(
 
     let font = FontId::proportional(9.2);
     let galley = painter.layout_no_wrap(label.clone(), font.clone(), fg);
-    let pill_w = (galley.size().x + 12.0).min(cell.width());
+    let dr_reserve = if track.dr_score.is_some() && cell.width() > 96.0 {
+        38.0
+    } else {
+        0.0
+    };
+    let pill_w = (galley.size().x + 12.0).min((cell.width() - dr_reserve).max(40.0));
     let pill_h = 18.0;
     let pill_rect = Rect::from_min_size(
         pos2(cell.left(), cell.center().y - pill_h * 0.5),
@@ -12755,9 +12848,44 @@ fn paint_aligned_quality_badge(
         pos2(pill_rect.left() + 6.0, pill_rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        font,
+        font.clone(),
         fg,
     );
+
+    // Inline persisted Dynamic Range pill (`DR14`, `DR9`, `DR6`) right beside the format badge
+    if let Some(dr) = track.dr_score {
+        let dr_text = format!("DR{dr}");
+        let dr_fg = if dr >= 11 {
+            palette.hires_gold
+        } else if dr >= 8 {
+            palette.accent_bright
+        } else {
+            palette.danger
+        };
+        let dr_galley = painter.layout_no_wrap(dr_text.clone(), font.clone(), dr_fg);
+        let dr_w = dr_galley.size().x + 9.0;
+        let dr_x = pill_rect.right() + 4.0;
+        if dr_x + dr_w <= cell.right() + 1.0 {
+            let dr_rect = Rect::from_min_size(
+                pos2(dr_x, cell.center().y - pill_h * 0.5),
+                vec2(dr_w, pill_h),
+            );
+            painter.rect_filled(dr_rect, 4.0, dr_fg.gamma_multiply(0.14));
+            painter.rect_stroke(
+                dr_rect,
+                4.0,
+                Stroke::new(1.0, dr_fg.gamma_multiply(0.45)),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                dr_rect.center(),
+                Align2::CENTER_CENTER,
+                dr_text,
+                font,
+                dr_fg,
+            );
+        }
+    }
 }
 
 fn sidebar_compact_action(

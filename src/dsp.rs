@@ -1,9 +1,11 @@
-use std::f64::consts::TAU;
+use std::f64::consts::{FRAC_PI_2, TAU};
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::plugins::{
-    DitherMode, DspConfig, EQ_FREQS_HZ, MAX_PARAMETRIC_BANDS, ParametricBand, ParametricFilterKind,
+    DitherMode, DspConfig, EQ_FREQS_HZ, IrPreset, MAX_PARAMETRIC_BANDS, ParametricBand,
+    ParametricFilterKind,
 };
 
 /// Atomic-generation guarded DSP parameter bridge so UI EQ / AutoEQ Parametric / Crossfeed
@@ -257,6 +259,415 @@ pub fn compute_eq_response_curve(cfg: &DspConfig, points: usize) -> Vec<f32> {
     out
 }
 
+const CONV_BLOCK: usize = 512;
+const CONV_FFT: usize = CONV_BLOCK * 2; // 1024-pt overlap-add
+const CONV_MAX_TAPS: usize = 16_384; // up to 32 partitions
+
+/// In-place radix-2 Cooley-Tukey FFT (`inverse = false` for forward, `true` for inverse with 1/N scaling).
+fn fft_f64(re: &mut [f64], im: &mut [f64], inverse: bool) {
+    let n = re.len();
+    debug_assert!(n.is_power_of_two() && im.len() == n);
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while (j & bit) != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let sign = if inverse { 1.0 } else { -1.0 };
+    let mut len = 2;
+    while len <= n {
+        let half = len >> 1;
+        let ang = sign * TAU / len as f64;
+        let wlen_re = ang.cos();
+        let wlen_im = ang.sin();
+        let mut i = 0;
+        while i < n {
+            let mut w_re = 1.0;
+            let mut w_im = 0.0;
+            for k in 0..half {
+                let u_re = re[i + k];
+                let u_im = im[i + k];
+                let v_re = re[i + k + half] * w_re - im[i + k + half] * w_im;
+                let v_im = re[i + k + half] * w_im + im[i + k + half] * w_re;
+                re[i + k] = u_re + v_re;
+                im[i + k] = u_im + v_im;
+                re[i + k + half] = u_re - v_re;
+                im[i + k + half] = u_im - v_im;
+                let next_re = w_re * wlen_re - w_im * wlen_im;
+                w_im = w_re * wlen_im + w_im * wlen_re;
+                w_re = next_re;
+            }
+            i += len;
+        }
+        len <<= 1;
+    }
+    if inverse {
+        let inv_n = 1.0 / n as f64;
+        for (r, i) in re.iter_mut().zip(im.iter_mut()) {
+            *r *= inv_n;
+            *i *= inv_n;
+        }
+    }
+}
+
+/// Pure-Rust `.wav` Impulse Response loader (16/24/32-bit int & 32-bit float PCM, mono or stereo).
+/// Automatically resamples to `target_sr` and caps cleanly to `CONV_MAX_TAPS`.
+pub fn load_wav_ir(path: &Path, target_sr: u32) -> Result<(Vec<f64>, Vec<f64>), String> {
+    let data = std::fs::read(path).map_err(|e| format!("Reading IR file: {e}"))?;
+    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return Err("Not a valid RIFF WAVE (.wav) impulse response file".into());
+    }
+    let mut pos = 12usize;
+    let mut fmt_tag = 0u16;
+    let mut channels = 0u16;
+    let mut wav_sr = 0u32;
+    let mut bits_per_sample = 0u16;
+    let mut raw_data: Option<&[u8]> = None;
+
+    while pos + 8 <= data.len() {
+        let id = &data[pos..pos + 4];
+        let sz = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body_start = pos + 8;
+        let body_end = body_start.saturating_add(sz).min(data.len());
+        if id == b"fmt " && body_end - body_start >= 16 {
+            let f = &data[body_start..body_end];
+            fmt_tag = u16::from_le_bytes([f[0], f[1]]);
+            channels = u16::from_le_bytes([f[2], f[3]]);
+            wav_sr = u32::from_le_bytes(f[4..8].try_into().unwrap());
+            bits_per_sample = u16::from_le_bytes([f[14], f[15]]);
+            if fmt_tag == 0xFFFE && f.len() >= 26 {
+                fmt_tag = u16::from_le_bytes([f[24], f[25]]);
+            }
+        } else if id == b"data" {
+            raw_data = Some(&data[body_start..body_end]);
+        }
+        pos = body_end + (sz & 1);
+    }
+
+    let raw = raw_data.ok_or_else(|| "WAV IR missing data chunk".to_string())?;
+    if channels == 0 || wav_sr < 8_000 {
+        return Err("Invalid WAV IR format header".into());
+    }
+    let ch = channels as usize;
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    if bytes_per_sample == 0 {
+        return Err("Unsupported WAV IR bit depth".into());
+    }
+    let frame_bytes = ch * bytes_per_sample;
+    let total_frames = raw.len() / frame_bytes;
+    if total_frames == 0 {
+        return Err("WAV IR contains zero audio samples".into());
+    }
+
+    let mut ir_l = Vec::with_capacity(total_frames.min(CONV_MAX_TAPS * 2));
+    let mut ir_r = Vec::with_capacity(total_frames.min(CONV_MAX_TAPS * 2));
+    let read_sample = |slice: &[u8]| -> f64 {
+        match (fmt_tag, bits_per_sample) {
+            (1, 16) => i16::from_le_bytes([slice[0], slice[1]]) as f64 / 32_768.0,
+            (1, 24) => {
+                let v = ((slice[2] as i32) << 24)
+                    | ((slice[1] as i32) << 16)
+                    | ((slice[0] as i32) << 8);
+                (v >> 8) as f64 / 8_388_608.0
+            }
+            (1, 32) => {
+                i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64 / 2_147_483_648.0
+            }
+            (3, 32) => {
+                let f = f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
+                if f.is_finite() { f as f64 } else { 0.0 }
+            }
+            _ => 0.0,
+        }
+    };
+
+    for f_idx in 0..total_frames {
+        let base = f_idx * frame_bytes;
+        let sl = read_sample(&raw[base..base + bytes_per_sample]);
+        let sr = if ch >= 2 {
+            read_sample(&raw[base + bytes_per_sample..base + 2 * bytes_per_sample])
+        } else {
+            sl
+        };
+        ir_l.push(sl);
+        ir_r.push(sr);
+        if ir_l.len() >= CONV_MAX_TAPS * 2 {
+            break;
+        }
+    }
+
+    // Resample linearly if WAV sample rate differs from active DAC sample rate
+    if wav_sr != target_sr {
+        let ratio = target_sr as f64 / wav_sr as f64;
+        let out_len = ((ir_l.len() as f64 * ratio).round() as usize).clamp(1, CONV_MAX_TAPS);
+        let resample = |src: &[f64]| -> Vec<f64> {
+            let mut out = Vec::with_capacity(out_len);
+            let scale = 1.0 / ratio.max(0.25);
+            for i in 0..out_len {
+                let pos_f = i as f64 / ratio;
+                let idx = (pos_f as usize).min(src.len().saturating_sub(1));
+                let frac = pos_f - idx as f64;
+                let next = (idx + 1).min(src.len().saturating_sub(1));
+                out.push((src[idx] * (1.0 - frac) + src[next] * frac) * scale);
+            }
+            out
+        };
+        ir_l = resample(&ir_l);
+        ir_r = resample(&ir_r);
+    } else {
+        ir_l.truncate(CONV_MAX_TAPS);
+        ir_r.truncate(CONV_MAX_TAPS);
+    }
+    Ok((ir_l, ir_r))
+}
+
+/// Generates built-in studio/acoustic stereo impulse responses for instant 1-click convolution.
+fn build_preset_ir(preset: IrPreset, sr: f64) -> Option<(Vec<f64>, Vec<f64>)> {
+    match preset {
+        IrPreset::Off | IrPreset::CustomWav => None,
+        IrPreset::LinearWarmth => {
+            // Subtle warm analog transformer/console FIR (16 taps, smooth HF roll & slight 2nd-tap body)
+            let mut h = vec![0.0_f64; 16];
+            h[0] = 0.86;
+            h[1] = 0.14;
+            h[2] = -0.025;
+            h[3] = 0.025;
+            Some((h.clone(), h))
+        }
+        IrPreset::StudioAir => {
+            // Crisp mastering presence/air FIR (high-frequency micro-lift)
+            let mut h = vec![0.0_f64; 16];
+            h[0] = 1.06;
+            h[1] = -0.05;
+            h[2] = -0.01;
+            Some((h.clone(), h))
+        }
+        IrPreset::ChamberRoom => {
+            // Tasteful acoustic early-reflection studio chamber (~85 ms tail)
+            let len = ((sr * 0.085).round() as usize).clamp(512, 4096);
+            let mut l = vec![0.0_f64; len];
+            let mut r = vec![0.0_f64; len];
+            l[0] = 0.88;
+            r[0] = 0.88;
+            let taps_l = [
+                (0.0085, 0.14),
+                (0.0152, -0.10),
+                (0.0238, 0.075),
+                (0.0361, -0.052),
+                (0.0524, 0.034),
+                (0.0710, -0.018),
+            ];
+            let taps_r = [
+                (0.0097, 0.135),
+                (0.0169, -0.095),
+                (0.0261, 0.072),
+                (0.0389, -0.048),
+                (0.0562, 0.031),
+                (0.0755, -0.016),
+            ];
+            for (sec, amp) in taps_l {
+                let idx = (sec * sr).round() as usize;
+                if idx < len {
+                    l[idx] += amp;
+                }
+            }
+            for (sec, amp) in taps_r {
+                let idx = (sec * sr).round() as usize;
+                if idx < len {
+                    r[idx] += amp;
+                }
+            }
+            Some((l, r))
+        }
+    }
+}
+
+/// Real-time Lock-Free Partitioned FFT Overlap-Add Stereo Convolver (zero audio-thread allocations).
+struct StereoConvolver {
+    num_parts: usize,
+    ir_re_l: Vec<[f64; CONV_FFT]>,
+    ir_im_l: Vec<[f64; CONV_FFT]>,
+    ir_re_r: Vec<[f64; CONV_FFT]>,
+    ir_im_r: Vec<[f64; CONV_FFT]>,
+    fdl_re_l: Vec<[f64; CONV_FFT]>,
+    fdl_im_l: Vec<[f64; CONV_FFT]>,
+    fdl_re_r: Vec<[f64; CONV_FFT]>,
+    fdl_im_r: Vec<[f64; CONV_FFT]>,
+    fdl_pos: usize,
+    in_l: [f64; CONV_BLOCK],
+    in_r: [f64; CONV_BLOCK],
+    out_l: [f64; CONV_BLOCK],
+    out_r: [f64; CONV_BLOCK],
+    overlap_l: [f64; CONV_BLOCK],
+    overlap_r: [f64; CONV_BLOCK],
+    dry_delay_l: [f64; CONV_BLOCK],
+    dry_delay_r: [f64; CONV_BLOCK],
+    cursor: usize,
+    work_re: [f64; CONV_FFT],
+    work_im: [f64; CONV_FFT],
+}
+
+impl StereoConvolver {
+    fn from_ir(ir_l: &[f64], ir_r: &[f64]) -> Self {
+        let len = ir_l.len().max(ir_r.len()).clamp(1, CONV_MAX_TAPS);
+        let num_parts = len.div_ceil(CONV_BLOCK);
+        let mut ir_re_l = vec![[0.0; CONV_FFT]; num_parts];
+        let mut ir_im_l = vec![[0.0; CONV_FFT]; num_parts];
+        let mut ir_re_r = vec![[0.0; CONV_FFT]; num_parts];
+        let mut ir_im_r = vec![[0.0; CONV_FFT]; num_parts];
+
+        for p in 0..num_parts {
+            let start = p * CONV_BLOCK;
+            for i in 0..CONV_BLOCK {
+                if start + i < ir_l.len() {
+                    ir_re_l[p][i] = ir_l[start + i];
+                }
+                if start + i < ir_r.len() {
+                    ir_re_r[p][i] = ir_r[start + i];
+                }
+            }
+            fft_f64(&mut ir_re_l[p], &mut ir_im_l[p], false);
+            fft_f64(&mut ir_re_r[p], &mut ir_im_r[p], false);
+        }
+
+        Self {
+            num_parts,
+            ir_re_l,
+            ir_im_l,
+            ir_re_r,
+            ir_im_r,
+            fdl_re_l: vec![[0.0; CONV_FFT]; num_parts],
+            fdl_im_l: vec![[0.0; CONV_FFT]; num_parts],
+            fdl_re_r: vec![[0.0; CONV_FFT]; num_parts],
+            fdl_im_r: vec![[0.0; CONV_FFT]; num_parts],
+            fdl_pos: 0,
+            in_l: [0.0; CONV_BLOCK],
+            in_r: [0.0; CONV_BLOCK],
+            out_l: [0.0; CONV_BLOCK],
+            out_r: [0.0; CONV_BLOCK],
+            overlap_l: [0.0; CONV_BLOCK],
+            overlap_r: [0.0; CONV_BLOCK],
+            dry_delay_l: [0.0; CONV_BLOCK],
+            dry_delay_r: [0.0; CONV_BLOCK],
+            cursor: 0,
+            work_re: [0.0; CONV_FFT],
+            work_im: [0.0; CONV_FFT],
+        }
+    }
+
+    fn reset(&mut self) {
+        for p in 0..self.num_parts {
+            self.fdl_re_l[p].fill(0.0);
+            self.fdl_im_l[p].fill(0.0);
+            self.fdl_re_r[p].fill(0.0);
+            self.fdl_im_r[p].fill(0.0);
+        }
+        self.fdl_pos = 0;
+        self.in_l.fill(0.0);
+        self.in_r.fill(0.0);
+        self.out_l.fill(0.0);
+        self.out_r.fill(0.0);
+        self.overlap_l.fill(0.0);
+        self.overlap_r.fill(0.0);
+        self.dry_delay_l.fill(0.0);
+        self.dry_delay_r.fill(0.0);
+        self.cursor = 0;
+    }
+
+    #[inline(always)]
+    fn process_stereo(&mut self, l: f64, r: f64, wet: f64, gain: f64) -> (f64, f64) {
+        let dry_l = self.dry_delay_l[self.cursor];
+        let dry_r = self.dry_delay_r[self.cursor];
+        let wet_l = self.out_l[self.cursor] * gain;
+        let wet_r = self.out_r[self.cursor] * gain;
+
+        self.in_l[self.cursor] = l;
+        self.in_r[self.cursor] = r;
+        self.dry_delay_l[self.cursor] = l;
+        self.dry_delay_r[self.cursor] = r;
+        self.cursor += 1;
+
+        if self.cursor >= CONV_BLOCK {
+            self.cursor = 0;
+            self.process_block();
+        }
+
+        let inv = 1.0 - wet;
+        (dry_l * inv + wet_l * wet, dry_r * inv + wet_r * wet)
+    }
+
+    fn process_block(&mut self) {
+        // Transform Left input block into current FDL slot
+        self.fdl_re_l[self.fdl_pos][..CONV_BLOCK].copy_from_slice(&self.in_l);
+        self.fdl_re_l[self.fdl_pos][CONV_BLOCK..].fill(0.0);
+        self.fdl_im_l[self.fdl_pos].fill(0.0);
+        fft_f64(
+            &mut self.fdl_re_l[self.fdl_pos],
+            &mut self.fdl_im_l[self.fdl_pos],
+            false,
+        );
+
+        // Convolve Left across all partitions
+        self.work_re.fill(0.0);
+        self.work_im.fill(0.0);
+        for p in 0..self.num_parts {
+            let slot = (self.fdl_pos + self.num_parts - p) % self.num_parts;
+            let xr = &self.fdl_re_l[slot];
+            let xi = &self.fdl_im_l[slot];
+            let hr = &self.ir_re_l[p];
+            let hi = &self.ir_im_l[p];
+            for k in 0..CONV_FFT {
+                self.work_re[k] += xr[k] * hr[k] - xi[k] * hi[k];
+                self.work_im[k] += xr[k] * hi[k] + xi[k] * hr[k];
+            }
+        }
+        fft_f64(&mut self.work_re, &mut self.work_im, true);
+        for i in 0..CONV_BLOCK {
+            self.out_l[i] = self.work_re[i] + self.overlap_l[i];
+            self.overlap_l[i] = self.work_re[CONV_BLOCK + i];
+        }
+
+        // Transform Right input block into current FDL slot
+        self.fdl_re_r[self.fdl_pos][..CONV_BLOCK].copy_from_slice(&self.in_r);
+        self.fdl_re_r[self.fdl_pos][CONV_BLOCK..].fill(0.0);
+        self.fdl_im_r[self.fdl_pos].fill(0.0);
+        fft_f64(
+            &mut self.fdl_re_r[self.fdl_pos],
+            &mut self.fdl_im_r[self.fdl_pos],
+            false,
+        );
+
+        // Convolve Right across all partitions
+        self.work_re.fill(0.0);
+        self.work_im.fill(0.0);
+        for p in 0..self.num_parts {
+            let slot = (self.fdl_pos + self.num_parts - p) % self.num_parts;
+            let xr = &self.fdl_re_r[slot];
+            let xi = &self.fdl_im_r[slot];
+            let hr = &self.ir_re_r[p];
+            let hi = &self.ir_im_r[p];
+            for k in 0..CONV_FFT {
+                self.work_re[k] += xr[k] * hr[k] - xi[k] * hi[k];
+                self.work_im[k] += xr[k] * hi[k] + xi[k] * hr[k];
+            }
+        }
+        fft_f64(&mut self.work_re, &mut self.work_im, true);
+        for i in 0..CONV_BLOCK {
+            self.out_r[i] = self.work_re[i] + self.overlap_r[i];
+            self.overlap_r[i] = self.work_re[CONV_BLOCK + i];
+        }
+
+        self.fdl_pos = (self.fdl_pos + 1) % self.num_parts;
+    }
+}
+
 /// Real-time stereo audiophile DSP chain executed inside the audio callback (64-bit f64 internal).
 pub struct RealtimeDsp {
     sample_rate: f64,
@@ -268,6 +679,16 @@ pub struct RealtimeDsp {
     crossfeed_enabled: bool,
     soft_limiter: bool,
     dither: DitherMode,
+    balance_gain_l: f64,
+    balance_gain_r: f64,
+    mono_fold: bool,
+    invert_polarity: bool,
+    swap_channels: bool,
+    ir_enabled: bool,
+    ir_mix: f64,
+    ir_gain: f64,
+    loaded_ir_key: (IrPreset, Option<std::path::PathBuf>),
+    convolver: Option<Box<StereoConvolver>>,
     preamp_gain: f64,
     peq_preamp_gain: f64,
     crossfeed_mix: f64,
@@ -300,6 +721,16 @@ impl RealtimeDsp {
             crossfeed_enabled: false,
             soft_limiter: true,
             dither: DitherMode::Off,
+            balance_gain_l: 1.0,
+            balance_gain_r: 1.0,
+            mono_fold: false,
+            invert_polarity: false,
+            swap_channels: false,
+            ir_enabled: false,
+            ir_mix: 1.0,
+            ir_gain: 1.0,
+            loaded_ir_key: (IrPreset::Off, None),
+            convolver: None,
             preamp_gain: 1.0,
             peq_preamp_gain: 1.0,
             crossfeed_mix: 0.0,
@@ -334,6 +765,41 @@ impl RealtimeDsp {
         self.crossfeed_enabled = snap.crossfeed_enabled;
         self.soft_limiter = snap.soft_limiter;
         self.dither = snap.dither;
+
+        // Constant-power L/R balance (0.0 = unity both channels, -1.0 = full left, +1.0 = full right)
+        let bal = (snap.balance as f64).clamp(-1.0, 1.0);
+        if bal.abs() < 1e-4 {
+            self.balance_gain_l = 1.0;
+            self.balance_gain_r = 1.0;
+        } else if bal > 0.0 {
+            self.balance_gain_l = ((1.0 - bal) * FRAC_PI_2).sin();
+            self.balance_gain_r = 1.0;
+        } else {
+            self.balance_gain_l = 1.0;
+            self.balance_gain_r = ((1.0 + bal) * FRAC_PI_2).sin();
+        }
+        self.mono_fold = snap.mono_fold;
+        self.invert_polarity = snap.invert_polarity;
+        self.swap_channels = snap.swap_channels;
+
+        self.ir_enabled = snap.ir_enabled && snap.ir_preset != IrPreset::Off;
+        self.ir_mix = (snap.ir_mix as f64).clamp(0.0, 1.0);
+        self.ir_gain = 10.0_f64.powf((snap.ir_gain_db as f64).clamp(-12.0, 6.0) / 20.0);
+        let new_ir_key = (snap.ir_preset, snap.ir_path.clone());
+        if new_ir_key != self.loaded_ir_key {
+            self.loaded_ir_key = new_ir_key;
+            self.convolver = match snap.ir_preset {
+                IrPreset::Off => None,
+                IrPreset::CustomWav => snap
+                    .ir_path
+                    .as_deref()
+                    .and_then(|p| load_wav_ir(p, self.sample_rate.round() as u32).ok())
+                    .map(|(l, r)| Box::new(StereoConvolver::from_ir(&l, &r))),
+                builtin => build_preset_ir(builtin, self.sample_rate)
+                    .map(|(l, r)| Box::new(StereoConvolver::from_ir(&l, &r))),
+            };
+        }
+
         self.preamp_gain = 10.0_f64.powf(snap.preamp_db.clamp(-12.0, 12.0) as f64 / 20.0);
         self.peq_preamp_gain = 10.0_f64.powf(snap.peq_preamp_db.clamp(-18.0, 12.0) as f64 / 20.0);
         self.crossfeed_mix = (snap.crossfeed_amount as f64).clamp(0.0, 1.0) * 0.34;
@@ -382,6 +848,9 @@ impl RealtimeDsp {
         self.ns_e2_l = 0.0;
         self.ns_e1_r = 0.0;
         self.ns_e2_r = 0.0;
+        if let Some(ref mut conv) = self.convolver {
+            conv.reset();
+        }
     }
 
     /// Lock-free xorshift64 uniform in [-0.5, 0.5).
@@ -440,6 +909,28 @@ impl RealtimeDsp {
                 l = out_l;
                 r = out_r;
             }
+
+            if self.ir_enabled
+                && self.ir_mix > 1e-4
+                && let Some(ref mut conv) = self.convolver
+            {
+                (l, r) = conv.process_stereo(l, r, self.ir_mix, self.ir_gain);
+            }
+
+            if self.swap_channels {
+                std::mem::swap(&mut l, &mut r);
+            }
+            if self.mono_fold {
+                let m = (l + r) * 0.5;
+                l = m;
+                r = m;
+            }
+            if self.invert_polarity {
+                l = -l;
+                r = -r;
+            }
+            l *= self.balance_gain_l;
+            r *= self.balance_gain_r;
 
             if self.soft_limiter {
                 l = soft_limit(l);
@@ -617,5 +1108,52 @@ mod tests {
             gentle > 0.01 && cmoy > gentle && meier > cmoy && bauer > meier,
             "Expected monotonic crossfeed bleed: gentle={gentle}, cmoy={cmoy}, meier={meier}, bauer={bauer}"
         );
+    }
+
+    #[test]
+    fn partitioned_fft_convolver_reproduces_exact_impulse_response() {
+        // Multi-partition IR (600 taps > 512 CONV_BLOCK) with impulses at tap 0, 17, and 550
+        let mut ir_l = vec![0.0_f64; 600];
+        let mut ir_r = vec![0.0_f64; 600];
+        ir_l[0] = 0.75;
+        ir_l[17] = -0.25;
+        ir_l[550] = 0.40;
+        ir_r[0] = 0.50;
+        ir_r[550] = -0.30;
+
+        let mut conv = StereoConvolver::from_ir(&ir_l, &ir_r);
+        let mut out_l = Vec::new();
+        let mut out_r = Vec::new();
+        for i in 0..(CONV_BLOCK * 3) {
+            let x = if i == 0 { 1.0 } else { 0.0 };
+            let (yl, yr) = conv.process_stereo(x, x, 1.0, 1.0);
+            out_l.push(yl);
+            out_r.push(yr);
+        }
+        // Overlap-add latency is exactly CONV_BLOCK samples (512)
+        assert!((out_l[CONV_BLOCK] - 0.75).abs() < 1e-9);
+        assert!((out_l[CONV_BLOCK + 17] - (-0.25)).abs() < 1e-9);
+        assert!((out_l[CONV_BLOCK + 550] - 0.40).abs() < 1e-9);
+        assert!((out_r[CONV_BLOCK] - 0.50).abs() < 1e-9);
+        assert!((out_r[CONV_BLOCK + 550] - (-0.30)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mastering_console_polarity_mono_swap_and_balance() {
+        let cfg = DspConfig {
+            enabled: true,
+            eq_enabled: false,
+            soft_limiter: false,
+            swap_channels: true,
+            invert_polarity: true,
+            balance: 1.0, // full right -> left attenuated to 0
+            ..Default::default()
+        };
+        let shared = SharedDspParams::new(&cfg);
+        let mut dsp = RealtimeDsp::new(48_000, &shared);
+        let (l, r) = dsp.process_stereo(0.4, -0.2);
+        // After swap: (-0.2, 0.4) -> invert: (0.2, -0.4) -> balance +1.0: (0.0, -0.4)
+        assert!(l.abs() < 1e-5, "Expected left muted at +100% balance, got {l}");
+        assert!((r - (-0.4)).abs() < 1e-5, "Expected inverted swapped right = -0.4, got {r}");
     }
 }

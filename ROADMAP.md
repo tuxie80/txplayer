@@ -91,3 +91,11 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
 - [x] **Persistent Album Collector Liner Notes & DB Average DR Badge:** Write & save permanent pressing/edition/listening notes on any album right inside the Album Hero header, paired with an instant persisted **`DR`** badge.
 - [x] **SACD `.iso` Disc Inspector UI:** 1-click `Inspect SACD .iso…` inside Library Database & Insights probing Scarlet Book Master TOC metadata.
 - [x] **Supercharged `Cmd/Ctrl+K` Command Palette:** Instant keyboard jump to any Collection, Smart View, Library Insights, Duplicate Auditor, Sleep Timer, Bookmark drop, or Current Album TrueHz/ReplayGain scan.
+
+---
+
+## Wave 9 — Studio Mastering DSP & Collector Intelligence (`v1.8.0` Completed)
+- [x] **Real-Time Partitioned FFT Stereo Convolution Engine (`.wav` IR + Built-In Acoustic Presets):** Lock-free pure-Rust 64-bit overlap-add partitioned FFT stereo convolver (`512`-sample blocks, up to `16,384` taps) with built-in acoustic presets (`Analog Warmth`, `Intimate Chamber`, `Mastering Air`), custom stereo/mono `.wav` Impulse Response loader (16/24/32-bit int & float PCM with automatic sample-rate resampling), Wet/Dry Mix, and IR Gain trim — strictly bypassed in Bit-Perfect mode.
+- [x] **Studio Mastering Console (`L/R Balance`, `Mono Fold-Down`, `Ø Polarity Invert`, `L ↔ R Swap`):** Constant-power stereo balance with double-click center reset plus instant mastering check switches directly in **Settings → Audio & DSP**.
+- [x] **100% Local "Similar Radio" Queue Generator:** Zero-cloud Roon-Radio-style similarity ranker combining Composer, Genre, Artist, shared `#Custom Tags`, Record Label, Era/Decade, Hi-Res Tier, and Rating with same-album diversity scoring — accessible from Track right-click menus and `Cmd/Ctrl+K` Command Palette.
+- [x] **Inline Persisted `DR` Quality Pill:** Displays color-coded Dynamic Range badges (`DR14` gold, `DR9` accent, `DR6` warning) right beside the Track Table Format pill whenever persisted audit scores exist in the Library Database.

@@ -902,6 +902,98 @@ impl Library {
         }
     }
 
+    /// 100% local Roon-Radio-style similarity queue generator seeded from `seed_id`.
+    /// Ranks library tracks by shared Composer, Genre, Artist, Label, `#Custom Tags`, Era, Quality Tier & Rating.
+    pub fn build_similar_radio(&self, seed_id: u64, limit: usize) -> Vec<u64> {
+        let Some(seed) = self.get_by_id(seed_id) else {
+            return Vec::new();
+        };
+        let seed_comp = seed.composer.as_deref().map(|s| s.trim().to_lowercase());
+        let seed_genre = seed.genre.as_deref().map(|s| s.trim().to_lowercase());
+        let seed_artist = seed.artist.trim().to_lowercase();
+        let seed_album = seed.album.trim().to_lowercase();
+        let seed_label = seed.label.as_deref().map(|s| s.trim().to_lowercase());
+        let seed_decade: Option<u32> = seed
+            .year
+            .as_deref()
+            .and_then(|y| y.trim().get(..4).and_then(|s| s.parse::<u32>().ok()))
+            .map(|y| y / 10);
+        let seed_tags: HashSet<String> = seed
+            .custom_tags
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+        let seed_hires = seed.is_hires();
+
+        let mut scored: Vec<(i32, u64)> = Vec::new();
+        for tr in &self.tracks {
+            if tr.id == seed_id {
+                continue;
+            }
+            let mut score = 0i32;
+            if let (Some(sc), Some(tc)) = (
+                seed_comp.as_deref().filter(|s| !s.is_empty()),
+                tr.composer.as_deref().map(|s| s.trim().to_lowercase()),
+            ) && sc == tc
+            {
+                score += 50;
+            }
+            if let (Some(sg), Some(tg)) = (
+                seed_genre.as_deref().filter(|s| !s.is_empty()),
+                tr.genre.as_deref().map(|s| s.trim().to_lowercase()),
+            ) && sg == tg
+            {
+                score += 25;
+            }
+            if !seed_artist.is_empty() && tr.artist.trim().to_lowercase() == seed_artist {
+                score += 22;
+            }
+            if let (Some(sl), Some(tl)) = (
+                seed_label.as_deref().filter(|s| !s.is_empty()),
+                tr.label.as_deref().map(|s| s.trim().to_lowercase()),
+            ) && sl == tl
+            {
+                score += 14;
+            }
+            if !seed_tags.is_empty() {
+                for tag in &tr.custom_tags {
+                    if seed_tags.contains(&tag.to_lowercase()) {
+                        score += 18;
+                    }
+                }
+            }
+            if let Some(sd) = seed_decade
+                && let Some(td) = tr
+                    .year
+                    .as_deref()
+                    .and_then(|y| y.trim().get(..4).and_then(|s| s.parse::<u32>().ok()))
+                    .map(|y| y / 10)
+                && sd == td
+            {
+                score += 10;
+            }
+            if tr.is_hires() == seed_hires {
+                score += 6;
+            }
+            score += (tr.rating as i32) * 3;
+            // Gentle diversity penalty for same album so radio flows naturally across recordings
+            if !seed_album.is_empty() && tr.album.trim().to_lowercase() == seed_album {
+                score -= 10;
+            }
+            if score > 0 {
+                scored.push((score, tr.id));
+            }
+        }
+        // Deterministic-tie-broken descending sort with slight rotation so top matches lead
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut out = Vec::with_capacity(limit.min(scored.len()) + 1);
+        out.push(seed_id);
+        for (_, id) in scored.into_iter().take(limit.saturating_sub(1)) {
+            out.push(id);
+        }
+        out
+    }
+
     /// Detects duplicate tracks by normalized `(title, artist, album)` and ranks copies by audio fidelity
     /// (`DSD / Hi-Res > Lossless > Lossy`, sample rate, bit depth, DR score) so users can keep the master.
     pub fn find_duplicate_groups(&self) -> Vec<DuplicateGroup> {
@@ -1624,6 +1716,34 @@ mod tests {
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].best_track_id, 20);
         assert_eq!(dups[0].track_ids, vec![20, 10]);
+    }
+
+    #[test]
+    fn local_radio_ranks_same_composer_and_tags_highest() {
+        let mut lib = Library::default();
+        let mut seed = sample_track(1, "/m/chopin1.flac", "Nocturne 1");
+        seed.composer = Some("Frédéric Chopin".into());
+        seed.custom_tags = vec!["solo-piano".into()];
+        let mut best_match = sample_track(2, "/m/chopin2.flac", "Ballade 1");
+        best_match.album = "Ballades".into();
+        best_match.composer = Some("Frédéric Chopin".into());
+        best_match.custom_tags = vec!["solo-piano".into()];
+        let mut distant = sample_track(3, "/m/rock.mp3", "Thunder");
+        distant.artist = "Rock Band".into();
+        distant.album = "Live".into();
+        distant.composer = None;
+        distant.genre = Some("Rock".into());
+        distant.label = None;
+        distant.codec = "MP3".into();
+        distant.sample_rate = Some(44_100);
+        distant.bit_depth = None;
+        lib.upsert(seed);
+        lib.upsert(best_match);
+        lib.upsert(distant);
+
+        let radio = lib.build_similar_radio(1, 10);
+        assert_eq!(radio[0], 1);
+        assert_eq!(radio[1], 2);
     }
 
     #[test]

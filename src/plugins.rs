@@ -672,6 +672,28 @@ pub struct DspConfig {
     pub direct_volume_lock: bool,
     #[serde(default)]
     pub dsd_dop: bool,
+    // Mastering Console Controls (64-bit f64)
+    #[serde(default)]
+    pub balance: f32, // -1.0 (Full Left) .. 0.0 (Center) .. +1.0 (Full Right)
+    #[serde(default)]
+    pub mono_fold: bool,
+    #[serde(default)]
+    pub invert_polarity: bool,
+    #[serde(default)]
+    pub swap_channels: bool,
+    // Real-Time Partitioned FFT Convolution Engine (Room / Headphone / Studio .wav IR)
+    #[serde(default)]
+    pub ir_enabled: bool,
+    #[serde(default)]
+    pub ir_preset: IrPreset,
+    #[serde(default)]
+    pub ir_path: Option<PathBuf>,
+    #[serde(default)]
+    pub ir_name: String,
+    #[serde(default = "default_ir_mix")]
+    pub ir_mix: f32,
+    #[serde(default)]
+    pub ir_gain_db: f32,
     // Parametric EQ / AutoEQ Headphone Correction Engine
     #[serde(default)]
     pub peq_enabled: bool,
@@ -697,6 +719,40 @@ fn default_eq_bands() -> [f32; 10] {
 
 fn default_crossfeed() -> f32 {
     0.35
+}
+
+/// Built-in & custom `.wav` Impulse Response convolution presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IrPreset {
+    #[default]
+    Off,
+    LinearWarmth,
+    ChamberRoom,
+    StudioAir,
+    CustomWav,
+}
+
+impl IrPreset {
+    pub const BUILTIN: &'static [IrPreset] = &[
+        IrPreset::Off,
+        IrPreset::LinearWarmth,
+        IrPreset::ChamberRoom,
+        IrPreset::StudioAir,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            IrPreset::Off => "Off",
+            IrPreset::LinearWarmth => "Analog Warmth",
+            IrPreset::ChamberRoom => "Intimate Chamber",
+            IrPreset::StudioAir => "Mastering Air",
+            IrPreset::CustomWav => "Custom .WAV IR",
+        }
+    }
+}
+
+fn default_ir_mix() -> f32 {
+    1.0
 }
 
 fn default_crossfeed_cutoff() -> f32 {
@@ -730,6 +786,16 @@ impl Default for DspConfig {
             resampler_quality: ResamplerQuality::LinearPhaseStudio,
             direct_volume_lock: false,
             dsd_dop: false,
+            balance: 0.0,
+            mono_fold: false,
+            invert_polarity: false,
+            swap_channels: false,
+            ir_enabled: false,
+            ir_preset: IrPreset::Off,
+            ir_path: None,
+            ir_name: String::new(),
+            ir_mix: default_ir_mix(),
+            ir_gain_db: 0.0,
             peq_enabled: false,
             peq_profile_name: String::new(),
             peq_preamp_db: 0.0,
@@ -779,7 +845,16 @@ impl DspConfig {
             && (self.preamp_db.abs() > 0.05
                 || self.eq_bands_db.iter().any(|g| g.abs() > 0.05));
         let peq_active = self.peq_enabled && self.peq_bands.iter().any(|b| b.enabled);
-        eq_active || peq_active || (self.crossfeed_enabled && self.crossfeed_amount > 0.01)
+        let console_active = self.balance.abs() > 0.01
+            || self.mono_fold
+            || self.invert_polarity
+            || self.swap_channels;
+        let ir_active = self.ir_enabled && self.ir_preset != IrPreset::Off && self.ir_mix > 0.01;
+        eq_active
+            || peq_active
+            || (self.crossfeed_enabled && self.crossfeed_amount > 0.01)
+            || console_active
+            || ir_active
     }
 
     pub fn summary(&self) -> String {
@@ -795,6 +870,14 @@ impl DspConfig {
                     self.peq_profile_name.clone()
                 };
                 parts.push(lbl);
+            }
+            if self.ir_enabled && self.ir_preset != IrPreset::Off && self.ir_mix > 0.01 {
+                let ir_lbl = if self.ir_preset == IrPreset::CustomWav && !self.ir_name.is_empty() {
+                    format!("IR ({})", self.ir_name)
+                } else {
+                    format!("IR ({})", self.ir_preset.name())
+                };
+                parts.push(ir_lbl);
             }
             if self.eq_enabled
                 && (self.preamp_db.abs() > 0.05
@@ -812,6 +895,18 @@ impl DspConfig {
                         self.crossfeed_amount * 100.0
                     ));
                 }
+            }
+            if self.mono_fold {
+                parts.push("Mono".into());
+            }
+            if self.invert_polarity {
+                parts.push("Ø Invert".into());
+            }
+            if self.swap_channels {
+                parts.push("L↔R".into());
+            }
+            if self.balance.abs() > 0.02 {
+                parts.push(format!("Bal {:+.0}%", self.balance * 100.0));
             }
             if self.soft_limiter {
                 parts.push("Limiter".into());

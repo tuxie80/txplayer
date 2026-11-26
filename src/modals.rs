@@ -20,7 +20,7 @@ use crate::platform::{
     AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, open_file_with_default_app, reveal_in_file_manager,
 };
 use crate::plugins::{
-    CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EqPreset, HeadphonePreset,
+    CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EqPreset, HeadphonePreset, IrPreset,
     OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
     TagProviderConfig, ToolHealth, TrackBookmark,
 };
@@ -716,6 +716,7 @@ pub struct SettingsViewActions {
     pub prune_missing: bool,
     pub import_playlist: bool,
     pub import_autoeq: bool,
+    pub import_wav_ir: bool,
     pub save_device_profile: Option<String>,
     pub clear_device_profile: Option<String>,
 }
@@ -758,6 +759,7 @@ pub fn show_settings_window(
         prune_missing: false,
         import_playlist: false,
         import_autoeq: false,
+        import_wav_ir: false,
         save_device_profile: None,
         clear_device_profile: None,
     };
@@ -1652,6 +1654,216 @@ pub fn show_settings_window(
                                 }
                                 actions.dsp_changed = true;
                             }
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("Convolution IR:")
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                        );
+                        let active_ir = if plugins.dsp.bit_perfect_mode || !plugins.dsp.ir_enabled {
+                            IrPreset::Off
+                        } else {
+                            plugins.dsp.ir_preset
+                        };
+                        for &ir in IrPreset::BUILTIN {
+                            if pill_button(
+                                ui,
+                                ir.name(),
+                                None,
+                                if active_ir == ir {
+                                    PillStyle::Active
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                palette,
+                            )
+                            .on_hover_text(
+                                "Real-time 64-bit partitioned FFT stereo convolution engine",
+                            )
+                            .clicked()
+                            {
+                                plugins.dsp.ir_preset = ir;
+                                plugins.dsp.ir_enabled = ir != IrPreset::Off;
+                                if ir != IrPreset::Off {
+                                    plugins.dsp.enabled = true;
+                                    plugins.dsp.bit_perfect_mode = false;
+                                }
+                                actions.dsp_changed = true;
+                            }
+                        }
+                        if pill_button(
+                            ui,
+                            if active_ir == IrPreset::CustomWav && !plugins.dsp.ir_name.is_empty() {
+                                "Change .WAV IR…"
+                            } else {
+                                "Load .WAV IR…"
+                            },
+                            Some(Icon::Folder),
+                            if active_ir == IrPreset::CustomWav {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            palette,
+                        )
+                        .on_hover_text(
+                            "Load a stereo or mono .wav Impulse Response (room correction, speaker/headphone EQ, or hall reverb)",
+                        )
+                        .clicked()
+                        {
+                            actions.import_wav_ir = true;
+                        }
+                        if active_ir == IrPreset::CustomWav && !plugins.dsp.ir_name.is_empty() {
+                            ui.label(
+                                RichText::new(format!("Active: {}", plugins.dsp.ir_name))
+                                    .size(10.0)
+                                    .color(palette.hires_gold),
+                            );
+                        }
+                    });
+                    if plugins.dsp.ir_enabled
+                        && plugins.dsp.ir_preset != IrPreset::Off
+                        && !plugins.dsp.bit_perfect_mode
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "IR Wet/Dry: {:.0}%",
+                                    plugins.dsp.ir_mix * 100.0
+                                ))
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                            );
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut plugins.dsp.ir_mix, 0.0..=1.0)
+                                        .step_by(0.05)
+                                        .show_value(false),
+                                )
+                                .changed()
+                            {
+                                actions.dsp_changed = true;
+                            }
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "IR Gain: {:+.1} dB",
+                                    plugins.dsp.ir_gain_db
+                                ))
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                            );
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut plugins.dsp.ir_gain_db, -12.0..=6.0)
+                                        .step_by(0.5)
+                                        .show_value(false),
+                                )
+                                .changed()
+                            {
+                                actions.dsp_changed = true;
+                            }
+                        });
+                    }
+
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let bal = plugins.dsp.balance;
+                        let bal_lbl = if bal.abs() < 0.015 {
+                            "Balance: Center".to_string()
+                        } else if bal < 0.0 {
+                            format!("Balance: L {:.0}%", -bal * 100.0)
+                        } else {
+                            format!("Balance: R {:.0}%", bal * 100.0)
+                        };
+                        ui.label(
+                            RichText::new(bal_lbl)
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                        );
+                        let bal_resp = ui
+                            .add(
+                                egui::Slider::new(&mut plugins.dsp.balance, -1.0..=1.0)
+                                    .step_by(0.05)
+                                    .show_value(false),
+                            )
+                            .on_hover_text("Constant-power L/R balance (double-click to center)");
+                        if bal_resp.double_clicked() {
+                            plugins.dsp.balance = 0.0;
+                            actions.dsp_changed = true;
+                        } else if bal_resp.changed() {
+                            if plugins.dsp.balance.abs() >= 0.01 {
+                                plugins.dsp.enabled = true;
+                                plugins.dsp.bit_perfect_mode = false;
+                            }
+                            actions.dsp_changed = true;
+                        }
+                        if pill_button(
+                            ui,
+                            "Mono",
+                            None,
+                            if plugins.dsp.mono_fold && !plugins.dsp.bit_perfect_mode {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            palette,
+                        )
+                        .on_hover_text("Fold stereo to mono (0.5*(L+R)) for phase & mix checks")
+                        .clicked()
+                        {
+                            plugins.dsp.mono_fold = !plugins.dsp.mono_fold;
+                            if plugins.dsp.mono_fold {
+                                plugins.dsp.enabled = true;
+                                plugins.dsp.bit_perfect_mode = false;
+                            }
+                            actions.dsp_changed = true;
+                        }
+                        if pill_button(
+                            ui,
+                            "Ø Polarity",
+                            None,
+                            if plugins.dsp.invert_polarity && !plugins.dsp.bit_perfect_mode {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            palette,
+                        )
+                        .on_hover_text("Invert absolute phase (180° polarity flip)")
+                        .clicked()
+                        {
+                            plugins.dsp.invert_polarity = !plugins.dsp.invert_polarity;
+                            if plugins.dsp.invert_polarity {
+                                plugins.dsp.enabled = true;
+                                plugins.dsp.bit_perfect_mode = false;
+                            }
+                            actions.dsp_changed = true;
+                        }
+                        if pill_button(
+                            ui,
+                            "L ↔ R",
+                            None,
+                            if plugins.dsp.swap_channels && !plugins.dsp.bit_perfect_mode {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            palette,
+                        )
+                        .on_hover_text("Swap Left and Right stereo channels")
+                        .clicked()
+                        {
+                            plugins.dsp.swap_channels = !plugins.dsp.swap_channels;
+                            if plugins.dsp.swap_channels {
+                                plugins.dsp.enabled = true;
+                                plugins.dsp.bit_perfect_mode = false;
+                            }
+                            actions.dsp_changed = true;
                         }
                     });
 
@@ -5895,6 +6107,7 @@ pub enum PaletteCommand {
     SetSleepTimer(SleepTimerPreset),
     VerifyCurrentAlbumAudit,
     ScanCurrentAlbumReplayGain,
+    StartLocalRadio,
 }
 
 pub struct PaletteEntry {
