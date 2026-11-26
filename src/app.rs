@@ -466,6 +466,7 @@ pub struct TxPlayerApp {
     pending_playlist_tracks: Vec<u64>,
     inspect_track_id: Option<u64>,
     inspect_file_size: Option<(u64, Option<u64>)>,
+    file_size_cache: HashMap<PathBuf, Option<u64>>,
     tag_editor: TagEditorState,
     command_palette: CommandPaletteState,
 
@@ -659,6 +660,7 @@ impl TxPlayerApp {
             pending_playlist_tracks: Vec::new(),
             inspect_track_id: None,
             inspect_file_size: None,
+            file_size_cache: HashMap::new(),
             tag_editor: TagEditorState::new(),
             command_palette: CommandPaletteState::default(),
             dialog_sender,
@@ -2503,8 +2505,7 @@ impl TxPlayerApp {
     fn classic_top_bar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         let p = self.palette;
         let avail_w = ui.available_width();
-        let (bar_rect, bar_resp) =
-            ui.allocate_exact_size(vec2(avail_w, 32.0), Sense::click_and_drag());
+        let (bar_rect, _) = ui.allocate_exact_size(vec2(avail_w, 32.0), Sense::hover());
 
         let is_focused = ctx.input(|i| i.focused);
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -2700,6 +2701,17 @@ impl TxPlayerApp {
         );
         let pin_clicked = paint_topbar_pin_btn(ui, pin_r, "cls_pin", self.always_on_top, &p);
 
+        // Non-overlapping drag zone between traffic lights and right-hand cluster
+        let drag_rect = Rect::from_min_max(
+            pos2(zoom_rect.right() + 6.0, bar_rect.top()),
+            pos2((cmd_r.left() - 6.0).max(zoom_rect.right() + 24.0), bar_rect.bottom()),
+        );
+        let drag_resp = ui.interact(
+            drag_rect,
+            ui.scope_id().with("cls_titlebar_drag"),
+            Sense::click_and_drag(),
+        );
+
         if close_resp.clicked() {
             if self.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -2737,9 +2749,9 @@ impl TxPlayerApp {
             } else {
                 "Window unpinned".into()
             });
-        } else if bar_resp.double_clicked() {
+        } else if drag_resp.double_clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
-        } else if bar_resp.drag_started_by(egui::PointerButton::Primary) {
+        } else if should_begin_window_drag(ctx, &drag_resp) {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
     }
@@ -4498,13 +4510,8 @@ impl TxPlayerApp {
                 self.select_row_click(row_idx, track.id, tracks, cmd, shift);
             }
 
-            // Show parent directory on hover so user immediately sees where the track plays from
-            let dir_hint = track
-                .path
-                .parent()
-                .map(|d| d.display().to_string())
-                .unwrap_or_else(|| track.path.display().to_string());
-            let body_resp = body_resp.on_hover_text(format!("Folder: {dir_hint}"));
+            // Stylish theme-matched Track Hover Card (complete tags + audio spec + folder & file)
+            let body_resp = body_resp.on_hover_ui(|ui| self.paint_track_hover_card(ui, track));
 
             // Right-click Floating Context Menu directly at mouse pointer
             let tid = track.id;
@@ -5149,10 +5156,7 @@ impl TxPlayerApp {
 
                         let cover_resp = self.cover_clickable(ui, track, 54.0);
                         if cover_resp
-                            .on_hover_text(format!(
-                                "{}\nFolder: {}\nClick to open Track Info",
-                                track.title, parent_dir
-                            ))
+                            .on_hover_ui(|ui| self.paint_track_hover_card(ui, track))
                             .clicked()
                         {
                             self.inspect_track_id = Some(track.id);
@@ -5175,10 +5179,7 @@ impl TxPlayerApp {
                                     .selectable(false)
                                     .truncate(),
                                 );
-                                title_resp.on_hover_text(format!(
-                                    "{} — {}\nFolder: {}",
-                                    track.title, track.artist, parent_dir
-                                ));
+                                title_resp.on_hover_ui(|ui| self.paint_track_hover_card(ui, track));
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(format!("{} · {}", track.artist, track.album))
@@ -6379,8 +6380,7 @@ impl TxPlayerApp {
         let avail_w = ui.available_width();
 
         // 1) Unified 32px custom draggable top bar (exact height & visual grammar as Classic Mode)
-        let (hdr_rect, hdr_resp) =
-            ui.allocate_exact_size(vec2(avail_w, 32.0), Sense::click_and_drag());
+        let (hdr_rect, _) = ui.allocate_exact_size(vec2(avail_w, 32.0), Sense::hover());
         let is_focused = ctx.input(|i| i.focused);
         ui.painter().rect_filled(hdr_rect, 0.0, p.sidebar);
         ui.painter().line_segment(
@@ -6525,6 +6525,16 @@ impl TxPlayerApp {
             &p,
         );
 
+        let hdr_drag_rect = Rect::from_min_max(
+            pos2(min_r.right() + 6.0, hdr_rect.top()),
+            pos2((btn_list_r.left() - 6.0).max(min_r.right() + 24.0), hdr_rect.bottom()),
+        );
+        let hdr_resp = ui.interact(
+            hdr_drag_rect,
+            ui.scope_id().with("cmp_titlebar_drag"),
+            Sense::click_and_drag(),
+        );
+
         if close_resp.clicked() {
             if self.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -6554,7 +6564,7 @@ impl TxPlayerApp {
         } else if classic_clicked || hdr_resp.double_clicked() {
             self.set_compact_mode(ctx, false);
             return;
-        } else if hdr_resp.drag_started_by(egui::PointerButton::Primary) {
+        } else if should_begin_window_drag(ctx, &hdr_resp) {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
@@ -6566,15 +6576,9 @@ impl TxPlayerApp {
                 // Row A: Crisp Cover + 2-Line Title / Artist·Album + Favorite Heart
                 ui.horizontal(|ui| {
                     if let Some(ref t) = track {
-                        let parent_dir = t
-                            .path
-                            .parent()
-                            .map(|d| d.display().to_string())
-                            .unwrap_or_else(|| t.path.display().to_string());
-
                         if self
                             .cover_clickable(ui, t, 42.0)
-                            .on_hover_text(format!("{}\nFolder: {parent_dir}\nClick for Track Info", t.title))
+                            .on_hover_ui(|ui| self.paint_track_hover_card(ui, t))
                             .clicked()
                         {
                             self.inspect_track_id = Some(t.id);
@@ -6597,10 +6601,7 @@ impl TxPlayerApp {
                                     .selectable(false)
                                     .truncate(),
                                 )
-                                .on_hover_text(format!(
-                                    "{} — {}\nFolder: {parent_dir}",
-                                    t.title, t.artist
-                                ));
+                                .on_hover_ui(|ui| self.paint_track_hover_card(ui, t));
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(format!("{} · {}", t.artist, t.album))
@@ -7236,12 +7237,8 @@ impl TxPlayerApp {
                                         if is_current { p.accent } else { p.muted },
                                     );
 
-                                    let dir_hint = tr
-                                        .path
-                                        .parent()
-                                        .map(|d| d.display().to_string())
-                                        .unwrap_or_else(|| tr.path.display().to_string());
-                                    let resp = resp.on_hover_text(format!("Folder: {dir_hint}"));
+                                    let resp =
+                                        resp.on_hover_ui(|ui| self.paint_track_hover_card(ui, tr));
 
                                     if resp.double_clicked() {
                                         play_target = Some((row_idx, tr.id));
@@ -7388,6 +7385,271 @@ impl TxPlayerApp {
                     .show(ui, |ui| {
                         ui.label(RichText::new(message.as_str()).size(11.0).color(p.text));
                     });
+            });
+    }
+
+    fn cached_file_size(&mut self, path: &Path) -> Option<u64> {
+        if let Some(&cached) = self.file_size_cache.get(path) {
+            return cached;
+        }
+        let sz = std::fs::metadata(path).ok().map(|m| m.len());
+        if self.file_size_cache.len() > 2048 {
+            self.file_size_cache.clear();
+        }
+        self.file_size_cache.insert(path.to_path_buf(), sz);
+        sz
+    }
+
+    /// Stylish, theme-aligned Track Hover Card displaying album art, quality tier, complete tag
+    /// metadata, audio specs, ReplayGain/CUE info, and recessed folder + file readout.
+    fn paint_track_hover_card(&mut self, ui: &mut Ui, track: &Track) {
+        let p = self.palette;
+        let card_w = (ui.ctx().content_rect().width() - 32.0).clamp(260.0, 356.0);
+        ui.set_min_width(card_w.min(312.0));
+        ui.set_max_width(card_w);
+
+        let is_fav = self.store.active().favorites.contains(&track.id);
+        let file_size = self.cached_file_size(&track.path);
+
+        // 1) Top tier accent hairline (Gold for Hi-Res, Accent for Lossless, Subtle border for Standard)
+        let tier_col = match track.quality_tier() {
+            QualityTier::HiRes => p.hires_gold,
+            QualityTier::Lossless => p.accent,
+            QualityTier::Standard => p.border_strong,
+        };
+        let (bar_r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 2.5), Sense::hover());
+        ui.painter().rect_filled(bar_r, 1.25, tier_col);
+        ui.add_space(6.0);
+
+        // 2) Hero header: crisp 54px cover + Title / Artist / Album + Quality pill + Duration + Rating
+        ui.horizontal(|ui| {
+            let (art_rect, _) = ui.allocate_exact_size(Vec2::splat(54.0), Sense::hover());
+            self.paint_cover_in_rect(ui, track, art_rect);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.style_mut().spacing.item_spacing.y = 2.0;
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&track.title)
+                            .size(13.0)
+                            .strong()
+                            .color(p.text),
+                    )
+                    .wrap(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&track.artist)
+                            .size(11.0)
+                            .strong()
+                            .color(p.accent),
+                    )
+                    .wrap(),
+                );
+                let album_line = match &track.year {
+                    Some(y) if !y.is_empty() => format!("{}  ({y})", track.album),
+                    _ => track.album.clone(),
+                };
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(album_line)
+                            .size(10.5)
+                            .color(p.text_secondary),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.style_mut().spacing.item_spacing.x = 6.0;
+                    let (badge_r, _) = ui.allocate_exact_size(vec2(126.0, 18.0), Sense::hover());
+                    paint_aligned_quality_badge(ui.painter(), badge_r, track, &p);
+                    ui.label(
+                        RichText::new(format_duration(track.duration))
+                            .size(10.0)
+                            .monospace()
+                            .color(p.muted),
+                    );
+                    if track.rating > 0 {
+                        ui.label(
+                            RichText::new("★".repeat(track.rating as usize))
+                                .size(10.0)
+                                .color(p.hires_gold),
+                        );
+                    }
+                    if is_fav {
+                        let (hr, _) = ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                        icons::paint_icon(ui.painter(), hr, Icon::HeartFilled, p.accent);
+                    }
+                });
+            });
+        });
+
+        ui.add_space(6.0);
+        let sep1 = ui.available_rect_before_wrap();
+        ui.painter().line_segment(
+            [pos2(sep1.left(), sep1.top()), pos2(sep1.right(), sep1.top())],
+            Stroke::new(1.0, p.border),
+        );
+        ui.add_space(6.0);
+
+        // 3) Structured Tag & Audio Technical Grid
+        let mut audio_parts = vec![track.codec.clone()];
+        if let Some(b) = track.bit_depth {
+            audio_parts.push(format!("{b}-bit"));
+        }
+        if let Some(sr) = track.sample_rate {
+            audio_parts.push(format_sample_rate(sr));
+        }
+        if let Some(ch) = track.channels {
+            audio_parts.push(match ch {
+                1 => "Mono".into(),
+                2 => "Stereo".into(),
+                n => format!("{n}ch"),
+            });
+        }
+        if let Some(kbps) = track.nominal_bitrate {
+            audio_parts.push(format!("{kbps} kbps"));
+        }
+
+        egui::Grid::new(ui.scope_id().with("track_hover_tag_grid"))
+            .num_columns(2)
+            .spacing([12.0, 3.0])
+            .show(ui, |ui| {
+                let mut row = |k: &str, v: String, mono: bool| {
+                    ui.label(RichText::new(k).size(9.0).strong().color(p.faint));
+                    let rt = if mono {
+                        RichText::new(v)
+                            .size(10.0)
+                            .monospace()
+                            .color(p.text_secondary)
+                    } else {
+                        RichText::new(v).size(10.5).color(p.text_secondary)
+                    };
+                    ui.add(egui::Label::new(rt).wrap());
+                    ui.end_row();
+                };
+
+                if track.track_number.is_some() || track.disc_number.is_some() {
+                    let tr_s = track
+                        .track_number
+                        .map(|n| format!("{n:02}"))
+                        .unwrap_or_else(|| "—".into());
+                    let disc_s = track
+                        .disc_number
+                        .map(|d| format!("  ·  Disc {d}"))
+                        .unwrap_or_default();
+                    row("TRACK", format!("{tr_s}{disc_s}"), true);
+                }
+                if let Some(aa) = &track.album_artist
+                    && !aa.is_empty()
+                    && aa != &track.artist
+                {
+                    row("ALBUM ARTIST", aa.clone(), false);
+                }
+                if let Some(genre) = &track.genre
+                    && !genre.is_empty()
+                {
+                    row("GENRE", genre.clone(), false);
+                }
+                if let Some(year) = &track.year
+                    && !year.is_empty()
+                {
+                    row("YEAR", year.clone(), true);
+                }
+                row("AUDIO", audio_parts.join("  ·  "), true);
+                if track.rg_track_gain_db.is_some() || track.rg_album_gain_db.is_some() {
+                    let rg_t = track
+                        .rg_track_gain_db
+                        .map(|g| format!("Track {g:+.2} dB"))
+                        .unwrap_or_default();
+                    let rg_a = track
+                        .rg_album_gain_db
+                        .map(|g| format!("Album {g:+.2} dB"))
+                        .unwrap_or_default();
+                    let joined = [rg_t, rg_a]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("  ·  ");
+                    row("REPLAYGAIN", joined, true);
+                }
+                if let Some(cs) = track.cue_start {
+                    let end_s = track
+                        .cue_end
+                        .map(|e| format_duration(Some(e)))
+                        .unwrap_or_else(|| "End".into());
+                    row("CUE SPAN", format!("{} → {end_s}", format_duration(Some(cs))), true);
+                }
+                if track.play_count > 0 || track.lyrics.is_some() {
+                    let mut extras = Vec::new();
+                    if track.play_count > 0 {
+                        extras.push(format!("Played {}×", track.play_count));
+                    }
+                    if track.lyrics.is_some() {
+                        extras.push("Embedded Lyrics".into());
+                    }
+                    row("INFO", extras.join("  ·  "), false);
+                }
+            });
+
+        ui.add_space(6.0);
+
+        // 4) Recessed File & Directory Card Footer
+        let file_name = track
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Unknown file");
+        let dir_path = track
+            .path
+            .parent()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| track.path.display().to_string());
+
+        Frame::new()
+            .fill(p.background)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(6.0)
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing.y = 3.0;
+                ui.horizontal(|ui| {
+                    let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                    icons::paint_icon(ui.painter(), ic_r, Icon::Library, p.accent);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(file_name)
+                                .size(10.0)
+                                .monospace()
+                                .strong()
+                                .color(p.text),
+                        )
+                        .wrap(),
+                    );
+                    if let Some(bytes) = file_size {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(crate::metadata::format_file_size(bytes))
+                                    .size(9.0)
+                                    .monospace()
+                                    .color(p.muted),
+                            );
+                        });
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let (fr, _) = ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                    icons::paint_icon(ui.painter(), fr, Icon::Folder, p.faint);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(dir_path)
+                                .size(9.0)
+                                .monospace()
+                                .color(p.muted),
+                        )
+                        .wrap(),
+                    );
+                });
             });
     }
 
@@ -7665,6 +7927,29 @@ impl Drop for TxPlayerApp {
             auto_watch_folders: self.auto_watch_folders,
         }
         .save();
+    }
+}
+
+/// Platform-accurate window drag trigger:
+/// - On macOS, `winit`'s `drag_window()` forwards `NSApp.currentEvent` to
+///   `[NSWindow performWindowDragWithEvent:]`, which requires an `NSLeftMouseDown` event.
+///   Sending `StartDrag` after egui's drag threshold (during `NSLeftMouseDragged`) causes
+///   AppKit to log `Warning: Window move completed without beginning` when the drag finishes.
+///   Triggering on the primary press frame (excluding double-clicks) passes `NSLeftMouseDown` cleanly.
+/// - On Windows/Linux, `drag_started_by(Primary)` avoids intercepting clicks/double-clicks.
+fn should_begin_window_drag(ctx: &egui::Context, resp: &egui::Response) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        resp.is_pointer_button_down_on()
+            && ctx.input(|i| {
+                i.pointer.primary_pressed()
+                    && !i.pointer.button_double_clicked(egui::PointerButton::Primary)
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = ctx;
+        resp.drag_started_by(egui::PointerButton::Primary)
     }
 }
 

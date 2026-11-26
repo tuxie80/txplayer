@@ -360,6 +360,9 @@ pub fn apply(context: &egui::Context, theme_id: ThemeId) -> Palette {
     style.visuals.panel_fill = p.background;
     style.visuals.window_fill = p.panel;
     style.visuals.window_stroke = Stroke::new(1.2, p.border_strong);
+    style.visuals.window_corner_radius = egui::CornerRadius::same(8);
+    style.visuals.menu_corner_radius = egui::CornerRadius::same(8);
+    style.interaction.tooltip_delay = 0.30;
     style.visuals.extreme_bg_color = p.background;
     style.visuals.faint_bg_color = p.surface;
     style.visuals.code_bg_color = p.surface;
