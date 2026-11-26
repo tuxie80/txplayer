@@ -439,8 +439,12 @@ pub struct VisualizerState {
     /// 88-key concert piano energies (0.0..1.0)
     piano_levels: [f32; PIANO_KEYS],
     piano_peaks: [f32; PIANO_KEYS],
-    /// Hammer-strike onset flash per key (0.0..1.0, decays swiftly)
+    /// Hammer-strike onset flux per key (internal detection metadata)
     piano_onsets: [f32; PIANO_KEYS],
+    /// Hysteresis finger-engagement state per key (prevents mid-threshold blinking/chatter)
+    piano_key_held: [bool; PIANO_KEYS],
+    /// Physical weighted key-travel depression depth (0.0 = at rest, 1.0 = fully pressed)
+    piano_key_press: [f32; PIANO_KEYS],
     /// Rolling history for 88-key Piano Roll waterfall
     piano_roll: VecDeque<[u8; PIANO_KEYS]>,
     roll_accum_dt: f32,
@@ -499,6 +503,8 @@ impl VisualizerState {
             piano_levels: [0.0; PIANO_KEYS],
             piano_peaks: [0.0; PIANO_KEYS],
             piano_onsets: [0.0; PIANO_KEYS],
+            piano_key_held: [false; PIANO_KEYS],
+            piano_key_press: [0.0; PIANO_KEYS],
             piano_roll: VecDeque::with_capacity(PIANO_ROLL_HISTORY + 2),
             roll_accum_dt: 0.0,
             detected_harmony: String::new(),
@@ -521,6 +527,8 @@ impl VisualizerState {
         self.piano_levels = [0.0; PIANO_KEYS];
         self.piano_peaks = [0.0; PIANO_KEYS];
         self.piano_onsets = [0.0; PIANO_KEYS];
+        self.piano_key_held = [false; PIANO_KEYS];
+        self.piano_key_press = [0.0; PIANO_KEYS];
         self.piano_roll.clear();
         self.detected_harmony.clear();
         self.spectrum_bands = [0.0; SPECTRUM_BANDS];
@@ -553,6 +561,8 @@ impl VisualizerState {
             self.piano_levels[k] = lvl;
             self.piano_peaks[k] = (lvl + 0.08).min(1.0);
             self.piano_onsets[k] = onset;
+            self.piano_key_held[k] = true;
+            self.piano_key_press[k] = ((lvl - 0.15) / 0.75).clamp(0.55, 1.0);
         }
         self.detected_harmony = detect_chord_and_notes(&self.piano_levels);
         // Populate Piano Roll waterfall history too
@@ -581,9 +591,14 @@ impl VisualizerState {
         let t_start = Instant::now();
         let dt = dt.clamp(0.004, 0.1);
         let decay = (-dt * 7.2).exp();
-        let piano_decay = (-dt * 5.6).exp();
-        let onset_decay = (-dt * 12.5).exp();
-        let peak_drop = dt * 0.28;
+        // Smooth musical response for piano harmonics (less frantic flicker)
+        let piano_attack = 1.0 - (-dt * 18.0).exp();
+        let piano_decay = (-dt * 4.4).exp();
+        let onset_decay = (-dt * 10.0).exp();
+        // Weighted physical keybed travel: responsive finger downstroke, graceful damper return
+        let key_down = 1.0 - (-dt * 24.0).exp();
+        let key_up = 1.0 - (-dt * 8.5).exp();
+        let peak_drop = dt * 0.24;
         let attack = 1.0 - (-dt * 34.0).exp();
 
         if paused {
@@ -597,6 +612,11 @@ impl VisualizerState {
             for i in 0..PIANO_KEYS {
                 self.piano_levels[i] *= piano_decay;
                 self.piano_onsets[i] *= onset_decay;
+                self.piano_key_held[i] = false;
+                self.piano_key_press[i] *= 1.0 - key_up;
+                if self.piano_key_press[i] < 0.005 {
+                    self.piano_key_press[i] = 0.0;
+                }
                 self.piano_peaks[i] = (self.piano_peaks[i] - peak_drop).max(self.piano_levels[i]);
             }
             for i in 0..SPECTRUM_BANDS {
@@ -678,7 +698,7 @@ impl VisualizerState {
                         self.piano_levels[key] = smooth(
                             self.piano_levels[key],
                             target_levels[key],
-                            attack,
+                            piano_attack,
                             piano_decay,
                         );
                         self.piano_onsets[key] =
@@ -724,7 +744,7 @@ impl VisualizerState {
                         let tilt = 0.85 + key_frac * 1.45;
                         let level = amp_to_meter(raw * tilt, self.sensitivity);
                         let prev = self.piano_levels[key];
-                        self.piano_levels[key] = smooth(prev, level, attack, piano_decay);
+                        self.piano_levels[key] = smooth(prev, level, piano_attack, piano_decay);
                         self.piano_onsets[key] =
                             (self.piano_onsets[key] * onset_decay).max((level - prev).max(0.0) * 1.5);
                         if self.piano_levels[key] >= self.piano_peaks[key] {
@@ -735,6 +755,31 @@ impl VisualizerState {
                         }
                     }
                 }
+            }
+
+            // Schmitt-trigger hysteresis + weighted key-travel physics:
+            // Eliminates threshold chatter/blinking so keys depress smoothly like real fingers!
+            for key in 0..PIANO_KEYS {
+                let lvl = self.piano_levels[key];
+                if self.piano_key_held[key] {
+                    if lvl < 0.17 {
+                        self.piano_key_held[key] = false;
+                    }
+                } else if lvl >= 0.30 {
+                    self.piano_key_held[key] = true;
+                }
+                let target_press = if self.piano_key_held[key] {
+                    ((lvl - 0.15) / 0.70).clamp(0.48, 1.0)
+                } else {
+                    0.0
+                };
+                let cur = self.piano_key_press[key];
+                self.piano_key_press[key] = if target_press > cur {
+                    cur + (target_press - cur) * key_down
+                } else {
+                    let next = cur + (target_press - cur) * key_up;
+                    if next < 0.005 { 0.0 } else { next }
+                };
             }
 
             if plugin_cfg.show_chord_readout {
@@ -749,7 +794,8 @@ impl VisualizerState {
                 self.roll_accum_dt = 0.0;
                 let mut slice = [0u8; PIANO_KEYS];
                 for (k, slot) in slice.iter_mut().enumerate() {
-                    let v = (self.piano_levels[k] * 0.8 + self.piano_onsets[k] * 0.35).clamp(0.0, 1.0);
+                    let v = (self.piano_key_press[k] * 0.72 + self.piano_levels[k] * 0.28)
+                        .clamp(0.0, 1.0);
                     *slot = (v * 255.0).round() as u8;
                 }
                 if self.piano_roll.len() >= PIANO_ROLL_HISTORY {
@@ -988,7 +1034,13 @@ impl VisualizerState {
         palette: &Palette,
         show_chord: bool,
     ) {
-        let keybed_h = if inner.height() >= 70.0 { 26.0 } else { 0.0 };
+        let keybed_h = if inner.height() >= 76.0 {
+            36.0
+        } else if inner.height() >= 58.0 {
+            28.0
+        } else {
+            0.0
+        };
         let roll_rect = Rect::from_min_max(
             inner.min,
             pos2(
@@ -1075,8 +1127,10 @@ impl VisualizerState {
         with_keyboard: bool,
         show_chord: bool,
     ) {
-        let keybed_h = if with_keyboard && inner.height() >= 70.0 {
-            26.0
+        let keybed_h = if with_keyboard && inner.height() >= 76.0 {
+            36.0
+        } else if with_keyboard && inner.height() >= 58.0 {
+            28.0
         } else {
             0.0
         };
@@ -1128,9 +1182,9 @@ impl VisualizerState {
         let bottom_y = snap_px(ribbon_rect.bottom(), ppp);
         let max_h = (ribbon_rect.height() - 4.0).max(4.0);
 
-        // Crisp per-key vertical harmonic bars (zero jagged tent-polyline or neon aura blur!)
+        // Smooth per-key harmonic columns (no onset strobe flashing!)
         for i in 0..n {
-            let val = (self.piano_levels[i] + self.piano_onsets[i] * 0.16).clamp(0.0, 1.0);
+            let val = self.piano_levels[i].clamp(0.0, 1.0);
             let cx = if with_keyboard {
                 key_center_x(i, ribbon_rect)
             } else {
@@ -1138,35 +1192,34 @@ impl VisualizerState {
             };
             let x0 = snap_px(cx - col_w * 0.5, ppp);
 
-            if val > 0.02 {
-                let onset = self.piano_onsets[i];
+            if val > 0.03 {
                 let top_y = snap_px(bottom_y - val * max_h, ppp);
-                let col = studio_meter_color(val, onset, palette);
+                let col = lerp_color(palette.accent, palette.accent_bright, (val * 0.7).clamp(0.0, 1.0));
                 let stem = Rect::from_min_max(pos2(x0, top_y), pos2(x0 + col_w, bottom_y));
-                let body_alpha = if palette.is_light { 165 } else { 145 };
+                let body_alpha = if palette.is_light { 145 } else { 125 };
                 painter.rect_filled(
                     stem,
-                    0.8,
+                    1.0,
                     Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), body_alpha),
                 );
-                let cap_h = (bottom_y - top_y).min(snap_px(2.5, ppp));
+                let cap_h = (bottom_y - top_y).min(snap_px(2.0, ppp));
                 let cap = Rect::from_min_max(pos2(x0, top_y), pos2(x0 + col_w, top_y + cap_h));
                 painter.rect_filled(cap, 0.5, col);
             }
 
             let pk = self.piano_peaks[i];
-            if pk > 0.08 && with_keyboard {
+            if pk > 0.14 && with_keyboard {
                 let py = snap_px(bottom_y - pk * max_h, ppp);
                 let tick_h = snap_px(1.5, ppp);
-                let tick_col = if pk > 0.85 {
-                    palette.hires_gold
-                } else {
-                    palette.accent_bright
-                };
                 painter.rect_filled(
                     Rect::from_min_max(pos2(x0, py), pos2(x0 + col_w, py + tick_h)),
                     0.0,
-                    tick_col,
+                    Color32::from_rgba_unmultiplied(
+                        palette.accent_bright.r(),
+                        palette.accent_bright.g(),
+                        palette.accent_bright.b(),
+                        170,
+                    ),
                 );
             }
         }
@@ -1184,104 +1237,190 @@ impl VisualizerState {
         }
     }
 
+    /// Tactile 88-key Concert Grand Piano keybed with physical 3D key depression, front lip shortening,
+    /// recessed hinge/neighbor shadows, and calm fingertip touch feedback (zero blinking strobe effects!).
     fn paint_keybed(&self, painter: &egui::Painter, kb_rect: Rect, palette: &Palette) {
         let white_count = 52;
         let white_w = kb_rect.width() / white_count as f32;
 
-        // Pass 1: 52 white keys with hammer-strike depression & glow
+        // Subtle recessed keybed trough + top felt rail
+        painter.rect_filled(kb_rect, 3.0, palette.sidebar);
+        let felt_r = Rect::from_min_max(kb_rect.min, pos2(kb_rect.right(), kb_rect.top() + 2.0));
+        painter.rect_filled(
+            felt_r,
+            0.0,
+            Color32::from_rgba_unmultiplied(palette.danger.r(), palette.danger.g(), palette.danger.b(), 85),
+        );
+
+        let key_top = kb_rect.top() + 1.5;
+        let key_bot = kb_rect.bottom();
+
+        // Pass 1: 52 white keys with smooth physical depression & 3D front lip
         let mut w_idx = 0usize;
         for k in 0..PIANO_KEYS {
             let midi = 21 + k;
             if !is_black_key(midi) {
                 let x0 = kb_rect.left() + w_idx as f32 * white_w;
-                let energy = self.piano_levels[k];
-                let onset = self.piano_onsets[k];
-                let pressed_drop = if energy > 0.25 {
-                    ((energy - 0.25) * 2.4).min(2.0)
-                } else {
-                    0.0
-                };
+                let press = self.piano_key_press[k].clamp(0.0, 1.0);
+                // Key visibly sinks into keybed as finger presses it down
+                let drop = press * 3.0;
+                let lip_h = (3.6 * (1.0 - press * 0.82)).max(0.6);
+
                 let key_r = Rect::from_min_max(
-                    pos2(x0 + 0.5, kb_rect.top() + pressed_drop),
-                    pos2(x0 + white_w - 0.5, kb_rect.bottom()),
+                    pos2(x0 + 0.5, key_top + drop),
+                    pos2(x0 + white_w - 0.5, key_bot),
                 );
-                let base = if palette.is_light {
-                    Color32::from_rgb(248, 244, 234)
+                let face_r = Rect::from_min_max(
+                    key_r.min,
+                    pos2(key_r.right(), (key_r.bottom() - lip_h).max(key_r.top() + 2.0)),
+                );
+                let lip_r = Rect::from_min_max(pos2(key_r.left(), face_r.bottom()), key_r.max);
+
+                let base_face = if palette.is_light {
+                    Color32::from_rgb(248, 245, 238)
                 } else {
-                    Color32::from_rgb(38, 43, 47)
+                    Color32::from_rgb(48, 55, 60)
                 };
-                let lit = studio_meter_color(energy, onset, palette);
-                let mix_t = (energy * 1.15 + onset * 0.55).clamp(0.0, 1.0);
-                let fill = lerp_color(base, lit, mix_t);
-                painter.rect_filled(key_r, 1.5, fill);
-                // Crisp subtle C1..C8 key labels right at the foot of each C key so alignment is 100% unmistakable
+                let base_lip = if palette.is_light {
+                    Color32::from_rgb(214, 208, 196)
+                } else {
+                    Color32::from_rgb(28, 33, 37)
+                };
+                // Calm single-hue depression tint (never bright strobe/blinking!)
+                let face_fill = lerp_color(base_face, palette.accent, press * 0.56);
+                let lip_fill = lerp_color(base_lip, palette.accent, press * 0.32);
+
+                painter.rect_filled(key_r, 1.8, lip_fill);
+                painter.rect_filled(face_r, 1.5, face_fill);
+
+                // Recessed depth shadow at the top & sides when key sinks below its neighbors
+                if press > 0.04 {
+                    let sh_alpha = (press * if palette.is_light { 58.0 } else { 95.0 }).round() as u8;
+                    let shadow_col = Color32::from_rgba_unmultiplied(0, 0, 0, sh_alpha);
+                    let top_sh = Rect::from_min_max(
+                        face_r.min,
+                        pos2(face_r.right(), (face_r.top() + 3.0 + press * 3.0).min(face_r.bottom())),
+                    );
+                    painter.rect_filled(top_sh, 0.0, shadow_col);
+                    // Side depth shadows cast by adjacent unpressed white keys
+                    let side_w = (white_w * 0.14).clamp(1.0, 2.0);
+                    painter.rect_filled(
+                        Rect::from_min_max(face_r.min, pos2(face_r.left() + side_w, face_r.bottom())),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(0, 0, 0, sh_alpha / 2),
+                    );
+                    painter.rect_filled(
+                        Rect::from_min_max(pos2(face_r.right() - side_w, face_r.top()), face_r.max),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(0, 0, 0, sh_alpha / 2),
+                    );
+
+                    // Subtle soft fingertip touch pad positioned cleanly above C1..C8 key labels
+                    if white_w >= 8.0 && press > 0.15 {
+                        let pad_r = (white_w * 0.21).clamp(1.8, 3.6);
+                        let min_clearance = if midi.is_multiple_of(12) { 12.5 } else { 5.5 };
+                        let pad_y = (face_r.bottom() - (face_r.height() * 0.32).max(min_clearance))
+                            .max(face_r.top() + pad_r + 3.0);
+                        let pad_alpha = ((press - 0.15) * 155.0).clamp(0.0, 135.0) as u8;
+                        painter.circle_filled(
+                            pos2(face_r.center().x, pad_y),
+                            pad_r,
+                            Color32::from_rgba_unmultiplied(
+                                palette.accent_bright.r(),
+                                palette.accent_bright.g(),
+                                palette.accent_bright.b(),
+                                pad_alpha,
+                            ),
+                        );
+                    }
+                }
+
+                // Subtle C1..C8 labels anchored cleanly at bottom of each C key
                 if midi.is_multiple_of(12) && white_w >= 11.0 {
                     let octave = (midi / 12) as isize - 1;
                     painter.text(
-                        pos2(key_r.center().x, key_r.bottom() - 2.0),
+                        pos2(face_r.center().x, face_r.bottom() - 1.5),
                         Align2::CENTER_BOTTOM,
                         format!("C{octave}"),
                         FontId::monospace(7.5),
-                        if mix_t > 0.45 {
+                        if press > 0.45 {
                             palette.on_accent()
                         } else {
                             palette.faint
                         },
                     );
                 }
+
+                let _ = lip_r;
                 painter.rect_stroke(
                     key_r,
-                    1.5,
-                    Stroke::new(
-                        if onset > 0.25 { 1.0 } else { 0.6 },
-                        if onset > 0.25 {
-                            palette.hires_gold
-                        } else {
-                            palette.border
-                        },
-                    ),
+                    1.8,
+                    Stroke::new(0.6, palette.border),
                     StrokeKind::Inside,
                 );
                 w_idx += 1;
             }
         }
 
-        // Pass 2: 36 black keys nestled between white keys
+        // Pass 2: 36 black keys with 3D front bevel & smooth press travel
         let mut prev_white = 0usize;
         for k in 0..PIANO_KEYS {
             let midi = 21 + k;
             if is_black_key(midi) {
                 let cx = kb_rect.left() + prev_white as f32 * white_w;
-                let bw = (white_w * 0.62).max(2.2);
-                let energy = self.piano_levels[k];
-                let onset = self.piano_onsets[k];
-                let pressed_drop = if energy > 0.25 {
-                    ((energy - 0.25) * 2.0).min(1.6)
-                } else {
-                    0.0
-                };
-                let bh = kb_rect.height() * 0.60;
+                let bw = (white_w * 0.62).max(2.4);
+                let press = self.piano_key_press[k].clamp(0.0, 1.0);
+                let drop = press * 2.2;
+                let bh = (kb_rect.height() * 0.58).max(12.0);
+                let bevel_h = (2.6 * (1.0 - press * 0.78)).max(0.5);
+
                 let key_r = Rect::from_min_max(
-                    pos2(cx - bw * 0.5, kb_rect.top() + pressed_drop),
-                    pos2(cx + bw * 0.5, kb_rect.top() + bh + pressed_drop * 0.5),
+                    pos2(cx - bw * 0.5, key_top + drop),
+                    pos2(cx + bw * 0.5, key_top + bh + drop * 0.4),
                 );
-                let base = if palette.is_light {
-                    Color32::from_rgb(44, 52, 56)
+                let top_face = Rect::from_min_max(
+                    pos2(key_r.left() + 0.8, key_r.top()),
+                    pos2(key_r.right() - 0.8, (key_r.bottom() - bevel_h).max(key_r.top() + 2.0)),
+                );
+
+                let ebony_body = if palette.is_light {
+                    Color32::from_rgb(30, 36, 40)
                 } else {
-                    Color32::from_rgb(13, 15, 17)
+                    Color32::from_rgb(10, 13, 16)
                 };
-                let lit = studio_meter_color(energy, onset, palette);
-                let mix_t = (energy * 1.25 + onset * 0.6).clamp(0.0, 1.0);
-                let fill = lerp_color(base, lit, mix_t);
-                painter.rect_filled(key_r, 1.0, fill);
-                if onset > 0.25 {
-                    painter.rect_stroke(
-                        key_r,
-                        1.0,
-                        Stroke::new(0.8, palette.hires_gold),
-                        StrokeKind::Inside,
+                let ebony_top = if palette.is_light {
+                    Color32::from_rgb(56, 64, 70)
+                } else {
+                    Color32::from_rgb(24, 29, 34)
+                };
+
+                let body_fill = lerp_color(ebony_body, palette.accent, press * 0.36);
+                let face_fill = lerp_color(ebony_top, palette.accent_bright, press * 0.62);
+
+                painter.rect_filled(key_r, 1.2, body_fill);
+                painter.rect_filled(top_face, 1.0, face_fill);
+
+                if press > 0.15 && bw >= 5.0 {
+                    let dot_r = (bw * 0.24).clamp(1.4, 2.8);
+                    let dot_alpha = ((press - 0.15) * 175.0).clamp(0.0, 155.0) as u8;
+                    painter.circle_filled(
+                        pos2(top_face.center().x, top_face.bottom() - 3.5),
+                        dot_r,
+                        Color32::from_rgba_unmultiplied(
+                            palette.on_accent().r(),
+                            palette.on_accent().g(),
+                            palette.on_accent().b(),
+                            dot_alpha,
+                        ),
                     );
                 }
+
+                painter.rect_stroke(
+                    key_r,
+                    1.2,
+                    Stroke::new(0.6, Color32::from_rgba_unmultiplied(0, 0, 0, 140)),
+                    StrokeKind::Inside,
+                );
             } else {
                 prev_white += 1;
             }

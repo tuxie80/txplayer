@@ -3597,7 +3597,7 @@ impl TxPlayerApp {
         ui.add_space(6.0);
 
         let vis_reserve = if self.show_concert_visualizer {
-            self.concert_visualizer_height + 34.0
+            self.concert_visualizer_height + 44.0
         } else {
             0.0
         };
