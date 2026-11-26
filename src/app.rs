@@ -25,10 +25,12 @@ use crate::metadata::{
 };
 use crate::modals::{
     self, CommandPaletteState, FolderModalAction, PaletteCommand, PaletteEntry, PillStyle,
-    ProgressBarStyle, RowDensity, SettingsTab, SignalPathDisplay, TagEditorState, TagWorkerEvent,
-    TrackInfoAction, pill_button,
+    ProgressBarStyle, RowDensity, SettingsTab, SignalPathDisplay, SleepTimerPreset, TagEditorState,
+    TagWorkerEvent, TrackInfoAction, pill_button,
 };
-use crate::platform::{FILE_MANAGER_NAME, MOD_SHORT, reveal_in_file_manager};
+use crate::platform::{
+    FILE_MANAGER_NAME, MOD_SHORT, open_file_with_default_app, reveal_in_file_manager,
+};
 use crate::playlist_io::{export_playlist, import_playlist_paths};
 use crate::plugins::{
     DeviceProfile, EqPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode,
@@ -53,27 +55,143 @@ pub const FULL_HEIGHT: f32 = 860.0;
 pub const FULL_MIN_WIDTH: f32 = 900.0;
 pub const FULL_MIN_HEIGHT: f32 = 540.0;
 
-pub fn startup_window_layout() -> (bool, bool, bool) {
+pub struct StartupWindowLayout {
+    pub init_size: [f32; 2],
+    pub min_size: [f32; 2],
+    pub init_pos: Option<[f32; 2]>,
+}
+
+pub fn startup_window_layout() -> StartupWindowLayout {
     let args: Vec<String> = std::env::args().collect();
-    if args
-        .iter()
-        .any(|a| a == "--full" || a == "--vis-mode" || a == "--demo-piano")
-    {
-        return (false, true, false);
-    }
-    if args.iter().any(|a| a == "--compact") {
-        let prefs = Preferences::load();
-        return (true, true, prefs.show_concert_visualizer);
-    }
-    if args.iter().any(|a| a == "--open-settings") {
-        return (false, true, false);
-    }
     let prefs = Preferences::load();
-    (
-        prefs.compact_mode,
-        prefs.compact_show_playlist,
-        prefs.show_concert_visualizer,
-    )
+    let force_full = args
+        .iter()
+        .any(|a| a == "--full" || a == "--vis-mode" || a == "--demo-piano" || a == "--open-settings");
+    let force_compact = args.iter().any(|a| a == "--compact");
+    let compact_mode = if force_full {
+        false
+    } else if force_compact {
+        true
+    } else {
+        prefs.compact_mode
+    };
+    let (init_size, min_size) = if compact_mode {
+        let default_h = if prefs.compact_show_playlist {
+            COMPACT_EXPANDED_HEIGHT
+        } else {
+            COMPACT_COLLAPSED_HEIGHT
+        } + if prefs.show_concert_visualizer { 62.0 } else { 0.0 };
+        let size = prefs
+            .compact_window_size
+            .filter(|&[w, h]| {
+                w.is_finite()
+                    && h.is_finite()
+                    && w >= COMPACT_MIN_WIDTH
+                    && h >= COMPACT_MIN_HEIGHT
+                    && w <= 1600.0
+                    && h <= 1600.0
+            })
+            .unwrap_or([COMPACT_WIDTH, default_h]);
+        (size, [COMPACT_MIN_WIDTH, COMPACT_MIN_HEIGHT])
+    } else {
+        let size = prefs
+            .full_window_size
+            .filter(|&[w, h]| {
+                w.is_finite()
+                    && h.is_finite()
+                    && w >= FULL_MIN_WIDTH
+                    && h >= FULL_MIN_HEIGHT
+                    && w <= 3840.0
+                    && h <= 2160.0
+            })
+            .unwrap_or([FULL_WIDTH, FULL_HEIGHT]);
+        (size, [FULL_MIN_WIDTH, FULL_MIN_HEIGHT])
+    };
+    let init_pos = if force_full || force_compact {
+        None
+    } else {
+        prefs.window_pos.filter(|&[x, y]| {
+            x.is_finite() && y.is_finite() && (-2400.0..=4000.0).contains(&x) && (-400.0..=2400.0).contains(&y)
+        })
+    };
+    StartupWindowLayout {
+        init_size,
+        min_size,
+        init_pos,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum QualityFilter {
+    #[default]
+    All,
+    HiRes,
+    Dsd,
+    Lossless,
+    TopRated,
+}
+
+impl QualityFilter {
+    const ALL: &'static [QualityFilter] = &[
+        QualityFilter::All,
+        QualityFilter::HiRes,
+        QualityFilter::Dsd,
+        QualityFilter::Lossless,
+        QualityFilter::TopRated,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            QualityFilter::All => "All",
+            QualityFilter::HiRes => "Hi-Res",
+            QualityFilter::Dsd => "DSD",
+            QualityFilter::Lossless => "Lossless",
+            QualityFilter::TopRated => "★★★★+",
+        }
+    }
+
+    fn matches(self, t: &Track) -> bool {
+        match self {
+            QualityFilter::All => true,
+            QualityFilter::HiRes => t.is_hires(),
+            QualityFilter::Dsd => t.codec.starts_with("DSD"),
+            QualityFilter::Lossless => t.is_lossless(),
+            QualityFilter::TopRated => t.rating >= 4,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SleepTimerState {
+    Off,
+    AfterCurrentTrack,
+    AtInstant(Instant),
+}
+
+enum RgScanEvent {
+    Progress(usize, usize),
+    TrackDone {
+        id: u64,
+        track_gain_db: f32,
+        track_peak: f32,
+    },
+    Finished {
+        label: String,
+        album_gain_db: Option<f32>,
+        album_peak: Option<f32>,
+        track_ids: Vec<u64>,
+        ok_count: usize,
+        err_count: usize,
+    },
+}
+
+struct ArtworkGalleryModal {
+    title: String,
+    images: Vec<PathBuf>,
+    pdfs: Vec<PathBuf>,
+    selected_idx: usize,
+    loaded_path: Option<PathBuf>,
+    texture: Option<TextureHandle>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,6 +289,12 @@ struct Preferences {
     sort_mode: SortMode,
     #[serde(default = "default_true")]
     sort_ascending: bool,
+    #[serde(default)]
+    full_window_size: Option<[f32; 2]>,
+    #[serde(default)]
+    compact_window_size: Option<[f32; 2]>,
+    #[serde(default)]
+    window_pos: Option<[f32; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -230,6 +354,9 @@ impl Default for Preferences {
             auto_watch_folders: true,
             sort_mode: SortMode::Artist,
             sort_ascending: true,
+            full_window_size: None,
+            compact_window_size: None,
+            window_pos: None,
         }
     }
 }
@@ -392,6 +519,7 @@ struct VisibleCacheKey {
     folder_filter: Option<PathBuf>,
     album_filter: Option<(String, String)>,
     artist_filter: Option<String>,
+    quality_filter: QualityFilter,
     sort: SortMode,
     sort_ascending: bool,
     search: String,
@@ -428,19 +556,27 @@ pub struct TxPlayerApp {
     folder_filter: Option<PathBuf>,
     album_filter: Option<(String, String)>,
     artist_filter: Option<String>,
+    quality_filter: QualityFilter,
     sort: SortMode,
     sort_ascending: bool,
     search: String,
     focus_search: bool,
 
-    // Playback speed, A-B section loop & synced lyrics
+    // Playback speed, A-B section loop, sleep timer & synced lyrics
     playback_speed: f32,
     loop_a: Option<f64>,
     loop_b: Option<f64>,
+    sleep_timer: SleepTimerState,
+    sleep_pre_fade_vol: Option<f32>,
     show_lyrics: bool,
     cached_lyrics_id: Option<u64>,
     cached_lyrics: Option<Arc<TrackLyrics>>,
     counted_play_id: Option<u64>,
+
+    // Saved window geometry (Compact & Classic sizes + screen position)
+    full_window_size: Option<[f32; 2]>,
+    compact_window_size: Option<[f32; 2]>,
+    window_pos: Option<[f32; 2]>,
 
     // Cached filtered/sorted track table, derived browser views & sidebar stats (zero 60 Hz cloning/sorting!)
     library_rev: u64,
@@ -532,6 +668,10 @@ pub struct TxPlayerApp {
     inspect_track_id: Option<u64>,
     inspect_file_size: Option<(u64, Option<u64>)>,
     album_audit: Option<(String, Vec<u64>)>,
+    album_assets_cache: HashMap<PathBuf, (Vec<PathBuf>, Vec<PathBuf>)>,
+    artwork_gallery: Option<ArtworkGalleryModal>,
+    rg_scan_rx: Option<crossbeam_channel::Receiver<RgScanEvent>>,
+    rg_scan_progress: Option<(usize, usize, String)>,
     file_size_cache: HashMap<PathBuf, Option<u64>>,
     tag_editor: TagEditorState,
     command_palette: CommandPaletteState,
@@ -672,6 +812,7 @@ impl TxPlayerApp {
             folder_filter: None,
             album_filter: None,
             artist_filter: None,
+            quality_filter: QualityFilter::All,
             sort: preferences.sort_mode,
             sort_ascending: preferences.sort_ascending,
             search: String::new(),
@@ -679,10 +820,15 @@ impl TxPlayerApp {
             playback_speed: 1.0,
             loop_a: None,
             loop_b: None,
+            sleep_timer: SleepTimerState::Off,
+            sleep_pre_fade_vol: None,
             show_lyrics: false,
             cached_lyrics_id: None,
             cached_lyrics: None,
             counted_play_id: None,
+            full_window_size: preferences.full_window_size,
+            compact_window_size: preferences.compact_window_size,
+            window_pos: preferences.window_pos,
             library_rev: 1,
             queue_rev: 1,
             visible_cache_key: None,
@@ -759,6 +905,10 @@ impl TxPlayerApp {
             inspect_track_id: None,
             inspect_file_size: None,
             album_audit: None,
+            album_assets_cache: HashMap::new(),
+            artwork_gallery: None,
+            rg_scan_rx: None,
+            rg_scan_progress: None,
             file_size_cache: HashMap::new(),
             tag_editor: TagEditorState::new(),
             command_palette: CommandPaletteState::default(),
@@ -955,6 +1105,7 @@ impl TxPlayerApp {
             folder_filter: self.folder_filter.clone(),
             album_filter: self.album_filter.clone(),
             artist_filter: self.artist_filter.clone(),
+            quality_filter: self.quality_filter,
             sort: self.sort,
             sort_ascending: self.sort_ascending,
             search: self.search.clone(),
@@ -1031,6 +1182,9 @@ impl TxPlayerApp {
                     self.artist_filter
                         .as_ref()
                         .is_none_or(|art| &track.artist == art)
+                })
+                .filter(|track| {
+                    self.album_filter.is_some() || self.quality_filter.matches(track)
                 })
                 .filter(|track| query.is_empty() || track.search_text().contains(&query))
                 .cloned()
@@ -2466,6 +2620,71 @@ impl TxPlayerApp {
             }
         }
 
+        // Batch Parallel EBU R128 ReplayGain scanner responses
+        let mut rg_finished = false;
+        let mut rg_events = Vec::new();
+        if let Some(ref rx) = self.rg_scan_rx {
+            while let Ok(ev) = rx.try_recv() {
+                rg_events.push(ev);
+            }
+        }
+        for ev in rg_events {
+            match ev {
+                RgScanEvent::Progress(done, total) => {
+                    if let Some(ref mut prog) = self.rg_scan_progress {
+                        prog.0 = done;
+                        prog.1 = total;
+                    }
+                }
+                RgScanEvent::TrackDone {
+                    id,
+                    track_gain_db,
+                    track_peak,
+                } => {
+                    if let Some(t) = self.store.active_mut().get_by_id_mut(id) {
+                        t.rg_track_gain_db = Some(track_gain_db);
+                        t.rg_track_peak = Some(track_peak);
+                    }
+                }
+                RgScanEvent::Finished {
+                    label,
+                    album_gain_db,
+                    album_peak,
+                    track_ids,
+                    ok_count,
+                    err_count,
+                } => {
+                    if let (Some(ag), Some(ap)) = (album_gain_db, album_peak) {
+                        for id in track_ids {
+                            if let Some(t) = self.store.active_mut().get_by_id_mut(id) {
+                                t.rg_album_gain_db = Some(ag);
+                                t.rg_album_peak = Some(ap);
+                            }
+                        }
+                    }
+                    self.mark_library_dirty();
+                    self.store.save();
+                    self.apply_current_rg();
+                    let ag_note = album_gain_db
+                        .map(|g| format!(" · Album {g:+.1} dB"))
+                        .unwrap_or_default();
+                    let err_note = if err_count > 0 {
+                        format!(" ({err_count} skipped)")
+                    } else {
+                        String::new()
+                    };
+                    self.set_status(format!(
+                        "ReplayGain saved for \"{label}\": {ok_count} track(s){ag_note}{err_note}"
+                    ));
+                    rg_finished = true;
+                }
+            }
+        }
+        if rg_finished {
+            self.rg_scan_rx = None;
+            self.rg_scan_progress = None;
+        }
+
         // Audio events
         while let Some(event) = self.audio.try_event() {
             match event {
@@ -2974,6 +3193,10 @@ impl TxPlayerApp {
 
         if cmd && context.input(|i| i.key_pressed(egui::Key::J)) {
             self.jump_to_playing();
+            return;
+        }
+        if cmd && context.input(|i| i.key_pressed(egui::Key::B)) {
+            self.add_bookmark_at_current();
             return;
         }
         if cmd && context.input(|i| i.key_pressed(egui::Key::Z)) {
@@ -4567,6 +4790,68 @@ impl TxPlayerApp {
                     });
             }
 
+            if let Some(sleep_txt) = self.sleep_timer_status_text() {
+                Frame::new()
+                    .fill(p.hires_bg)
+                    .stroke(Stroke::new(0.8, p.hires_gold.gamma_multiply(0.6)))
+                    .corner_radius(4.0)
+                    .inner_margin(Margin::symmetric(6, 1))
+                    .show(ui, |ui| {
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(format!("SLEEP {sleep_txt}"))
+                                        .size(9.0)
+                                        .monospace()
+                                        .color(p.hires_gold),
+                                )
+                                .sense(Sense::click()),
+                            )
+                            .on_hover_text("Click to cancel Sleep Timer")
+                            .clicked()
+                        {
+                            self.set_sleep_timer(SleepTimerPreset::Off);
+                        }
+                    });
+            }
+
+            if let Some((done, total, ref lbl)) = self.rg_scan_progress {
+                Frame::new()
+                    .fill(p.surface)
+                    .stroke(Stroke::new(0.8, p.accent.gamma_multiply(0.5)))
+                    .corner_radius(4.0)
+                    .inner_margin(Margin::symmetric(6, 1))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("RG {done}/{total} · {lbl}"))
+                                .size(9.0)
+                                .monospace()
+                                .color(p.accent_bright),
+                        );
+                    });
+            }
+
+            if self.view == View::Library && self.album_filter.is_none() {
+                ui.add_space(4.0);
+                for &qf in QualityFilter::ALL {
+                    if pill_button(
+                        ui,
+                        qf.label(),
+                        None,
+                        if self.quality_filter == qf {
+                            PillStyle::Active
+                        } else {
+                            PillStyle::Secondary
+                        },
+                        &p,
+                    )
+                    .clicked()
+                    {
+                        self.quality_filter = qf;
+                    }
+                }
+            }
+
             if let Some((ref alb, ref art)) = self.album_filter {
                 ui.label(
                     RichText::new(format!("·  Album: {alb} ({art})"))
@@ -4651,6 +4936,12 @@ impl TxPlayerApp {
                 BrowseMode::Tracks => {}
             }
         } else {
+            let mut hero_reserve = 0.0_f32;
+            if self.album_filter.is_some() && !tracks.is_empty() {
+                self.render_album_hero(ui, &tracks);
+                ui.add_space(6.0);
+                hero_reserve = 114.0;
+            }
             // Strictly Aligned Column Header (uses exact same TrackColumns as every row!)
             self.aligned_table_header(ui, &tracks);
             let sep_rect = ui.available_rect_before_wrap();
@@ -4662,7 +4953,7 @@ impl TxPlayerApp {
 
             ScrollArea::vertical()
                 .id_salt("aligned_track_table")
-                .max_height((list_h - 28.0).max(90.0))
+                .max_height((list_h - 28.0 - hero_reserve).max(90.0))
                 .auto_shrink([false, false])
                 .scroll_source(
                     egui::scroll_area::ScrollSource::SCROLL_BAR
@@ -4794,6 +5085,7 @@ impl TxPlayerApp {
         let mut open_album: Option<(String, String)> = None;
         let mut play_album: Option<(String, String)> = None;
         let mut audit_album: Option<(String, String)> = None;
+        let mut rg_album: Option<(String, String)> = None;
 
         ScrollArea::vertical()
             .id_salt("albums_grid_scroll")
@@ -4912,6 +5204,10 @@ impl TxPlayerApp {
                                     audit_album = Some((alb.clone(), art.clone()));
                                     ui.close();
                                 }
+                                if ui.button("Scan ReplayGain (EBU R128)…").clicked() {
+                                    rg_album = Some((alb.clone(), art.clone()));
+                                    ui.close();
+                                }
                             });
                         }
                     });
@@ -4938,6 +5234,13 @@ impl TxPlayerApp {
                 .map(|t| t.id)
                 .collect();
             self.start_album_audit(format!("{alb} — {art}"), ids);
+        } else if let Some((alb, art)) = rg_album {
+            let ids: Vec<u64> = tracks
+                .iter()
+                .filter(|t| t.album == alb && t.artist == art)
+                .map(|t| t.id)
+                .collect();
+            self.start_replaygain_scan(format!("{alb} — {art}"), ids, true);
         }
     }
 
@@ -5271,7 +5574,45 @@ impl TxPlayerApp {
         let mut first_vis_row: Option<(usize, Rect)> = None;
         let mut last_vis_row: Option<(usize, Rect)> = None;
 
+        // Classical multi-disc visual dividers (Disc 1 / Disc 2 / ...) when viewing an album with >=2 discs
+        let show_disc_dividers = self.album_filter.is_some()
+            && self.view == View::Library
+            && {
+                let mut discs: HashSet<u32> = HashSet::new();
+                for t in tracks {
+                    if let Some(d) = t.disc_number {
+                        discs.insert(d);
+                    }
+                }
+                discs.len() >= 2
+            };
+        let mut last_disc_shown: Option<u32> = None;
+
         for (row_idx, track) in tracks.iter().enumerate() {
+            if show_disc_dividers
+                && let Some(disc_no) = track.disc_number
+                && last_disc_shown != Some(disc_no)
+            {
+                last_disc_shown = Some(disc_no);
+                let (div_rect, _) = ui.allocate_exact_size(vec2(row_w, 22.0), Sense::hover());
+                if ui.is_rect_visible(div_rect) {
+                    let lbl = format!("DISC {disc_no}");
+                    ui.painter().text(
+                        pos2(div_rect.left() + 10.0, div_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        &lbl,
+                        FontId::monospace(9.5),
+                        p.accent_bright,
+                    );
+                    ui.painter().line_segment(
+                        [
+                            pos2(div_rect.left() + 62.0, div_rect.center().y),
+                            pos2(div_rect.right() - 10.0, div_rect.center().y),
+                        ],
+                        Stroke::new(0.8, p.border_strong),
+                    );
+                }
+            }
             let is_current = if self.view == View::Queue {
                 self.current_index == Some(row_idx)
             } else {
@@ -5739,6 +6080,15 @@ impl TxPlayerApp {
                     ctx_action = Some(ContextMenuAction::VerifyAlbumAudit(tid));
                     ui.close();
                 }
+                let rg_lbl = if sel_count > 1 {
+                    format!("Scan {sel_count} Tracks ReplayGain (EBU R128)…")
+                } else {
+                    "Scan Album ReplayGain (EBU R128)…".to_string()
+                };
+                if ui.button(rg_lbl).clicked() {
+                    ctx_action = Some(ContextMenuAction::ScanReplayGain(tid));
+                    ui.close();
+                }
                 if sel_count == 1 {
                     if ui.button("Track Info…").clicked() {
                         ctx_action = Some(ContextMenuAction::TrackInfo(tid));
@@ -5920,6 +6270,33 @@ impl TxPlayerApp {
                     }
                 }
             }
+            ContextMenuAction::ScanReplayGain(id) => {
+                let sel_ids = self.selected_ordered_ids(visible);
+                if sel_ids.len() > 1 {
+                    let title = format!("{} Selected Tracks", sel_ids.len());
+                    self.start_replaygain_scan(title, sel_ids, false);
+                } else if let Some(t) = self.track(id).cloned() {
+                    if !t.album.trim().is_empty() {
+                        let alb_ids: Vec<u64> = self
+                            .store
+                            .active()
+                            .tracks
+                            .iter()
+                            .filter(|x| x.album == t.album && x.artist == t.artist)
+                            .map(|x| x.id)
+                            .collect();
+                        let title = format!("{} — {}", t.album, t.artist);
+                        let is_album = alb_ids.len() > 1;
+                        self.start_replaygain_scan(
+                            title,
+                            if alb_ids.is_empty() { vec![id] } else { alb_ids },
+                            is_album,
+                        );
+                    } else {
+                        self.start_replaygain_scan(t.title.clone(), vec![id], false);
+                    }
+                }
+            }
             ContextMenuAction::RevealInFinder(id) => {
                 if let Some(t) = self.track(id) {
                     reveal_in_file_manager(&t.path);
@@ -5971,6 +6348,415 @@ impl TxPlayerApp {
         } else {
             self.set_status(format!("TrueHz / DR audit ready for \"{title}\""));
         }
+    }
+
+    fn discover_album_assets(&mut self, dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        if let Some(cached) = self.album_assets_cache.get(dir) {
+            return cached.clone();
+        }
+        let mut pdfs = Vec::new();
+        let mut images = Vec::new();
+        let mut scan_dir = |d: &Path| {
+            let Ok(rd) = std::fs::read_dir(d) else {
+                return;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let ext = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if ext == "pdf" {
+                    pdfs.push(p);
+                } else if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+                    images.push(p);
+                }
+            }
+        };
+        scan_dir(dir);
+        for sub in ["Scans", "scans", "Artwork", "artwork", "Booklet", "booklet", "Covers", "covers"] {
+            let sub_path = dir.join(sub);
+            if sub_path.is_dir() {
+                scan_dir(&sub_path);
+            }
+        }
+        pdfs.sort();
+        images.sort();
+        self.album_assets_cache
+            .insert(dir.to_path_buf(), (pdfs.clone(), images.clone()));
+        (pdfs, images)
+    }
+
+    fn render_album_hero(&mut self, ui: &mut Ui, tracks: &[Track]) {
+        let p = self.palette;
+        let first = &tracks[0];
+        let total_secs: f64 = tracks.iter().filter_map(|t| t.duration).sum();
+        let disc_count = {
+            let mut set = HashSet::new();
+            for t in tracks {
+                if let Some(d) = t.disc_number {
+                    set.insert(d);
+                }
+            }
+            set.len()
+        };
+        let album_rg = tracks.iter().find_map(|t| t.rg_album_gain_db);
+        let year = tracks.iter().find_map(|t| t.year.as_deref()).unwrap_or("");
+        let genre = tracks.iter().find_map(|t| t.genre.as_deref()).unwrap_or("");
+        let (pdfs, images) = first
+            .path
+            .parent()
+            .map(|d| self.discover_album_assets(d))
+            .unwrap_or_default();
+
+        let mut act_play = false;
+        let mut act_audit = false;
+        let mut act_rg = false;
+        let mut act_gallery = false;
+        let mut act_back = false;
+
+        Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(8.0)
+            .inner_margin(Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (art_r, _) = ui.allocate_exact_size(vec2(84.0, 84.0), Sense::hover());
+                    self.paint_cover_in_rect(ui, first, art_r);
+                    ui.add_space(12.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(&first.album)
+                                    .size(16.0)
+                                    .strong()
+                                    .color(p.text),
+                            );
+                            if disc_count >= 2 {
+                                Frame::new()
+                                    .fill(p.background)
+                                    .stroke(Stroke::new(0.8, p.border_strong))
+                                    .corner_radius(4.0)
+                                    .inner_margin(Margin::symmetric(6, 1))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(format!("{disc_count} DISCS"))
+                                                .size(9.0)
+                                                .monospace()
+                                                .color(p.accent_bright),
+                                        );
+                                    });
+                            }
+                            if let Some(ag) = album_rg {
+                                Frame::new()
+                                    .fill(p.background)
+                                    .stroke(Stroke::new(0.8, p.border))
+                                    .corner_radius(4.0)
+                                    .inner_margin(Margin::symmetric(6, 1))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(format!("RG {ag:+.1} dB"))
+                                                .size(9.0)
+                                                .monospace()
+                                                .color(p.muted),
+                                        );
+                                    });
+                            }
+                        });
+                        let mut meta_parts = vec![first.artist.clone()];
+                        if !year.is_empty() {
+                            meta_parts.push(year.to_string());
+                        }
+                        if !genre.is_empty() {
+                            meta_parts.push(genre.to_string());
+                        }
+                        meta_parts.push(format!("{} tracks", tracks.len()));
+                        meta_parts.push(format_duration(Some(total_secs)));
+                        meta_parts.push(first.quality_full());
+                        ui.label(
+                            RichText::new(meta_parts.join("  ·  "))
+                                .size(10.5)
+                                .color(p.muted),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if pill_button(ui, "Play Album", Some(Icon::Play), PillStyle::Accent, &p)
+                                .clicked()
+                            {
+                                act_play = true;
+                            }
+                            if pill_button(
+                                ui,
+                                "Verify TrueHz / DR",
+                                Some(Icon::Sliders),
+                                PillStyle::Secondary,
+                                &p,
+                            )
+                            .clicked()
+                            {
+                                act_audit = true;
+                            }
+                            if pill_button(
+                                ui,
+                                "Scan ReplayGain",
+                                None,
+                                PillStyle::Secondary,
+                                &p,
+                            )
+                            .clicked()
+                            {
+                                act_rg = true;
+                            }
+                            if let Some(first_pdf) = pdfs.first() {
+                                let lbl = if pdfs.len() > 1 {
+                                    format!("Booklet ({} PDFs)", pdfs.len())
+                                } else {
+                                    "Booklet (PDF)".to_string()
+                                };
+                                if pill_button(ui, &lbl, Some(Icon::Folder), PillStyle::Active, &p)
+                                    .on_hover_text(format!("Open {}", first_pdf.display()))
+                                    .clicked()
+                                {
+                                    open_file_with_default_app(first_pdf);
+                                }
+                            }
+                            if !images.is_empty()
+                                && pill_button(
+                                    ui,
+                                    &format!("Scans ({})", images.len()),
+                                    Some(Icon::Grid),
+                                    PillStyle::Secondary,
+                                    &p,
+                                )
+                                .clicked()
+                            {
+                                act_gallery = true;
+                            }
+                            if pill_button(ui, "← All Albums", None, PillStyle::Secondary, &p)
+                                .clicked()
+                            {
+                                act_back = true;
+                            }
+                        });
+                    });
+                });
+            });
+
+        let alb_title = format!("{} — {}", first.album, first.artist);
+        let ids: Vec<u64> = tracks.iter().map(|t| t.id).collect();
+        if act_play {
+            self.play_from_list(first.id, tracks);
+        } else if act_audit {
+            self.start_album_audit(alb_title, ids);
+        } else if act_rg {
+            self.start_replaygain_scan(alb_title, ids, true);
+        } else if act_gallery {
+            self.artwork_gallery = Some(ArtworkGalleryModal {
+                title: format!("{} — Artwork & Scans", first.album),
+                images,
+                pdfs,
+                selected_idx: 0,
+                loaded_path: None,
+                texture: None,
+            });
+        } else if act_back {
+            self.album_filter = None;
+            self.browse_mode = BrowseMode::Albums;
+        }
+    }
+
+    fn start_replaygain_scan(&mut self, label: String, track_ids: Vec<u64>, is_album: bool) {
+        let jobs: Vec<(u64, PathBuf, Option<f64>, Option<f64>)> = track_ids
+            .iter()
+            .filter_map(|&id| {
+                let t = self.track(id)?;
+                Some((id, t.path.clone(), t.cue_start, t.cue_end))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        let total = jobs.len();
+        let (tx, rx) = crossbeam_channel::unbounded::<RgScanEvent>();
+        self.rg_scan_rx = Some(rx);
+        self.rg_scan_progress = Some((0, total, label.clone()));
+        self.set_status(format!(
+            "Scanning EBU R128 ReplayGain for \"{label}\" ({total} track(s))…"
+        ));
+
+        thread::Builder::new()
+            .name("txplayer-rg-scan".into())
+            .spawn(move || {
+                let workers = thread::available_parallelism()
+                    .map(|n| n.get().clamp(1, 4))
+                    .unwrap_or(2)
+                    .min(total);
+                let next_idx = std::sync::atomic::AtomicUsize::new(0);
+                let done_cnt = std::sync::atomic::AtomicUsize::new(0);
+                let results = std::sync::Mutex::new(Vec::<(u64, f32, f32)>::new());
+                let err_cnt = std::sync::atomic::AtomicUsize::new(0);
+
+                thread::scope(|s| {
+                    for _ in 0..workers {
+                        s.spawn(|| loop {
+                            let i = next_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= jobs.len() {
+                                break;
+                            }
+                            let (id, ref path, cue_start, cue_end) = jobs[i];
+                            match analyze_file(path, cue_start, cue_end) {
+                                Ok(a) => {
+                                    // EBU R128 ReplayGain reference target = -18.0 LUFS
+                                    let track_gain_db = (-18.0 - a.integrated_lufs).clamp(-24.0, 24.0);
+                                    let track_peak =
+                                        10.0_f32.powf(a.true_peak_dbtp / 20.0).clamp(0.0, 4.0);
+                                    let _ = tx.send(RgScanEvent::TrackDone {
+                                        id,
+                                        track_gain_db,
+                                        track_peak,
+                                    });
+                                    if let Ok(mut g) = results.lock() {
+                                        g.push((id, a.integrated_lufs, track_peak));
+                                    }
+                                }
+                                Err(_) => {
+                                    err_cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                            let d = done_cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            let _ = tx.send(RgScanEvent::Progress(d, total));
+                        });
+                    }
+                });
+
+                let ok_list = results.into_inner().unwrap_or_default();
+                let ok_count = ok_list.len();
+                let err_count = err_cnt.load(std::sync::atomic::Ordering::Relaxed);
+                let (album_gain_db, album_peak) = if is_album && !ok_list.is_empty() {
+                    let mean_pow: f64 = ok_list
+                        .iter()
+                        .map(|&(_, lufs, _)| 10.0_f64.powf(lufs as f64 / 10.0))
+                        .sum::<f64>()
+                        / ok_list.len() as f64;
+                    let alb_lufs = (10.0 * mean_pow.max(1e-12).log10()) as f32;
+                    let ag = (-18.0 - alb_lufs).clamp(-24.0, 24.0);
+                    let ap = ok_list
+                        .iter()
+                        .map(|&(_, _, pk)| pk)
+                        .fold(0.0_f32, f32::max);
+                    (Some(ag), Some(ap))
+                } else {
+                    (None, None)
+                };
+                let ids: Vec<u64> = ok_list.into_iter().map(|(id, _, _)| id).collect();
+                let _ = tx.send(RgScanEvent::Finished {
+                    label,
+                    album_gain_db,
+                    album_peak,
+                    track_ids: ids,
+                    ok_count,
+                    err_count,
+                });
+            })
+            .ok();
+    }
+
+    fn set_sleep_timer(&mut self, preset: SleepTimerPreset) {
+        // If cancelling mid-fade, restore the user's real volume cleanly
+        if let Some(orig) = self.sleep_pre_fade_vol.take() {
+            self.volume = orig;
+            self.audio.set_volume(orig);
+        }
+        match preset {
+            SleepTimerPreset::Off => {
+                if self.sleep_timer == SleepTimerState::AfterCurrentTrack {
+                    self.stop_after_current = false;
+                }
+                self.sleep_timer = SleepTimerState::Off;
+                self.set_status("Sleep timer cancelled".into());
+            }
+            SleepTimerPreset::AfterTrack => {
+                self.sleep_timer = SleepTimerState::AfterCurrentTrack;
+                self.stop_after_current = true;
+                self.set_status("Sleep timer: pause after current track".into());
+            }
+            SleepTimerPreset::Minutes(mins) => {
+                let deadline = Instant::now() + Duration::from_secs(mins as u64 * 60);
+                self.sleep_timer = SleepTimerState::AtInstant(deadline);
+                self.set_status(format!("Sleep timer set for {mins} min (gentle fade-out)"));
+            }
+        }
+    }
+
+    fn sleep_timer_status_text(&self) -> Option<String> {
+        match self.sleep_timer {
+            SleepTimerState::Off => None,
+            SleepTimerState::AfterCurrentTrack => {
+                if self.stop_after_current {
+                    Some("End".into())
+                } else {
+                    None
+                }
+            }
+            SleepTimerState::AtInstant(deadline) => {
+                let rem = deadline.saturating_duration_since(Instant::now()).as_secs();
+                Some(format!("{:02}:{:02}", rem / 60, rem % 60))
+            }
+        }
+    }
+
+    fn tick_sleep_timer(&mut self) {
+        match self.sleep_timer {
+            SleepTimerState::Off => {}
+            SleepTimerState::AfterCurrentTrack => {
+                if !self.stop_after_current {
+                    self.sleep_timer = SleepTimerState::Off;
+                }
+            }
+            SleepTimerState::AtInstant(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    self.sleep_timer = SleepTimerState::Off;
+                    if self.playing {
+                        self.playing = false;
+                        self.audio.pause();
+                    }
+                    if let Some(orig) = self.sleep_pre_fade_vol.take() {
+                        self.volume = orig;
+                        self.audio.set_volume(orig);
+                    }
+                    self.set_status("Sleep timer finished — playback paused".into());
+                } else {
+                    let rem = deadline.duration_since(now).as_secs_f32();
+                    if rem <= 5.0 && self.playing {
+                        let base = *self.sleep_pre_fade_vol.get_or_insert(self.volume);
+                        let faded = (base * (rem / 5.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                        self.audio.set_volume(faded);
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_bookmark_at_current(&mut self) {
+        let Some(track) = self.current_track().cloned() else {
+            return;
+        };
+        let key = PluginConfig::bookmark_key(&track.path, track.cue_start);
+        let pos = self.position.max(0.0);
+        let count = self.plugins.bookmarks_for(&key).len() + 1;
+        let label = format!("#{count}");
+        self.plugins.add_bookmark(key, pos, label);
+        self.set_status(format!(
+            "Bookmark saved at {} in \"{}\"",
+            format_duration(Some(pos)),
+            track.title
+        ));
     }
 
     /// Sleek Floating Action Bar for multi-track selection (2+ tracks; single track uses hover & right-click).
@@ -7142,6 +7928,43 @@ impl TxPlayerApp {
             }
         }
 
+        // 3c) High-Res Album Artwork & Booklet Scans Gallery Modal
+        if let Some(mut gallery) = self.artwork_gallery.take() {
+            if let Some(cur_path) = gallery.images.get(gallery.selected_idx).cloned()
+                && gallery.loaded_path.as_ref() != Some(&cur_path)
+            {
+                gallery.loaded_path = Some(cur_path.clone());
+                gallery.texture = std::fs::read(&cur_path).ok().and_then(|bytes| {
+                    let img = image::load_from_memory(&bytes).ok()?;
+                    let resized = if img.width() > 1400 || img.height() > 1400 {
+                        img.thumbnail(1400, 1400)
+                    } else {
+                        img
+                    };
+                    let rgba = resized.into_rgba8();
+                    let dims = [rgba.width() as usize, rgba.height() as usize];
+                    let ci = ColorImage::from_rgba_unmultiplied(dims, rgba.as_raw());
+                    Some(context.load_texture(
+                        format!("gallery_{}", cur_path.display()),
+                        ci,
+                        egui::TextureOptions::LINEAR,
+                    ))
+                });
+            }
+            let keep = modals::show_artwork_gallery_window(
+                context,
+                &gallery.title,
+                &gallery.images,
+                &gallery.pdfs,
+                &mut gallery.selected_idx,
+                gallery.texture.as_ref(),
+                &p,
+            );
+            if keep {
+                self.artwork_gallery = Some(gallery);
+            }
+        }
+
         // 4) Manage Music Directories Window
         let folders_with_counts: Vec<(PathBuf, usize)> = self
             .store
@@ -7477,6 +8300,15 @@ impl TxPlayerApp {
                 direct_volume_lock: self.plugins.dsp.direct_volume_lock,
                 volume: self.volume,
             });
+            let sleep_txt = self.sleep_timer_status_text();
+            let sleep_after_track = self.sleep_timer == SleepTimerState::AfterCurrentTrack;
+            let cur_bm_key = self
+                .current_track()
+                .map(|t| PluginConfig::bookmark_key(&t.path, t.cue_start));
+            let cur_bookmarks = cur_bm_key
+                .as_deref()
+                .map(|k| self.plugins.bookmarks_for(k).to_vec())
+                .unwrap_or_default();
             let sig_actions = modals::show_signal_path_popover(
                 context,
                 &mut self.show_signal_path,
@@ -7486,6 +8318,11 @@ impl TxPlayerApp {
                 &mut self.plugins,
                 self.playback_speed,
                 (self.loop_a, self.loop_b),
+                sleep_txt.as_deref(),
+                sleep_after_track,
+                self.position,
+                cur_bm_key.is_some(),
+                &cur_bookmarks,
                 &p,
             );
             if sig_actions.dsp_changed {
@@ -7504,6 +8341,22 @@ impl TxPlayerApp {
             if sig_actions.clear_loop {
                 self.clear_ab_loop();
                 self.set_status("A-B Loop cleared".into());
+            }
+            if let Some(preset) = sig_actions.sleep_preset {
+                self.set_sleep_timer(preset);
+            }
+            if sig_actions.add_bookmark {
+                self.add_bookmark_at_current();
+            }
+            if let Some(pos) = sig_actions.jump_bookmark_secs {
+                let target = pos.clamp(0.0, self.duration.max(pos));
+                self.position = target;
+                self.audio.seek(target);
+            }
+            if let Some(idx) = sig_actions.remove_bookmark_idx
+                && let Some(ref key) = cur_bm_key
+            {
+                self.plugins.remove_bookmark(key, idx);
             }
             if sig_actions.open_settings_dsp {
                 self.show_signal_path = false;
@@ -9109,6 +9962,10 @@ impl TxPlayerApp {
                                             ctx_action = Some(ContextMenuAction::VerifyAlbumAudit(tid));
                                             ui.close();
                                         }
+                                        if ui.button("Scan Album ReplayGain (EBU R128)…").clicked() {
+                                            ctx_action = Some(ContextMenuAction::ScanReplayGain(tid));
+                                            ui.close();
+                                        }
                                         if ui
                                             .button(format!("Reveal in {FILE_MANAGER_NAME}"))
                                             .clicked()
@@ -9704,6 +10561,7 @@ enum ContextMenuAction {
     EditTags,
     TrackInfo(u64),
     VerifyAlbumAudit(u64),
+    ScanReplayGain(u64),
     RevealInFinder(u64),
     SetRating(u64, u8),
     RemoveSelected,
@@ -9718,8 +10576,32 @@ impl eframe::App for TxPlayerApp {
 
         self.process_background_events(&context);
         self.process_input(&context);
+        self.tick_sleep_timer();
         #[cfg(target_os = "macos")]
         self.update_macos_window_drag(&context);
+
+        // Remember custom user-resized window geometry & screen position cleanly across launches
+        if !self.ephemeral_session && !self.compact_modal_expanded {
+            let (inner, outer) = context.input(|i| (i.viewport().inner_rect, i.viewport().outer_rect));
+            if let Some(r) = inner
+                && r.width().is_finite()
+                && r.height().is_finite()
+            {
+                if self.compact_mode {
+                    if r.width() >= COMPACT_MIN_WIDTH && r.height() >= COMPACT_MIN_HEIGHT {
+                        self.compact_window_size = Some([r.width(), r.height()]);
+                    }
+                } else if r.width() >= FULL_MIN_WIDTH && r.height() >= FULL_MIN_HEIGHT {
+                    self.full_window_size = Some([r.width(), r.height()]);
+                }
+            }
+            if let Some(r) = outer
+                && r.left().is_finite()
+                && r.top().is_finite()
+            {
+                self.window_pos = Some([r.left(), r.top()]);
+            }
+        }
 
         // Reset per-frame drop targets ONLY while the primary button is held down;
         // on the release frame we keep the last valid target so the drop commits cleanly!
@@ -9819,8 +10701,11 @@ impl eframe::App for TxPlayerApp {
             || self.waveform_inflight.is_some()
             || !self.artwork_inflight.is_empty()
             || !self.analysis_inflight.is_empty()
+            || self.rg_scan_progress.is_some()
         {
             context.request_repaint_after(Duration::from_millis(60));
+        } else if self.sleep_timer != SleepTimerState::Off {
+            context.request_repaint_after(Duration::from_millis(250));
         }
 
         // Built-in OpenGL post-render framebuffer screenshot capture (`--screenshot <path>`)
@@ -9924,6 +10809,9 @@ impl Drop for TxPlayerApp {
             auto_watch_folders: self.auto_watch_folders,
             sort_mode: self.sort,
             sort_ascending: self.sort_ascending,
+            full_window_size: self.full_window_size,
+            compact_window_size: self.compact_window_size,
+            window_pos: self.window_pos,
         }
         .save();
     }

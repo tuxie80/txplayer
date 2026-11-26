@@ -913,6 +913,13 @@ impl Default for TagProviderConfig {
     }
 }
 
+/// Timestamp bookmark inside a track (ideal for symphonies, concertos, opera acts & podcasts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackBookmark {
+    pub position_secs: f64,
+    pub label: String,
+}
+
 /// Top-level pluggable modules configuration persisted in preferences.json.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PluginConfig {
@@ -924,6 +931,48 @@ pub struct PluginConfig {
     pub tag_providers: TagProviderConfig,
     #[serde(default)]
     pub device_profiles: BTreeMap<String, DeviceProfile>,
+    #[serde(default)]
+    pub bookmarks: BTreeMap<String, Vec<TrackBookmark>>,
+}
+
+impl PluginConfig {
+    pub fn bookmark_key(path: &std::path::Path, cue_start: Option<f64>) -> String {
+        match cue_start {
+            Some(s) => format!("{}@{:.1}", path.to_string_lossy(), s),
+            None => path.to_string_lossy().into_owned(),
+        }
+    }
+
+    pub fn bookmarks_for(&self, key: &str) -> &[TrackBookmark] {
+        self.bookmarks.get(key).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn add_bookmark(&mut self, key: String, position_secs: f64, label: String) {
+        let pos = position_secs.max(0.0);
+        let list = self.bookmarks.entry(key).or_default();
+        // Replace existing bookmark if within 1.5s to prevent accidental double-tap duplicates
+        if let Some(existing) = list.iter_mut().find(|b| (b.position_secs - pos).abs() < 1.5) {
+            existing.position_secs = pos;
+            existing.label = label;
+        } else {
+            list.push(TrackBookmark {
+                position_secs: pos,
+                label,
+            });
+            list.sort_by(|a, b| a.position_secs.total_cmp(&b.position_secs));
+        }
+    }
+
+    pub fn remove_bookmark(&mut self, key: &str, idx: usize) {
+        if let Some(list) = self.bookmarks.get_mut(key) {
+            if idx < list.len() {
+                list.remove(idx);
+            }
+            if list.is_empty() {
+                self.bookmarks.remove(key);
+            }
+        }
+    }
 }
 
 /// Runtime external tool health detected at startup for Settings -> Plugins & Modules.
@@ -978,5 +1027,21 @@ Filter 4: ON HSC Fc 10000 Hz Gain -3.0 dB Q 0.71
         assert_eq!(bands[1].kind, ParametricFilterKind::Peaking);
         assert!(!bands[2].enabled);
         assert_eq!(bands[3].kind, ParametricFilterKind::HighShelf);
+    }
+
+    #[test]
+    fn bookmarks_sort_dedupe_and_remove_cleanly() {
+        let mut cfg = PluginConfig::default();
+        let key = PluginConfig::bookmark_key(std::path::Path::new("/music/mahler9.flac"), None);
+        cfg.add_bookmark(key.clone(), 420.0, "Climax".into());
+        cfg.add_bookmark(key.clone(), 95.0, "Adagio theme".into());
+        cfg.add_bookmark(key.clone(), 95.5, "Adagio reprise".into());
+        let list = cfg.bookmarks_for(&key);
+        assert_eq!(list.len(), 2);
+        assert!((list[0].position_secs - 95.5).abs() < 1e-6);
+        assert_eq!(list[0].label, "Adagio reprise");
+        assert!((list[1].position_secs - 420.0).abs() < 1e-6);
+        cfg.remove_bookmark(&key, 0);
+        assert_eq!(cfg.bookmarks_for(&key).len(), 1);
     }
 }

@@ -25,11 +25,7 @@ mod watcher;
 use std::sync::Arc;
 
 use anyhow::Result;
-use app::{
-    COMPACT_COLLAPSED_HEIGHT, COMPACT_EXPANDED_HEIGHT, COMPACT_MIN_HEIGHT, COMPACT_MIN_WIDTH,
-    COMPACT_WIDTH, FULL_HEIGHT, FULL_MIN_HEIGHT, FULL_MIN_WIDTH, FULL_WIDTH, TxPlayerApp,
-    startup_window_layout,
-};
+use app::{TxPlayerApp, startup_window_layout};
 use eframe::egui;
 
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/AppIcon.png");
@@ -46,23 +42,16 @@ fn load_app_icon() -> Option<Arc<egui::IconData>> {
 }
 
 fn main() -> Result<()> {
-    let (compact_mode, compact_playlist, show_vis) = startup_window_layout();
-    let (init_size, min_size) = if compact_mode {
-        let h = if compact_playlist {
-            COMPACT_EXPANDED_HEIGHT
-        } else {
-            COMPACT_COLLAPSED_HEIGHT
-        } + if show_vis { 62.0 } else { 0.0 };
-        ([COMPACT_WIDTH, h], [COMPACT_MIN_WIDTH, COMPACT_MIN_HEIGHT])
-    } else {
-        ([FULL_WIDTH, FULL_HEIGHT], [FULL_MIN_WIDTH, FULL_MIN_HEIGHT])
-    };
+    let layout = startup_window_layout();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("TxPlayer")
-        .with_inner_size(init_size)
-        .with_min_inner_size(min_size)
+        .with_inner_size(layout.init_size)
+        .with_min_inner_size(layout.min_size)
         .with_app_id("com.txplayer.player");
+    if let Some(pos) = layout.init_pos {
+        viewport = viewport.with_position(pos);
+    }
 
     #[cfg(target_os = "macos")]
     {

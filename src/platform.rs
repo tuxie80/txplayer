@@ -57,3 +57,22 @@ pub fn reveal_in_file_manager(path: &Path) {
         let _ = Command::new("xdg-open").arg(target).spawn();
     }
 }
+
+/// Opens a file (such as an album PDF booklet) with the OS default application.
+pub fn open_file_with_default_app(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(path).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(path).spawn();
+    }
+}

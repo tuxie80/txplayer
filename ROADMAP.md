@@ -46,9 +46,23 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
 
 ---
 
-## Wave 4 — Classical Library & Power-User Excellence
-- [ ] **Classical Multi-Disc Album Hero View:** Dedicated album header with large artwork, aggregate quality/DR badge, **`Disc 1` / `Disc 2`** visual track dividers, **Composer / Work / Movement** browsing, and **Album Booklet (`.pdf`) & Cover Scans Gallery** button.
-- [ ] **Multi-Facet Smart Playlists & Live Filter Bar:** Rule-based playlists & instant filter chips (`Codec`, `Sample Rate ≥ 96 kHz`, `Bit Depth`, `Rating`, `Year`, `Composer`, `Genre`).
-- [ ] **Batch Parallel EBU R128 / ReplayGain Scanner:** Right-click any album or playlist to compute & save Track + Album ReplayGain tags in parallel across CPU cores.
-- [ ] **Sleep Timer, Track Bookmarks & Listening Stats:** Configurable sleep timer with gentle fade-out, per-track timestamps/bookmarks for long symphonies & live concerts, listening history & audiophile format stats.
-- [ ] **Remember Custom Window Size & Screen Position:** Persist resized Compact and Classic window geometry cleanly across launches.
+## Wave 4 — Classical Library & Power-User Excellence (`v1.3.0` Completed)
+- [x] **Classical Multi-Disc Album Hero View:** Dedicated album header with large artwork, multi-disc & album ReplayGain badges, **`Disc 1` / `Disc 2`** visual track dividers, **Album Booklet (`.pdf`)** 1-click launcher, and **High-Res Cover & Inlay Scans Gallery** modal.
+- [x] **Multi-Facet Live Audiophile Filter Chips:** Instant 1-click library filter chips (`All`, `Hi-Res`, `DSD`, `Lossless`, `★★★★+`) paired with real-time search.
+- [x] **Batch Parallel EBU R128 / ReplayGain Scanner:** Right-click any album or selection (or click in Album Hero) to compute & persist Track + Album ReplayGain (`-18 LUFS` reference) & True Peak across CPU cores in pure Rust.
+- [x] **Sleep Timer & Per-Track Bookmarks:** Configurable sleep timer (`15m`, `30m`, `45m`, `60m`, `End of Track`) with gentle 5-second volume fade-out and live countdown pill, plus persistent per-track timestamp bookmarks (`Cmd/Ctrl+B` or Signal Path popover) for long symphonies & concerts.
+- [x] **Remember Custom Window Size & Screen Position:** Persists resized Compact and Classic window dimensions and screen coordinates cleanly across launches.
+
+---
+
+## Wave 5 — Master Library Database, Collections & Smart Views (`v1.4.0` Next Up)
+- [ ] **Rich Relational Library Database & Schema Indexing:**
+  - Persist full classical & audiophile metadata per track (`composer`, `conductor`, `orchestra`, `work`, `label`, `catalog_number`, `comment`, freeform `#custom-tags`, `last_played_at`) plus **persisted audio analysis results** (`dr_score`, `integrated_lufs`, `true_peak_dbtp`, `effective_bandwidth_hz`, `authenticity_verdict`) so DR/TrueHz audits live permanently in the database!
+  - Automatic rolling backup (`.bak`), schema versioning, and **1-click Database Export / Backup** (full JSON snapshot + CSV spreadsheet catalog).
+- [ ] **Curated Collections (Multi-Album / Multi-Track Boxes & Themes):**
+  - Create named Collections with descriptions & color badges (e.g. *Beethoven Complete Sonatas*, *Reference Audiophile Demos*, *Deutsche Grammophon Originals*, *Late-Night Piano*).
+  - Right-click any track or entire album → **Add to Collection…**, with dedicated Collections browser in the sidebar.
+- [ ] **Custom Saved Views & Visual Smart Query Builder:**
+  - Build & save unlimited dynamic rule-based database views (`Match All` / `Match Any`) over any field: `Composer`, `Artist`, `Album`, `Genre`, `Label`, `Codec`, `Sample Rate`, `Bit Depth`, `Dynamic Range (DR)`, `Rating`, `Year`, `Play Count`, `Custom Tag`, `Authenticity`, `Has ReplayGain`, plus saved sort order & layout (`Tracks | Albums | Composers | Genres`).
+- [ ] **Dedicated Classical & Facet Browsers + Library Insights Dashboard:**
+  - **Composers** browser, **Genres / Years / Labels** facet browser, and a **Library Insights Dashboard** (format breakdown FLAC/DSD/ALAC/WAV, sample-rate distribution, total listening hours, average DR, verified Hi-Res share, and duplicate/missing file audit).

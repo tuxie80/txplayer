@@ -13,11 +13,13 @@ use crate::dsp::compute_eq_response_curve;
 use crate::icons::{self, Icon};
 use crate::library::cover_directory;
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
-use crate::platform::{AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, reveal_in_file_manager};
+use crate::platform::{
+    AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, open_file_with_default_app, reveal_in_file_manager,
+};
 use crate::plugins::{
     CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EqPreset, HeadphonePreset,
     OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
-    TagProviderConfig, ToolHealth,
+    TagProviderConfig, ToolHealth, TrackBookmark,
 };
 use crate::tagger::{
     EditableTags, LookupStrategy, TagCandidate, TrackHashes, compute_fast_audio_hash,
@@ -3406,6 +3408,13 @@ pub struct SignalPathDisplay<'a> {
     pub volume: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepTimerPreset {
+    Off,
+    Minutes(u32),
+    AfterTrack,
+}
+
 pub struct SignalPathActions {
     pub dsp_changed: bool,
     pub open_settings_dsp: bool,
@@ -3413,6 +3422,10 @@ pub struct SignalPathActions {
     pub set_loop_a: bool,
     pub set_loop_b: bool,
     pub clear_loop: bool,
+    pub sleep_preset: Option<SleepTimerPreset>,
+    pub add_bookmark: bool,
+    pub jump_bookmark_secs: Option<f64>,
+    pub remove_bookmark_idx: Option<usize>,
 }
 
 /// Renders a sleek, themed popover card anchored directly above `anchor_rect` with a downward pointer caret.
@@ -4086,6 +4099,147 @@ pub fn show_album_audit_window(
     (open, inspect_id)
 }
 
+/// High-resolution Album Artwork & Booklet Scans Gallery modal.
+pub fn show_artwork_gallery_window(
+    context: &egui::Context,
+    title: &str,
+    images: &[PathBuf],
+    pdfs: &[PathBuf],
+    selected_idx: &mut usize,
+    texture: Option<&egui::TextureHandle>,
+    palette: &Palette,
+) -> bool {
+    let mut open = true;
+    let mut close_clicked = false;
+    let total = images.len();
+    if total > 0 && *selected_idx >= total {
+        *selected_idx = 0;
+    }
+    let sub = if total > 0 {
+        format!("Image {} / {}", *selected_idx + 1, total)
+    } else {
+        format!("{} Booklet PDF(s)", pdfs.len())
+    };
+    themed_modal_window(
+        context,
+        "album_artwork_gallery",
+        title,
+        Icon::Grid,
+        Some(sub.as_str()),
+        [660.0, 560.0],
+        Some([460.0, 400.0]),
+        true,
+        &mut open,
+        palette,
+        |ui| {
+            if !pdfs.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Digital Booklets:")
+                            .size(10.5)
+                            .strong()
+                            .color(palette.muted),
+                    );
+                    for pdf in pdfs {
+                        let name = pdf
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Booklet.pdf");
+                        if pill_button(ui, name, Some(Icon::Folder), PillStyle::Active, palette)
+                            .on_hover_text(format!("Open {}", pdf.display()))
+                            .clicked()
+                        {
+                            open_file_with_default_app(pdf);
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+            }
+
+            if total > 0 {
+                let avail_w = ui.available_width().max(240.0);
+                let avail_h = (ui.available_height() - 48.0).max(220.0);
+                Frame::new()
+                    .fill(palette.background)
+                    .stroke(Stroke::new(1.0, palette.border))
+                    .corner_radius(6.0)
+                    .inner_margin(Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_min_size(vec2(avail_w - 16.0, avail_h - 16.0));
+                        ui.centered_and_justified(|ui| {
+                            if let Some(tex) = texture {
+                                let tsz = tex.size_vec2();
+                                let max_w = (avail_w - 24.0).max(100.0);
+                                let max_h = (avail_h - 24.0).max(100.0);
+                                let scale = (max_w / tsz.x.max(1.0))
+                                    .min(max_h / tsz.y.max(1.0))
+                                    .min(1.0);
+                                let draw_sz = tsz * scale;
+                                ui.image((tex.id(), draw_sz));
+                            } else {
+                                ui.label(
+                                    RichText::new("Loading high-resolution scan…")
+                                        .size(11.5)
+                                        .color(palette.muted),
+                                );
+                            }
+                        });
+                    });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if total > 1
+                        && pill_button(ui, "← Prev", None, PillStyle::Secondary, palette).clicked()
+                    {
+                        *selected_idx = if *selected_idx == 0 {
+                            total - 1
+                        } else {
+                            *selected_idx - 1
+                        };
+                    }
+                    if total > 1
+                        && pill_button(ui, "Next →", None, PillStyle::Secondary, palette).clicked()
+                    {
+                        *selected_idx = (*selected_idx + 1) % total;
+                    }
+                    if let Some(cur_path) = images.get(*selected_idx) {
+                        let fname = cur_path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("scan");
+                        ui.label(
+                            RichText::new(fname)
+                                .size(10.5)
+                                .monospace()
+                                .color(palette.muted),
+                        );
+                        if pill_button(ui, "Open File", None, PillStyle::Secondary, palette)
+                            .clicked()
+                        {
+                            open_file_with_default_app(cur_path);
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if pill_button(ui, "Close", None, PillStyle::Secondary, palette).clicked() {
+                            close_clicked = true;
+                        }
+                    });
+                });
+            } else {
+                ui.label(
+                    RichText::new("No additional cover or booklet image scans found in this album folder.")
+                        .size(11.0)
+                        .color(palette.muted),
+                );
+            }
+        },
+    );
+    if close_clicked {
+        open = false;
+    }
+    open
+}
+
 /// Audirvana-inspired Signal Path Inspector + Quick DSP Popover anchored directly above telemetry.
 /// Returns `(dsp_changed, open_full_dsp_settings)`.
 #[allow(clippy::too_many_arguments)]
@@ -4098,6 +4252,11 @@ pub fn show_signal_path_popover(
     plugins: &mut PluginConfig,
     playback_speed: f32,
     ab_loop: (Option<f64>, Option<f64>),
+    sleep_status: Option<&str>,
+    sleep_after_track: bool,
+    current_pos_secs: f64,
+    has_current_track: bool,
+    bookmarks: &[TrackBookmark],
     palette: &Palette,
 ) -> SignalPathActions {
     let mut out = SignalPathActions {
@@ -4107,6 +4266,10 @@ pub fn show_signal_path_popover(
         set_loop_a: false,
         set_loop_b: false,
         clear_loop: false,
+        sleep_preset: None,
+        add_bookmark: false,
+        jump_bookmark_secs: None,
+        remove_bookmark_idx: None,
     };
     if !*open {
         return out;
@@ -4440,6 +4603,77 @@ pub fn show_signal_path_popover(
                     out.clear_loop = true;
                 }
             });
+            ui.add_space(4.0);
+            // Sleep Timer with gentle 5-second fade-out
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Sleep:").size(10.5).color(palette.muted));
+                for (lbl, preset, active) in [
+                    ("Off", SleepTimerPreset::Off, sleep_status.is_none()),
+                    ("15m", SleepTimerPreset::Minutes(15), false),
+                    ("30m", SleepTimerPreset::Minutes(30), false),
+                    ("45m", SleepTimerPreset::Minutes(45), false),
+                    ("60m", SleepTimerPreset::Minutes(60), false),
+                    ("End", SleepTimerPreset::AfterTrack, sleep_after_track),
+                ] {
+                    if pill_button(
+                        ui,
+                        lbl,
+                        None,
+                        if active {
+                            PillStyle::Active
+                        } else {
+                            PillStyle::Secondary
+                        },
+                        palette,
+                    )
+                    .clicked()
+                    {
+                        out.sleep_preset = Some(preset);
+                    }
+                }
+                if let Some(rem) = sleep_status {
+                    ui.label(
+                        RichText::new(rem)
+                            .size(10.0)
+                            .monospace()
+                            .strong()
+                            .color(palette.hires_gold),
+                    );
+                }
+            });
+            if has_current_track {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Bookmarks:").size(10.5).color(palette.muted));
+                    if pill_button(
+                        ui,
+                        &format!("+ {}", format_duration(Some(current_pos_secs))),
+                        None,
+                        PillStyle::Accent,
+                        palette,
+                    )
+                    .on_hover_text("Drop a timestamp bookmark at the current playback position")
+                    .clicked()
+                    {
+                        out.add_bookmark = true;
+                    }
+                    for (idx, bm) in bookmarks.iter().enumerate() {
+                        let lbl = if bm.label.is_empty() {
+                            format_duration(Some(bm.position_secs))
+                        } else {
+                            format!("{} {}", format_duration(Some(bm.position_secs)), bm.label)
+                        };
+                        let resp = pill_button(ui, &lbl, None, PillStyle::Secondary, palette)
+                            .on_hover_text("Click to jump · Right-click to remove bookmark");
+                        if resp.clicked() {
+                            out.jump_bookmark_secs = Some(bm.position_secs);
+                        }
+                        if resp.secondary_clicked() {
+                            out.remove_bookmark_idx = Some(idx);
+                        }
+                    }
+                });
+            }
 
             ui.add_space(6.0);
             ui.separator();
