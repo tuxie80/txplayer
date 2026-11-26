@@ -331,6 +331,8 @@ impl TrackColumns {
     }
 }
 
+type AlbumGroup = (String, String, Track, usize, bool);
+
 #[derive(Clone, PartialEq, Eq)]
 struct VisibleCacheKey {
     library_rev: u64,
@@ -387,18 +389,23 @@ pub struct TxPlayerApp {
     loop_b: Option<f64>,
     show_lyrics: bool,
     cached_lyrics_id: Option<u64>,
-    cached_lyrics: Option<TrackLyrics>,
+    cached_lyrics: Option<Arc<TrackLyrics>>,
     counted_play_id: Option<u64>,
 
-    // Cached filtered/sorted track table & sidebar stats (eliminates 60 Hz cloning/sorting!)
+    // Cached filtered/sorted track table, derived browser views & sidebar stats (zero 60 Hz cloning/sorting!)
     library_rev: u64,
     queue_rev: u64,
     visible_cache_key: Option<VisibleCacheKey>,
-    cached_visible: Vec<Track>,
+    cached_visible: Arc<Vec<Track>>,
     cached_total_duration: f64,
+    cached_albums: Arc<Vec<AlbumGroup>>,
+    cached_artists: Arc<Vec<(String, usize, usize)>>,
+    cached_dirs: Arc<Vec<(PathBuf, usize)>>,
     cached_stats_rev: u64,
     cached_stats_lib_id: u64,
     cached_hires_count: usize,
+    cached_most_played_count: usize,
+    cached_top_rated_count: usize,
     cached_folder_counts: HashMap<PathBuf, usize>,
 
     // Multi-track selection state
@@ -458,6 +465,7 @@ pub struct TxPlayerApp {
     new_playlist_name: String,
     pending_playlist_tracks: Vec<u64>,
     inspect_track_id: Option<u64>,
+    inspect_file_size: Option<(u64, Option<u64>)>,
     tag_editor: TagEditorState,
     command_palette: CommandPaletteState,
 
@@ -592,11 +600,16 @@ impl TxPlayerApp {
             library_rev: 1,
             queue_rev: 1,
             visible_cache_key: None,
-            cached_visible: Vec::new(),
+            cached_visible: Arc::new(Vec::new()),
             cached_total_duration: 0.0,
+            cached_albums: Arc::new(Vec::new()),
+            cached_artists: Arc::new(Vec::new()),
+            cached_dirs: Arc::new(Vec::new()),
             cached_stats_rev: 0,
             cached_stats_lib_id: 0,
             cached_hires_count: 0,
+            cached_most_played_count: 0,
+            cached_top_rated_count: 0,
             cached_folder_counts: HashMap::new(),
             selected_tracks: HashSet::new(),
             selected_queue_indices: HashSet::new(),
@@ -645,6 +658,7 @@ impl TxPlayerApp {
             new_playlist_name: String::new(),
             pending_playlist_tracks: Vec::new(),
             inspect_track_id: None,
+            inspect_file_size: None,
             tag_editor: TagEditorState::new(),
             command_palette: CommandPaletteState::default(),
             dialog_sender,
@@ -784,11 +798,7 @@ impl TxPlayerApp {
     }
 
     fn track(&self, id: u64) -> Option<&Track> {
-        self.store
-            .active()
-            .tracks
-            .iter()
-            .find(|track| track.id == id)
+        self.store.active().get_by_id(id)
     }
 
     fn mark_library_dirty(&mut self) {
@@ -805,7 +815,23 @@ impl TxPlayerApp {
             return;
         }
         let lib = self.store.active();
-        self.cached_hires_count = lib.tracks.iter().filter(|t| t.is_hires()).count();
+        let mut hires = 0usize;
+        let mut most_played = 0usize;
+        let mut top_rated = 0usize;
+        for t in &lib.tracks {
+            if t.is_hires() {
+                hires += 1;
+            }
+            if t.play_count > 0 {
+                most_played += 1;
+            }
+            if t.rating >= 4 {
+                top_rated += 1;
+            }
+        }
+        self.cached_hires_count = hires;
+        self.cached_most_played_count = most_played;
+        self.cached_top_rated_count = top_rated;
         self.cached_folder_counts.clear();
         for folder in &lib.folders {
             let count = lib.folder_track_count(folder);
@@ -837,13 +863,50 @@ impl TxPlayerApp {
         }
         let tracks = self.compute_visible_tracks();
         self.cached_total_duration = tracks.iter().filter_map(|t| t.duration).sum();
-        self.cached_visible = tracks;
+
+        // Precompute derived Albums / Artists / Folders views once on invalidation (zero 60 Hz HashMaps!)
+        let mut album_groups: Vec<(String, String, Track, usize, bool)> = Vec::new();
+        let mut album_idx: HashMap<(String, String), usize> = HashMap::new();
+        let mut artist_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+        let mut dir_counts: HashMap<PathBuf, usize> = HashMap::new();
+        for tr in &tracks {
+            let akey = (tr.album.clone(), tr.artist.clone());
+            if let Some(&gi) = album_idx.get(&akey) {
+                album_groups[gi].3 += 1;
+                album_groups[gi].4 |= tr.is_hires();
+            } else {
+                let gi = album_groups.len();
+                album_idx.insert(akey.clone(), gi);
+                album_groups.push((akey.0, akey.1, tr.clone(), 1, tr.is_hires()));
+            }
+            let ae = artist_counts
+                .entry(tr.artist.clone())
+                .or_insert_with(|| (0, HashSet::new()));
+            ae.0 += 1;
+            ae.1.insert(tr.album.clone());
+            if let Some(parent) = tr.path.parent() {
+                *dir_counts.entry(parent.to_path_buf()).or_insert(0) += 1;
+            }
+        }
+        album_groups.sort_by_key(|a| a.0.to_lowercase());
+        let mut artists: Vec<(String, usize, usize)> = artist_counts
+            .into_iter()
+            .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
+            .collect();
+        artists.sort_by_key(|a| a.0.to_lowercase());
+        let mut dirs: Vec<(PathBuf, usize)> = dir_counts.into_iter().collect();
+        dirs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        self.cached_albums = Arc::new(album_groups);
+        self.cached_artists = Arc::new(artists);
+        self.cached_dirs = Arc::new(dirs);
+        self.cached_visible = Arc::new(tracks);
         self.visible_cache_key = Some(key);
     }
 
-    fn visible_tracks(&mut self) -> Vec<Track> {
+    fn visible_tracks(&mut self) -> Arc<Vec<Track>> {
         self.ensure_visible_cache();
-        self.cached_visible.clone()
+        Arc::clone(&self.cached_visible)
     }
 
     fn compute_visible_tracks(&self) -> Vec<Track> {
@@ -1474,7 +1537,8 @@ impl TxPlayerApp {
         self.cached_lyrics_id = cur_id;
         self.cached_lyrics = cur_id
             .and_then(|id| self.track(id))
-            .and_then(|t| load_lyrics_for_track(&t.path, t.lyrics.as_deref()));
+            .and_then(|t| load_lyrics_for_track(&t.path, t.lyrics.as_deref()))
+            .map(Arc::new);
     }
 
     fn apply_current_rg(&mut self) {
@@ -1856,15 +1920,11 @@ impl TxPlayerApp {
                     if let Some(duration) = duration {
                         self.duration = duration;
                         if let Some(cid) = self.current_id()
-                            && let Some(track) = self
-                                .store
-                                .active_mut()
-                                .tracks
-                                .iter_mut()
-                                .find(|t| t.id == cid)
+                            && let Some(track) = self.store.active_mut().get_by_id_mut(cid)
                             && track.duration.is_none()
                         {
                             track.duration = Some(duration);
+                            self.mark_library_dirty();
                         }
                     }
                     if let Some(t) = self.current_track().cloned() {
@@ -2548,29 +2608,29 @@ impl TxPlayerApp {
             p.faint,
         );
 
-        // Right-aligned global utility cluster:
-        // [Compact] | [Cmd+K] | [Visualizer] [Lyrics] [Settings] [Pin]
-        let mut rx = bar_rect.right() - 10.0;
+        // Right-aligned global utility cluster (EXACT same right-to-left order as Compact Mode!):
+        // [Cmd+K] [Visualizer] [Lyrics] [Settings] [Pin] | [Compact]
+        let mut rx = bar_rect.right() - 8.0;
 
-        let pin_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
-        rx = pin_r.left() - 3.0;
-        let set_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
-        rx = set_r.left() - 3.0;
-        let lyr_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
-        rx = lyr_r.left() - 3.0;
-        let vis_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
-        rx = vis_r.left() - 3.0;
-        let cmd_r = Rect::from_center_size(pos2(rx - 26.0, cy), vec2(52.0, 22.0));
-        rx = cmd_r.left() - 8.0;
+        let mode_r = Rect::from_center_size(pos2(rx - 39.0, cy), vec2(78.0, 22.0));
+        rx = mode_r.left() - 6.0;
 
         // Subtle vertical divider between utility icons and Mode Switch pill
         ui.painter().line_segment(
             [pos2(rx, bar_rect.top() + 8.0), pos2(rx, bar_rect.bottom() - 8.0)],
             Stroke::new(1.0, p.border),
         );
-        rx -= 8.0;
+        rx -= 6.0;
 
-        let mode_r = Rect::from_center_size(pos2(rx - 39.0, cy), vec2(78.0, 22.0));
+        let pin_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = pin_r.left() - 2.0;
+        let set_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = set_r.left() - 2.0;
+        let lyr_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = lyr_r.left() - 2.0;
+        let vis_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = vis_r.left() - 4.0;
+        let cmd_r = Rect::from_center_size(pos2(rx - 26.0, cy), vec2(52.0, 22.0));
 
         let mode_clicked = paint_mode_switch_pill(
             ui,
@@ -2796,20 +2856,8 @@ impl TxPlayerApp {
                     ui.label(RichText::new("SMART").size(9.5).color(p.faint).strong());
                 });
                 let hires_count = self.cached_hires_count;
-                let most_played_count = self
-                    .store
-                    .active()
-                    .tracks
-                    .iter()
-                    .filter(|t| t.play_count > 0)
-                    .count();
-                let top_rated_count = self
-                    .store
-                    .active()
-                    .tracks
-                    .iter()
-                    .filter(|t| t.rating >= 4)
-                    .count();
+                let most_played_count = self.cached_most_played_count;
+                let top_rated_count = self.cached_top_rated_count;
                 self.nav_row(
                     ui,
                     "Hi-Res Masters",
@@ -3308,7 +3356,7 @@ impl TxPlayerApp {
     fn main_view(&mut self, ui: &mut Ui) {
         self.ensure_visible_cache();
         let p = self.palette;
-        let tracks = self.cached_visible.clone();
+        let tracks = Arc::clone(&self.cached_visible);
         let total_duration = self.cached_total_duration;
 
         ui.add_space(12.0);
@@ -3687,21 +3735,7 @@ impl TxPlayerApp {
             self.empty_state(ui);
             return;
         }
-        // Group tracks by (album, artist) preserving deterministic sorted order
-        let mut groups: Vec<(String, String, Track, usize, bool)> = Vec::new();
-        let mut idx_map: HashMap<(String, String), usize> = HashMap::new();
-        for tr in tracks {
-            let key = (tr.album.clone(), tr.artist.clone());
-            if let Some(&gi) = idx_map.get(&key) {
-                groups[gi].3 += 1;
-                groups[gi].4 |= tr.is_hires();
-            } else {
-                let gi = groups.len();
-                idx_map.insert(key.clone(), gi);
-                groups.push((key.0, key.1, tr.clone(), 1, tr.is_hires()));
-            }
-        }
-        groups.sort_by_key(|a| a.0.to_lowercase());
+        let groups = Arc::clone(&self.cached_albums);
 
         let card_w = 152.0_f32;
         let card_h = 204.0_f32;
@@ -3840,19 +3874,7 @@ impl TxPlayerApp {
             self.empty_state(ui);
             return;
         }
-        let mut counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
-        for tr in tracks {
-            let entry = counts
-                .entry(tr.artist.clone())
-                .or_insert_with(|| (0, HashSet::new()));
-            entry.0 += 1;
-            entry.1.insert(tr.album.clone());
-        }
-        let mut artists: Vec<(String, usize, usize)> = counts
-            .into_iter()
-            .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
-            .collect();
-        artists.sort_by_key(|a| a.0.to_lowercase());
+        let artists = Arc::clone(&self.cached_artists);
 
         let mut pick: Option<String> = None;
         ScrollArea::vertical()
@@ -3862,7 +3884,7 @@ impl TxPlayerApp {
             .show(ui, |ui| {
                 ui.style_mut().spacing.item_spacing.y = 3.0;
                 let w = ui.available_width();
-                for (name, t_cnt, a_cnt) in &artists {
+                for (name, t_cnt, a_cnt) in artists.iter() {
                     let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
                     if !ui.is_rect_visible(rect) {
                         continue;
@@ -3907,14 +3929,7 @@ impl TxPlayerApp {
             self.empty_state(ui);
             return;
         }
-        let mut dir_counts: HashMap<PathBuf, usize> = HashMap::new();
-        for tr in tracks {
-            if let Some(parent) = tr.path.parent() {
-                *dir_counts.entry(parent.to_path_buf()).or_insert(0) += 1;
-            }
-        }
-        let mut dirs_sorted: Vec<(PathBuf, usize)> = dir_counts.into_iter().collect();
-        dirs_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let dirs_sorted = Arc::clone(&self.cached_dirs);
 
         let mut filter_dir: Option<PathBuf> = None;
         ScrollArea::vertical()
@@ -3924,7 +3939,7 @@ impl TxPlayerApp {
             .show(ui, |ui| {
                 ui.style_mut().spacing.item_spacing.y = 3.0;
                 let w = ui.available_width();
-                for (dir, cnt) in &dirs_sorted {
+                for (dir, cnt) in dirs_sorted.iter() {
                     let (rect, resp) = ui.allocate_exact_size(vec2(w, 36.0), Sense::click());
                     if !ui.is_rect_visible(rect) {
                         continue;
@@ -4026,7 +4041,7 @@ impl TxPlayerApp {
         ui.separator();
         ui.add_space(6.0);
 
-        let Some(ref lyrics) = self.cached_lyrics.clone() else {
+        let Some(lyrics) = self.cached_lyrics.as_ref().map(Arc::clone) else {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("No lyrics found").size(12.0).color(p.muted));
@@ -5221,6 +5236,7 @@ impl TxPlayerApp {
                         .clicked()
                         {
                             self.store.active_mut().toggle_favorite(track.id);
+                            self.mark_library_dirty();
                             self.store.save();
                         }
                     } else {
@@ -5262,6 +5278,7 @@ impl TxPlayerApp {
                             .clicked()
                         {
                             self.shuffle = !self.shuffle;
+                            self.preload_next_track();
                         }
                         if icons::icon_button(
                             ui,
@@ -5317,6 +5334,7 @@ impl TxPlayerApp {
                                 RepeatMode::All => RepeatMode::One,
                                 RepeatMode::One => RepeatMode::Off,
                             };
+                            self.preload_next_track();
                         }
                     });
 
@@ -5699,9 +5717,18 @@ impl TxPlayerApp {
         // 3) Track Inspector Window
         if let Some(tid) = self.inspect_track_id {
             if let Some(track) = self.track(tid).cloned() {
+                let file_size = match self.inspect_file_size {
+                    Some((cached_id, sz)) if cached_id == tid => sz,
+                    _ => {
+                        let sz = track.file_size_bytes();
+                        self.inspect_file_size = Some((tid, sz));
+                        sz
+                    }
+                };
                 let (open_stay, action) = modals::show_track_info_window(
                     context,
                     &track,
+                    file_size,
                     &p,
                     |ui, size| self.cover(ui, &track, size),
                     |ui| {
@@ -5711,6 +5738,7 @@ impl TxPlayerApp {
                 );
                 if !open_stay {
                     self.inspect_track_id = None;
+                    self.inspect_file_size = None;
                 }
                 if let Some(act) = action {
                     match act {
@@ -6138,7 +6166,7 @@ impl TxPlayerApp {
         entries.push(PaletteEntry {
             category: "ACTION",
             label: "Edit Current Track Tags & Lookup".into(),
-            subtitle: "Shortcut: Cmd+T".into(),
+            subtitle: format!("Shortcut: {MOD_SHORT}T"),
             action: PaletteCommand::EditCurrentTags,
         });
         entries.push(PaletteEntry {
@@ -6425,25 +6453,26 @@ impl TxPlayerApp {
             p.faint,
         );
 
-        // Top-right cluster: [Pin] [Lyrics] [Vis] [List] [Settings] | [Classic]
+        // Top-right cluster (EXACT same right-to-left order as Classic Mode!):
+        // [List] [Visualizer] [Lyrics] [Settings] [Pin] | [Classic]
         let mut rx = hdr_rect.right() - 8.0;
-        let btn_classic_r = Rect::from_center_size(pos2(rx - 36.0, cy), vec2(72.0, 22.0));
+        let btn_classic_r = Rect::from_center_size(pos2(rx - 39.0, cy), vec2(78.0, 22.0));
         rx = btn_classic_r.left() - 6.0;
         ui.painter().line_segment(
             [pos2(rx, hdr_rect.top() + 8.0), pos2(rx, hdr_rect.bottom() - 8.0)],
             Stroke::new(1.0, p.border),
         );
-        rx -= 5.0;
+        rx -= 6.0;
 
+        let btn_pin_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = btn_pin_r.left() - 2.0;
         let btn_set_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
         rx = btn_set_r.left() - 2.0;
-        let btn_list_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
-        rx = btn_list_r.left() - 2.0;
-        let btn_vis_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
-        rx = btn_vis_r.left() - 2.0;
         let btn_lyr_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
         rx = btn_lyr_r.left() - 2.0;
-        let btn_pin_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        let btn_vis_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = btn_vis_r.left() - 2.0;
+        let btn_list_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
 
         let pin_clicked = paint_topbar_pin_btn(ui, btn_pin_r, "cmp_pin", self.always_on_top, &p);
         let lyr_clicked = paint_topbar_icon_btn(
@@ -6869,13 +6898,14 @@ impl TxPlayerApp {
                 });
 
                 ui.add_space(6.0);
-                // Row C: Compact Tactile Transport (left) + Signal Path + Output Icon + Volume (right)
+                // Row C: Compact Tactile Transport (left) + Output Icon + Mute + Volume (right, matching Classic!)
                 ui.horizontal(|ui| {
                     ui.style_mut().spacing.item_spacing.x = 5.0;
                     if transport_toggle_button(ui, Icon::Shuffle, self.shuffle, "Shuffle", &p)
                         .clicked()
                     {
                         self.shuffle = !self.shuffle;
+                        self.preload_next_track();
                     }
                     if icons::icon_button(
                         ui,
@@ -6926,11 +6956,12 @@ impl TxPlayerApp {
                             RepeatMode::All => RepeatMode::One,
                             RepeatMode::One => RepeatMode::Off,
                         };
+                        self.preload_next_track();
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.style_mut().spacing.item_spacing.x = 4.0;
-                        if let Some(new_vol) = custom_volume_bar(ui, 76.0, self.volume, &p) {
+                        if let Some(new_vol) = custom_volume_bar(ui, 86.0, self.volume, &p) {
                             self.set_volume(new_vol);
                         }
                         let vol_icon = if self.volume <= 0.001 {
@@ -6959,7 +6990,7 @@ impl TxPlayerApp {
                             self.toggle_mute();
                         }
 
-                        // Compact Output Device icon (no bulky button!)
+                        // Compact Output Device icon (matches Classic transport bar; Signal Path lives on telemetry bar above)
                         let active_dev = self
                             .stream_info
                             .as_ref()
@@ -6988,29 +7019,6 @@ impl TxPlayerApp {
                                 self.show_signal_path = false;
                             }
                         }
-
-                        // Signal Path & DSP quick icon
-                        let sig_resp = icons::icon_button(
-                            ui,
-                            Vec2::splat(22.0),
-                            Icon::Sliders,
-                            13.0,
-                            if self.show_signal_path || self.plugins.dsp.is_actively_processing() {
-                                p.accent
-                            } else {
-                                p.muted
-                            },
-                            p.text,
-                            p.hover,
-                            "Signal Path & Live DSP",
-                        );
-                        self.signal_btn_rect = Some(sig_resp.rect);
-                        if sig_resp.clicked() {
-                            self.show_signal_path = !self.show_signal_path;
-                            if self.show_signal_path {
-                                self.show_device_picker = false;
-                            }
-                        }
                     });
                 });
             });
@@ -7035,7 +7043,7 @@ impl TxPlayerApp {
         // 4) Collapsible Winamp / AIMP2-Style Playlist Drawer
         if self.compact_show_playlist {
             self.ensure_visible_cache();
-            let tracks = self.cached_visible.clone();
+            let tracks = Arc::clone(&self.cached_visible);
             let current_id = self.current_id();
             let time = ctx.input(|i| i.time);
             let (rms_l, rms_r, _, _, _) = self.visual_tap.levels();
@@ -7627,7 +7635,7 @@ impl Drop for TxPlayerApp {
         if self.ephemeral_session {
             return;
         }
-        self.store.save();
+        self.store.save_sync();
         SessionState {
             active_library_id: self.store.active_id,
             queue_ids: self.current_queue.clone(),
@@ -8164,6 +8172,20 @@ fn acoustic_timeline_scrubber(
 
                     let mut played_crest: Vec<Pos2> = Vec::with_capacity(steps);
                     let mut unplayed_crest: Vec<Pos2> = Vec::with_capacity(steps);
+                    // Single pre-sized GPU Mesh replaces ~440 per-frame Shape::convex_polygon Vec allocations!
+                    let mut wf_mesh = egui::Mesh::default();
+                    wf_mesh.vertices.reserve((steps + 2) * 8);
+                    wf_mesh.indices.reserve((steps + 2) * 12);
+
+                    let mut push_quad = |p0: Pos2, p1: Pos2, p2: Pos2, p3: Pos2, col: Color32| {
+                        let base = wf_mesh.vertices.len() as u32;
+                        wf_mesh.colored_vertex(p0, col);
+                        wf_mesh.colored_vertex(p1, col);
+                        wf_mesh.colored_vertex(p2, col);
+                        wf_mesh.colored_vertex(p3, col);
+                        wf_mesh.add_triangle(base, base + 1, base + 2);
+                        wf_mesh.add_triangle(base, base + 2, base + 3);
+                    };
 
                     let mut prev_x = inner_l;
                     let mut prev_a = sample_amp(0.0);
@@ -8172,30 +8194,35 @@ fn acoustic_timeline_scrubber(
                         let x = inner_l + inner_w * t;
                         let a = sample_amp(t);
 
-                        let draw_quad = |x0: f32, a0: f32, x1: f32, a1: f32, is_played: bool, is_hov: bool| {
-                            let y0_u = cy - up_h * a0;
-                            let y1_u = cy - up_h * a1;
-                            let y0_d = cy + dn_h * a0;
-                            let y1_d = cy + dn_h * a1;
-                            let col_u = if is_played {
-                                played_up
-                            } else if is_hov {
-                                hover_up
-                            } else {
-                                unplayed_up
+                        let mut draw_quad =
+                            |x0: f32, a0: f32, x1: f32, a1: f32, is_played: bool, is_hov: bool| {
+                                let y0_u = cy - up_h * a0;
+                                let y1_u = cy - up_h * a1;
+                                let y0_d = cy + dn_h * a0;
+                                let y1_d = cy + dn_h * a1;
+                                let col_u = if is_played {
+                                    played_up
+                                } else if is_hov {
+                                    hover_up
+                                } else {
+                                    unplayed_up
+                                };
+                                let col_d = if is_played { played_dn } else { unplayed_dn };
+                                push_quad(
+                                    pos2(x0, cy),
+                                    pos2(x0, y0_u),
+                                    pos2(x1, y1_u),
+                                    pos2(x1, cy),
+                                    col_u,
+                                );
+                                push_quad(
+                                    pos2(x0, cy),
+                                    pos2(x1, cy),
+                                    pos2(x1, y1_d),
+                                    pos2(x0, y0_d),
+                                    col_d,
+                                );
                             };
-                            let col_d = if is_played { played_dn } else { unplayed_dn };
-                            painter.add(egui::Shape::convex_polygon(
-                                vec![pos2(x0, cy), pos2(x0, y0_u), pos2(x1, y1_u), pos2(x1, cy)],
-                                col_u,
-                                Stroke::NONE,
-                            ));
-                            painter.add(egui::Shape::convex_polygon(
-                                vec![pos2(x0, cy), pos2(x1, cy), pos2(x1, y1_d), pos2(x0, y0_d)],
-                                col_d,
-                                Stroke::NONE,
-                            ));
-                        };
 
                         let in_hover = |mid_x: f32| -> bool {
                             active
@@ -8234,6 +8261,10 @@ fn acoustic_timeline_scrubber(
 
                         prev_x = x;
                         prev_a = a;
+                    }
+
+                    if !wf_mesh.is_empty() {
+                        painter.add(egui::Shape::mesh(wf_mesh));
                     }
 
                     if unplayed_crest.len() >= 2 {

@@ -434,6 +434,7 @@ pub fn compute_waveform(path: &Path, bins: usize) -> Option<Vec<f32>> {
         .ok()?;
 
     let mut raw_peaks: Vec<f32> = Vec::with_capacity(bins * 4);
+    let mut sample_buf: Option<(usize, SampleBuffer<f32>)> = None;
     let mut packet_idx = 0usize;
     let decimate_stride = match total_frames {
         Some(f) if f > 44_100 * 600 => 4,
@@ -453,7 +454,14 @@ pub fn compute_waveform(path: &Path, bins: usize) -> Option<Vec<f32>> {
             continue;
         };
         let spec = *audio.spec();
-        let mut samples = SampleBuffer::<f32>::new(audio.capacity() as u64, spec);
+        let cap = audio.capacity();
+        let samples = match &mut sample_buf {
+            Some((cur_cap, sb)) if *cur_cap >= cap => sb,
+            slot => {
+                *slot = Some((cap, SampleBuffer::<f32>::new(cap as u64, spec)));
+                &mut slot.as_mut().unwrap().1
+            }
+        };
         samples.copy_interleaved_ref(audio);
         let data = samples.samples();
         if data.is_empty() {
@@ -906,8 +914,9 @@ fn play_file(
         // Detect default-device switches or device disconnects and seamlessly reopen
         let mut should_reopen = output.reopen_needed.swap(false, Ordering::AcqRel);
         if !should_reopen
+            && !paused
             && prefs.preferred_device.is_none()
-            && last_device_check.elapsed() >= Duration::from_millis(500)
+            && last_device_check.elapsed() >= Duration::from_millis(1500)
         {
             last_device_check = Instant::now();
             let current_default_id = cpal::default_host()
@@ -1216,34 +1225,36 @@ fn play_file(
                     }
                 };
                 buf.copy_interleaved_ref(audio);
-                let mut samples = buf.samples().to_vec();
-                let frames_in_pkt = samples.len() / channels.max(1);
+                let raw_samples = buf.samples();
+                let frames_in_pkt = raw_samples.len() / channels.max(1);
 
-                // Optional smooth fade-out near end of track when crossfade is enabled
+                // Optional smooth fade-out near end of track when crossfade is enabled (zero copy otherwise!)
                 let end_secs = spec.cue_end.or(decoder.duration);
+                let sr = decoder.source_sample_rate.max(1) as f64;
+                let fade_s = (prefs.crossfade_secs * 0.5) as f64;
+                let pkt_end_s = (decoded_source_frames + frames_in_pkt as u64) as f64 / sr;
                 if prefs.crossfade_secs > 0.05
                     && let Some(end_s) = end_secs
+                    && pkt_end_s > (end_s - fade_s).max(spec.cue_start)
                 {
-                    let sr = decoder.source_sample_rate.max(1) as f64;
-                    let fade_s = (prefs.crossfade_secs * 0.5) as f64;
                     let fade_start = (end_s - fade_s).max(spec.cue_start);
-                    let pkt_end_s = (decoded_source_frames + frames_in_pkt as u64) as f64 / sr;
-                    if pkt_end_s > fade_start {
-                        for f_idx in 0..frames_in_pkt {
-                            let t_s = (decoded_source_frames + f_idx as u64) as f64 / sr;
-                            if t_s > fade_start {
-                                let rem = ((end_s - t_s) / fade_s).clamp(0.0, 1.0) as f32;
-                                let gain = (rem * std::f32::consts::FRAC_PI_2).sin();
-                                for c in 0..channels {
-                                    samples[f_idx * channels + c] *= gain;
-                                }
+                    let mut faded = raw_samples.to_vec();
+                    for f_idx in 0..frames_in_pkt {
+                        let t_s = (decoded_source_frames + f_idx as u64) as f64 / sr;
+                        if t_s > fade_start {
+                            let rem = ((end_s - t_s) / fade_s).clamp(0.0, 1.0) as f32;
+                            let gain = (rem * std::f32::consts::FRAC_PI_2).sin();
+                            for c in 0..channels {
+                                faded[f_idx * channels + c] *= gain;
                             }
                         }
                     }
+                    resampler.push_interleaved(&faded, channels);
+                } else {
+                    resampler.push_interleaved(raw_samples, channels);
                 }
 
                 decoded_source_frames += frames_in_pkt as u64;
-                resampler.push_interleaved(&samples, channels);
             }
             Err(SymphoniaError::DecodeError(_)) => {
                 packet_errors += 1;
@@ -1504,6 +1515,9 @@ fn build_stream<T: CpalSample>(
         f32::from_bits(volume.load(Ordering::Relaxed)),
         linear_volume.load(Ordering::Relaxed),
     );
+    // Sample-rate-independent ~4.5 ms volume ramp constant (identical feel from 44.1 kHz to 192 kHz)
+    let gain_alpha = (1.0 - (-1.0_f32 / (config.sample_rate.max(8_000) as f32 * 0.0045)).exp())
+        .clamp(0.0005, 0.05);
     let mut dsp = RealtimeDsp::new(config.sample_rate, &dsp_params);
     let mut write_cursor = visual_tap.write_pos.load(Ordering::Relaxed);
     let error_events = events.clone();
@@ -1536,7 +1550,7 @@ fn build_stream<T: CpalSample>(
             let mut frame_count = 0_usize;
 
             for frame in data.chunks_mut(channels) {
-                smoothed_gain += (target_gain - smoothed_gain) * 0.005;
+                smoothed_gain += (target_gain - smoothed_gain) * gain_alpha;
                 if consumer.occupied_len() >= channels {
                     let mut raw_l = 0.0_f32;
                     let mut raw_r = 0.0_f32;
@@ -1582,7 +1596,6 @@ fn build_stream<T: CpalSample>(
                     peak_l = peak_l.max(left.abs());
                     peak_r = peak_r.max(right.abs());
                     frame_count += 1;
-                    played_frames.fetch_add(1, Ordering::Relaxed);
                 } else {
                     for sample in frame.iter_mut() {
                         *sample = T::from_float(0.0);
@@ -1592,6 +1605,8 @@ fn build_stream<T: CpalSample>(
             }
 
             if frame_count > 0 {
+                // Single batched atomic update per callback buffer (eliminates up to 192k atomic RMW/sec)
+                played_frames.fetch_add(frame_count as u64, Ordering::Relaxed);
                 let n = frame_count as f32;
                 let rms_l = (sum_sq_l / n).sqrt().min(1.0);
                 let rms_r = (sum_sq_r / n).sqrt().min(1.0);
@@ -1671,7 +1686,15 @@ impl StreamResampler {
     }
 
     fn push_interleaved(&mut self, samples: &[f32], packet_channels: usize) {
-        if packet_channels == 0 {
+        if packet_channels == 0 || samples.is_empty() {
+            return;
+        }
+        // Fast 1:1 passthrough path: zero planar deinterleave/reinterleave overhead!
+        if self.resampler.is_none() && packet_channels == self.channels {
+            let valid_len = (samples.len() / packet_channels) * packet_channels;
+            if valid_len > 0 {
+                self.ready.push_back(samples[..valid_len].to_vec());
+            }
             return;
         }
         for frame in samples

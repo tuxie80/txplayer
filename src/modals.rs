@@ -2087,6 +2087,7 @@ pub fn show_tag_editor_window(
 pub fn show_track_info_window(
     context: &egui::Context,
     track: &Track,
+    file_size_bytes: Option<u64>,
     palette: &Palette,
     cover_paint: impl FnOnce(&mut Ui, f32),
     quality_paint: impl FnOnce(&mut Ui),
@@ -2155,7 +2156,7 @@ pub fn show_track_info_window(
                         );
                     }
                     row("Duration", format_duration(track.duration));
-                    if let Some(bytes) = track.file_size_bytes() {
+                    if let Some(bytes) = file_size_bytes {
                         row("File Size", format_file_size(bytes));
                     }
                     if let Some(num) = track.track_number {

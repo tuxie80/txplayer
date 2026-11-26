@@ -42,6 +42,8 @@ impl FolderWatcher {
                 let mut watched = initial_folders;
                 let mut snapshot = take_snapshot(&watched);
                 let mut ticks = 0u32;
+                // Adaptive interval: 10s normal, backs off to 20s when idle so large drives/NAS stay quiet.
+                let mut interval_ticks: u32 = 20; // 20 * 500ms = 10s
 
                 while !sd.load(Ordering::Relaxed) {
                     // Drain any folder list updates quickly
@@ -55,11 +57,12 @@ impl FolderWatcher {
                     if list_changed {
                         snapshot = take_snapshot(&watched);
                         ticks = 0;
+                        interval_ticks = 20;
                     }
 
                     thread::sleep(Duration::from_millis(500));
                     ticks += 1;
-                    if ticks < 8 || !en.load(Ordering::Relaxed) || watched.is_empty() {
+                    if ticks < interval_ticks || !en.load(Ordering::Relaxed) || watched.is_empty() {
                         continue;
                     }
                     ticks = 0;
@@ -78,10 +81,13 @@ impl FolderWatcher {
 
                     snapshot = next;
                     if !changed_or_added.is_empty() || removed_count > 0 {
+                        interval_ticks = 12; // 6s responsive re-check while files are being copied
                         let _ = events_tx.send(WatchDelta {
                             changed_or_added,
                             removed_count,
                         });
+                    } else {
+                        interval_ticks = (interval_ticks + 4).min(40); // calm backoff up to 20s
                     }
                 }
             })

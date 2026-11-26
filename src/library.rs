@@ -1,10 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, unbounded};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -39,6 +41,9 @@ pub struct Library {
     pub favorites: HashSet<u64>,
     #[serde(default)]
     pub playlists: Vec<Playlist>,
+    /// O(1) lookup index (`track.id -> index in tracks`); rebuilt automatically on load/mutate.
+    #[serde(skip)]
+    id_index: HashMap<u64, usize>,
 }
 
 fn default_library_id() -> u64 {
@@ -58,13 +63,48 @@ impl Default for Library {
             folders: Vec::new(),
             favorites: HashSet::new(),
             playlists: Vec::new(),
+            id_index: HashMap::new(),
         }
     }
 }
 
 impl Library {
+    pub fn rebuild_index(&mut self) {
+        self.id_index.clear();
+        self.id_index.reserve(self.tracks.len());
+        for (idx, tr) in self.tracks.iter().enumerate() {
+            self.id_index.insert(tr.id, idx);
+        }
+    }
+
+    pub fn get_by_id(&self, id: u64) -> Option<&Track> {
+        if let Some(&idx) = self.id_index.get(&id)
+            && let Some(tr) = self.tracks.get(idx)
+            && tr.id == id
+        {
+            return Some(tr);
+        }
+        self.tracks.iter().find(|t| t.id == id)
+    }
+
+    pub fn get_by_id_mut(&mut self, id: u64) -> Option<&mut Track> {
+        if let Some(&idx) = self.id_index.get(&id)
+            && self.tracks.get(idx).is_some_and(|t| t.id == id)
+        {
+            return self.tracks.get_mut(idx);
+        }
+        self.tracks.iter_mut().find(|t| t.id == id)
+    }
+
     pub fn upsert(&mut self, mut track: Track) {
-        if let Some(existing) = self.tracks.iter_mut().find(|item| item.id == track.id) {
+        let existing_idx = self
+            .id_index
+            .get(&track.id)
+            .copied()
+            .filter(|&i| self.tracks.get(i).is_some_and(|t| t.id == track.id))
+            .or_else(|| self.tracks.iter().position(|item| item.id == track.id));
+        if let Some(idx) = existing_idx {
+            let existing = &mut self.tracks[idx];
             // Preserve user listening stats, ratings, and original added_at when rescanning!
             track.play_count = existing.play_count.max(track.play_count);
             if track.rating == 0 {
@@ -74,19 +114,22 @@ impl Library {
                 track.added_at = existing.added_at;
             }
             *existing = track;
+            self.id_index.insert(self.tracks[idx].id, idx);
         } else {
+            let idx = self.tracks.len();
+            self.id_index.insert(track.id, idx);
             self.tracks.push(track);
         }
     }
 
     pub fn increment_play_count(&mut self, id: u64) {
-        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == id) {
+        if let Some(t) = self.get_by_id_mut(id) {
             t.play_count = t.play_count.saturating_add(1);
         }
     }
 
     pub fn set_rating(&mut self, id: u64, rating: u8) {
-        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == id) {
+        if let Some(t) = self.get_by_id_mut(id) {
             t.rating = rating.min(5);
         }
     }
@@ -101,6 +144,7 @@ impl Library {
                 .then(a.track_number.cmp(&b.track_number))
                 .then(a.title.to_lowercase().cmp(&b.title.to_lowercase()))
         });
+        self.rebuild_index();
     }
 
     pub fn remove_tracks(&mut self, ids: &[u64]) -> Vec<Track> {
@@ -122,6 +166,9 @@ impl Library {
         }
         for pl in &mut self.playlists {
             pl.track_ids.retain(|tid| !id_set.contains(tid));
+        }
+        if !removed.is_empty() {
+            self.rebuild_index();
         }
         removed
     }
@@ -264,6 +311,9 @@ impl LibraryStore {
             if !store.libraries.iter().any(|l| l.id == store.active_id) {
                 store.active_id = store.libraries[0].id;
             }
+            for lib in &mut store.libraries {
+                lib.rebuild_index();
+            }
             return store;
         }
         // Migrate legacy single library.json transparently
@@ -275,6 +325,7 @@ impl LibraryStore {
             if lib.name.trim().is_empty() {
                 lib.name = default_library_name();
             }
+            lib.rebuild_index();
             return Self {
                 active_id: lib.id,
                 libraries: vec![lib],
@@ -283,17 +334,17 @@ impl LibraryStore {
         Self::default()
     }
 
+    /// Non-blocking save: enqueues snapshot onto a single coalescing background writer thread
+    /// so the 60 Hz UI thread never stalls on JSON serialization or disk I/O mid-playback.
     pub fn save(&self) {
+        let tx = background_saver();
+        let _ = tx.send(self.clone());
+    }
+
+    /// Blocking save used during shutdown (`Drop`) to guarantee final state is flushed to disk.
+    pub fn save_sync(&self) {
         let path = data_directory().join("libraries.json");
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(data) = serde_json::to_vec(self) {
-            let tmp = path.with_extension("tmp");
-            if std::fs::write(&tmp, data).is_ok() {
-                let _ = std::fs::rename(tmp, path);
-            }
-        }
+        save_store_to_path(self, &path);
     }
 
     pub fn active(&self) -> &Library {
@@ -339,6 +390,50 @@ impl LibraryStore {
             self.active_id = self.libraries[0].id;
         }
         Some(name)
+    }
+}
+
+fn background_saver() -> &'static Sender<LibraryStore> {
+    static SAVER: OnceLock<Sender<LibraryStore>> = OnceLock::new();
+    SAVER.get_or_init(|| {
+        let (tx, rx) = unbounded::<LibraryStore>();
+        let _ = thread::Builder::new()
+            .name("txplayer-save".into())
+            .spawn(move || {
+                while let Ok(mut latest) = rx.recv() {
+                    // Coalesce bursts (e.g. rapid favorite toggles / scan completions)
+                    while let Ok(newer) = rx.try_recv() {
+                        latest = newer;
+                    }
+                    let path = data_directory().join("libraries.json");
+                    save_store_to_path(&latest, &path);
+                }
+            });
+        tx
+    })
+}
+
+/// Cross-platform safe atomic replacement (fixes Windows `std::fs::rename` failing with
+/// `ERROR_ALREADY_EXISTS` when destination `libraries.json` already exists!).
+fn save_store_to_path(store: &LibraryStore, path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(data) = serde_json::to_vec(store) else {
+        return;
+    };
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &data).is_ok() {
+        if std::fs::rename(&tmp, path).is_ok() {
+            return;
+        }
+        // Windows: rename refuses to overwrite an existing destination file — remove then rename,
+        // falling back to direct write if the file is momentarily held by AV/indexer.
+        let _ = std::fs::remove_file(path);
+        if std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::write(path, &data);
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -512,5 +607,34 @@ mod tests {
         let removed = lib.remove_tracks(&[2]);
         assert_eq!(removed.len(), 1);
         assert!(lib.playlist(pl_id).unwrap().track_ids.is_empty());
+        // O(1) index stays in sync after upsert, sort, and removal
+        assert!(lib.get_by_id(1).is_some());
+        assert!(lib.get_by_id(2).is_none());
+        assert_eq!(lib.get_by_id(3).unwrap().title, "Ballade No.1");
+        lib.sort_default();
+        assert_eq!(lib.get_by_id(3).unwrap().title, "Ballade No.1");
+    }
+
+    #[test]
+    fn save_store_overwrites_existing_file_cleanly() {
+        let dir = std::env::temp_dir().join(format!(
+            "txplayer_save_test_{}",
+            std::process::id()
+        ));
+        let path = dir.join("libraries.json");
+        let mut store = LibraryStore::default();
+        store
+            .active_mut()
+            .upsert(sample_track(10, "/a.flac", "First"));
+        save_store_to_path(&store, &path);
+        // Second save overwrites existing file (regression test for Windows rename failure)
+        store
+            .active_mut()
+            .upsert(sample_track(11, "/b.flac", "Second"));
+        save_store_to_path(&store, &path);
+        let raw = std::fs::read(&path).unwrap();
+        let reloaded: LibraryStore = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(reloaded.active().tracks.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

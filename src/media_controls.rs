@@ -120,7 +120,7 @@ impl OsMediaBridge {
         let Some(mc) = &mut self.controls else {
             return;
         };
-        let cover_url = cover_path.map(|p| format!("file://{}", p.display()));
+        let cover_url = cover_path.map(path_to_file_url);
         let _ = mc.set_metadata(MediaMetadata {
             title: Some(title),
             artist: Some(artist),
@@ -153,5 +153,33 @@ impl OsMediaBridge {
             MediaPlayback::Paused { progress }
         };
         let _ = mc.set_playback(pb);
+    }
+}
+
+/// Formats a filesystem path into a valid RFC 8089 `file://` URL on macOS, Linux, AND Windows
+/// (`C:\foo\bar.jpg` -> `file:///C:/foo/bar.jpg`).
+fn path_to_file_url(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    if raw.starts_with('/') {
+        format!("file://{raw}")
+    } else {
+        format!("file:///{raw}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_unix_and_windows_file_urls() {
+        assert_eq!(
+            path_to_file_url(Path::new("/Users/j/cover.jpg")),
+            "file:///Users/j/cover.jpg"
+        );
+        assert_eq!(
+            path_to_file_url(Path::new(r"C:\Users\j\cover.jpg")),
+            "file:///C:/Users/j/cover.jpg"
+        );
     }
 }
