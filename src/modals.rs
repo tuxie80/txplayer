@@ -15,8 +15,9 @@ use crate::library::cover_directory;
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, reveal_in_file_manager};
 use crate::plugins::{
-    DspConfig, EQ_FREQ_LABELS, EqPreset, HeadphonePreset, OversamplingMode, PianoEngineId,
-    PluginConfig, ReplayGainMode, ResamplerQuality, TagProviderConfig, ToolHealth,
+    CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EqPreset, HeadphonePreset,
+    OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
+    TagProviderConfig, ToolHealth,
 };
 use crate::tagger::{
     EditableTags, LookupStrategy, TagCandidate, TrackHashes, compute_fast_audio_hash,
@@ -1594,6 +1595,42 @@ pub fn show_settings_window(
                             }
                         });
                     }
+
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("Output Dither:")
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                        );
+                        for &dm in DitherMode::ALL {
+                            let active = if plugins.dsp.bit_perfect_mode {
+                                dm == DitherMode::Off
+                            } else {
+                                plugins.dsp.dither == dm
+                            };
+                            if pill_button(
+                                ui,
+                                dm.name(),
+                                None,
+                                if active {
+                                    PillStyle::Active
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                palette,
+                            )
+                            .on_hover_text(dm.detail())
+                            .clicked()
+                            {
+                                plugins.dsp.dither = dm;
+                                if dm != DitherMode::Off {
+                                    plugins.dsp.bit_perfect_mode = false;
+                                }
+                                actions.dsp_changed = true;
+                            }
+                        }
+                    });
 
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
@@ -3191,7 +3228,7 @@ pub fn paint_dsp_controls(ui: &mut Ui, dsp: &mut DspConfig, palette: &Palette) -
         });
 
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let prev_cf = dsp.crossfeed_enabled;
         aligned_checkbox_row(
             ui,
@@ -3205,6 +3242,26 @@ pub fn paint_dsp_controls(ui: &mut Ui, dsp: &mut DspConfig, palette: &Palette) -
             }
             changed = true;
         }
+        for &preset in CrossfeedPreset::SELECTABLE {
+            let active = dsp.crossfeed_enabled && dsp.crossfeed_preset == preset;
+            if pill_button(
+                ui,
+                preset.name(),
+                None,
+                if active {
+                    PillStyle::Active
+                } else {
+                    PillStyle::Secondary
+                },
+                palette,
+            )
+            .on_hover_text(preset.detail())
+            .clicked()
+            {
+                dsp.apply_crossfeed_preset(preset);
+                changed = true;
+            }
+        }
         if dsp.crossfeed_enabled {
             let cf_resp = ui.add(
                 egui::Slider::new(&mut dsp.crossfeed_amount, 0.05..=1.0)
@@ -3212,12 +3269,17 @@ pub fn paint_dsp_controls(ui: &mut Ui, dsp: &mut DspConfig, palette: &Palette) -
                     .trailing_fill(true),
             );
             ui.label(
-                RichText::new(format!("{:.0}%", dsp.crossfeed_amount * 100.0))
-                    .size(10.0)
-                    .monospace()
-                    .color(palette.accent),
+                RichText::new(format!(
+                    "{:.0}% · {:.0} Hz",
+                    dsp.crossfeed_amount * 100.0,
+                    dsp.crossfeed_cutoff_hz
+                ))
+                .size(10.0)
+                .monospace()
+                .color(palette.accent),
             );
             if cf_resp.changed() {
+                dsp.crossfeed_preset = CrossfeedPreset::Custom;
                 changed = true;
             }
         }
@@ -3651,6 +3713,379 @@ pub fn show_device_picker_popover(
     chosen
 }
 
+/// Row snapshot passed into [`show_album_audit_window`].
+pub struct AlbumAuditRow<'a> {
+    pub index: usize,
+    pub track: &'a Track,
+    pub analysis: Option<&'a AudioAnalysis>,
+    pub analyzing: bool,
+    pub error: Option<&'a str>,
+}
+
+/// Batch Album / Selection TrueHz & Dynamic Range Authenticity Auditor modal.
+/// Returns `(open_stay, inspect_track_id)` so clicking a track row opens its full spectrum & DR breakdown.
+pub fn show_album_audit_window(
+    context: &egui::Context,
+    title: &str,
+    rows: &[AlbumAuditRow<'_>],
+    palette: &Palette,
+) -> (bool, Option<u64>) {
+    let mut open = true;
+    let mut close_clicked = false;
+    let mut inspect_id: Option<u64> = None;
+
+    let total = rows.len().max(1);
+    let mut done = 0usize;
+    let mut dr_sum = 0.0_f32;
+    let mut lufs_sum = 0.0_f32;
+    let mut max_tp = -99.0_f32;
+    let mut cnt_hires = 0usize;
+    let mut cnt_cd = 0usize;
+    let mut cnt_upscale = 0usize;
+    let mut cnt_lossy = 0usize;
+    let mut cnt_err = 0usize;
+    for row in rows {
+        if let Some(a) = row.analysis {
+            done += 1;
+            dr_sum += a.dr_precise;
+            lufs_sum += a.integrated_lufs;
+            max_tp = max_tp.max(a.true_peak_dbtp);
+            match a.verdict {
+                HiResVerdict::AuthenticHiRes => cnt_hires += 1,
+                HiResVerdict::LosslessCdQuality => cnt_cd += 1,
+                HiResVerdict::SuspectedUpsample => cnt_upscale += 1,
+                HiResVerdict::LossyTranscode => cnt_lossy += 1,
+            }
+        } else if row.error.is_some() {
+            cnt_err += 1;
+        }
+    }
+    let finished = done + cnt_err;
+
+    let status_sub = if finished < rows.len() {
+        format!("Scanning {finished} / {} tracks…", rows.len())
+    } else {
+        format!("Verified {} track(s)", rows.len())
+    };
+    themed_modal_window(
+        context,
+        "album_audit_modal",
+        "TrueHz & Dynamic Range Authenticity Audit",
+        Icon::Sliders,
+        Some(status_sub.as_str()),
+        [720.0, 540.0],
+        Some([540.0, 380.0]),
+        true,
+        &mut open,
+        palette,
+        |ui| {
+        // Header: Album Title + live scan progress
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(title)
+                    .size(14.0)
+                    .strong()
+                    .color(palette.text),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if finished < rows.len() {
+                    ui.label(
+                        RichText::new(format!("Scanning {finished} / {} tracks…", rows.len()))
+                            .size(10.5)
+                            .monospace()
+                            .color(palette.accent_bright),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!("✓ Verified {} track(s)", rows.len()))
+                            .size(10.5)
+                            .monospace()
+                            .color(palette.hires_gold),
+                    );
+                }
+            });
+        });
+
+        // Progress bar while background analyzer is working
+        if finished < rows.len() {
+            ui.add_space(4.0);
+            let frac = (finished as f32 / total as f32).clamp(0.0, 1.0);
+            let (bar_r, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 4.0), Sense::hover());
+            ui.painter().rect_filled(bar_r, 2.0, palette.surface);
+            ui.painter().rect_filled(
+                Rect::from_min_max(
+                    bar_r.min,
+                    pos2(bar_r.left() + bar_r.width() * frac, bar_r.bottom()),
+                ),
+                2.0,
+                palette.accent,
+            );
+        }
+
+        ui.add_space(8.0);
+
+        // Aggregate KPI Cards
+        if done > 0 {
+            let avg_dr = dr_sum / done as f32;
+            let avg_dr_int = avg_dr.round() as u8;
+            let avg_lufs = lufs_sum / done as f32;
+            let dr_col = if avg_dr_int >= 11 {
+                palette.hires_gold
+            } else if avg_dr_int >= 8 {
+                palette.accent_bright
+            } else {
+                palette.danger
+            };
+            let tp_col = if max_tp > -0.3 {
+                palette.danger
+            } else if max_tp > -1.0 {
+                palette.hires_gold
+            } else {
+                palette.accent
+            };
+            let (verdict_txt, verdict_col) = if cnt_upscale > 0 || cnt_lossy > 0 {
+                (
+                    format!("{} Flagged ({} Upscale · {} Lossy)", cnt_upscale + cnt_lossy, cnt_upscale, cnt_lossy),
+                    palette.danger,
+                )
+            } else if cnt_hires > 0 && cnt_cd == 0 {
+                (
+                    format!("{cnt_hires}/{done} Authentic Hi-Res"),
+                    palette.hires_gold,
+                )
+            } else if cnt_hires > 0 {
+                (
+                    format!("{cnt_hires} Hi-Res · {cnt_cd} Lossless CD"),
+                    palette.hires_gold,
+                )
+            } else {
+                (
+                    format!("{cnt_cd}/{done} True Lossless CD"),
+                    palette.accent_bright,
+                )
+            };
+
+            ui.horizontal_wrapped(|ui| {
+                let kpi = |ui: &mut Ui, label: &str, value: &str, col: Color32| {
+                    Frame::new()
+                        .fill(palette.background)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .corner_radius(6.0)
+                        .inner_margin(Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(label)
+                                        .size(9.0)
+                                        .strong()
+                                        .color(palette.faint),
+                                );
+                                ui.label(
+                                    RichText::new(value)
+                                        .size(12.5)
+                                        .strong()
+                                        .monospace()
+                                        .color(col),
+                                );
+                            });
+                        });
+                };
+                kpi(ui, "ALBUM DR", &format!("DR{avg_dr_int} ({avg_dr:.1})"), dr_col);
+                kpi(ui, "AVG LOUDNESS", &format!("{avg_lufs:.1} LUFS"), palette.text);
+                kpi(ui, "MAX TRUE PEAK", &format!("{max_tp:+.1} dBTP"), tp_col);
+                kpi(ui, "AUTHENTICITY", &verdict_txt, verdict_col);
+            });
+            ui.add_space(8.0);
+        }
+
+        // Column header
+        ui.horizontal(|ui| {
+            ui.add_sized([28.0, 16.0], egui::Label::new(RichText::new("#").size(9.5).color(palette.faint)));
+            ui.add_sized([210.0, 16.0], egui::Label::new(RichText::new("TRACK").size(9.5).color(palette.faint)));
+            ui.add_sized([82.0, 16.0], egui::Label::new(RichText::new("FORMAT").size(9.5).color(palette.faint)));
+            ui.add_sized([48.0, 16.0], egui::Label::new(RichText::new("DR").size(9.5).color(palette.faint)));
+            ui.add_sized([68.0, 16.0], egui::Label::new(RichText::new("LUFS").size(9.5).color(palette.faint)));
+            ui.add_sized([66.0, 16.0], egui::Label::new(RichText::new("PEAK").size(9.5).color(palette.faint)));
+            ui.add_sized([54.0, 16.0], egui::Label::new(RichText::new("BW").size(9.5).color(palette.faint)));
+            ui.label(RichText::new("VERDICT").size(9.5).color(palette.faint));
+        });
+        ui.separator();
+
+        // Scrollable per-track table
+        ScrollArea::vertical()
+            .id_salt("album_audit_scroll")
+            .max_height(330.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for row in rows {
+                    let idx = row.index;
+                    let track = row.track;
+                    let analysis = row.analysis;
+                    let analyzing = row.analyzing;
+                    let err = row.error;
+                    let row_h = 26.0;
+                    let (rect, resp) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(rect, 4.0, palette.hover);
+                    } else if idx % 2 == 1 {
+                        ui.painter()
+                            .rect_filled(rect, 4.0, palette.surface.gamma_multiply(0.45));
+                    }
+
+                    let cy = rect.center().y;
+                    let mut x = rect.left() + 4.0;
+                    let num_str = track
+                        .track_number
+                        .map(|n| format!("{n:02}"))
+                        .unwrap_or_else(|| format!("{:02}", idx + 1));
+                    ui.painter().text(
+                        pos2(x, cy),
+                        Align2::LEFT_CENTER,
+                        num_str,
+                        FontId::monospace(10.0),
+                        palette.faint,
+                    );
+                    x += 28.0;
+
+                    let title_clip = Rect::from_min_max(pos2(x, rect.top()), pos2(x + 206.0, rect.bottom()));
+                    ui.painter().with_clip_rect(title_clip).text(
+                        pos2(x, cy),
+                        Align2::LEFT_CENTER,
+                        &track.title,
+                        FontId::proportional(11.0),
+                        palette.text,
+                    );
+                    x += 214.0;
+
+                    let fmt_str = format!(
+                        "{} {}",
+                        track.codec,
+                        track
+                            .sample_rate
+                            .map(format_sample_rate)
+                            .unwrap_or_default()
+                    );
+                    let fmt_clip = Rect::from_min_max(pos2(x, rect.top()), pos2(x + 78.0, rect.bottom()));
+                    ui.painter().with_clip_rect(fmt_clip).text(
+                        pos2(x, cy),
+                        Align2::LEFT_CENTER,
+                        fmt_str,
+                        FontId::monospace(9.2),
+                        palette.muted,
+                    );
+                    x += 84.0;
+
+                    if let Some(a) = analysis {
+                        let dr_col = if a.dr_score >= 11 {
+                            palette.hires_gold
+                        } else if a.dr_score >= 8 {
+                            palette.accent_bright
+                        } else {
+                            palette.danger
+                        };
+                        ui.painter().text(
+                            pos2(x, cy),
+                            Align2::LEFT_CENTER,
+                            format!("DR{}", a.dr_score),
+                            FontId::monospace(10.5),
+                            dr_col,
+                        );
+                        x += 50.0;
+
+                        ui.painter().text(
+                            pos2(x, cy),
+                            Align2::LEFT_CENTER,
+                            format!("{:5.1}", a.integrated_lufs),
+                            FontId::monospace(10.0),
+                            palette.text_secondary,
+                        );
+                        x += 70.0;
+
+                        let tp_col = if a.true_peak_dbtp > -0.3 {
+                            palette.danger
+                        } else if a.true_peak_dbtp > -1.0 {
+                            palette.hires_gold
+                        } else {
+                            palette.accent
+                        };
+                        ui.painter().text(
+                            pos2(x, cy),
+                            Align2::LEFT_CENTER,
+                            format!("{:+.1} dB", a.true_peak_dbtp),
+                            FontId::monospace(10.0),
+                            tp_col,
+                        );
+                        x += 68.0;
+
+                        ui.painter().text(
+                            pos2(x, cy),
+                            Align2::LEFT_CENTER,
+                            format!("{:.1}k", a.effective_bandwidth_hz / 1000.0),
+                            FontId::monospace(9.8),
+                            palette.muted,
+                        );
+                        x += 54.0;
+
+                        let (v_lbl, v_col) = match a.verdict {
+                            HiResVerdict::AuthenticHiRes => ("HI-RES ✓", palette.hires_gold),
+                            HiResVerdict::LosslessCdQuality => ("LOSSLESS ✓", palette.accent_bright),
+                            HiResVerdict::SuspectedUpsample => ("UPSCALE ?", palette.danger),
+                            HiResVerdict::LossyTranscode => ("LOSSY !", palette.danger),
+                        };
+                        ui.painter().text(
+                            pos2(x, cy),
+                            Align2::LEFT_CENTER,
+                            v_lbl,
+                            FontId::monospace(9.8),
+                            v_col,
+                        );
+                    } else if let Some(e) = err {
+                        ui.painter().text(
+                            pos2(x, cy),
+                            Align2::LEFT_CENTER,
+                            format!("Error: {}", e.chars().take(42).collect::<String>()),
+                            FontId::monospace(9.5),
+                            palette.danger,
+                        );
+                    } else {
+                        ui.painter().text(
+                            pos2(x, cy),
+                            Align2::LEFT_CENTER,
+                            if analyzing { "Analyzing spectrum & DR…" } else { "Queued…" },
+                            FontId::monospace(9.5),
+                            palette.faint,
+                        );
+                    }
+
+                    if resp.on_hover_text("Click to open full Spectrum & DR Track Inspector").clicked() {
+                        inspect_id = Some(track.id);
+                    }
+                }
+            });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Tip: Click any track row to inspect its 64-bin ultrasonic spectrum graph.")
+                    .size(10.0)
+                    .color(palette.faint),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if pill_button(ui, "Close", None, PillStyle::Secondary, palette).clicked() {
+                    close_clicked = true;
+                }
+            });
+        });
+    });
+
+    if close_clicked {
+        open = false;
+    }
+    (open, inspect_id)
+}
+
 /// Audirvana-inspired Signal Path Inspector + Quick DSP Popover anchored directly above telemetry.
 /// Returns `(dsp_changed, open_full_dsp_settings)`.
 #[allow(clippy::too_many_arguments)]
@@ -3723,6 +4158,83 @@ pub fn show_signal_path_popover(
                 };
 
             if let Some(s) = signal {
+                // Top-Level Signal Path Verdict Banner (Decaud / Audirvana-class instant clarity)
+                let native = s.source_rate == s.output_rate && (playback_speed - 1.0).abs() < 0.001;
+                let dsp_active = plugins.dsp.is_actively_processing() && !plugins.dsp.bit_perfect_mode;
+                let (verdict_title, verdict_sub, verdict_col) =
+                    if s.exclusive_active && s.bit_perfect && s.direct_volume_lock {
+                        (
+                            "BIT-PERFECT EXCLUSIVE",
+                            "Hardware Hog Mode · 1:1 Clock · 0.0 dBFS Direct Pass-Through",
+                            palette.hires_gold,
+                        )
+                    } else if s.bit_perfect && native {
+                        (
+                            "BIT-PERFECT DIRECT",
+                            "Zero DSP · 1:1 Sample Rate · Unaltered Bit-Stream",
+                            palette.hires_gold,
+                        )
+                    } else if s.exclusive_active {
+                        (
+                            "EXCLUSIVE LOSSLESS",
+                            "Direct Hardware DAC Lock · Dedicated Audio Clock",
+                            palette.hires_gold,
+                        )
+                    } else if dsp_active {
+                        (
+                            "STUDIO ENHANCED (64-BIT DSP)",
+                            "Precision 64-bit Floating-Point Processing Active",
+                            palette.accent_secondary,
+                        )
+                    } else if s.oversampling != OversamplingMode::Native && s.output_rate > s.source_rate {
+                        (
+                            "OVERSAMPLED STUDIO",
+                            "High-Precision Sinc Upsampling Active",
+                            palette.accent_bright,
+                        )
+                    } else if native {
+                        (
+                            "LOSSLESS NATIVE",
+                            "Bit-Matched Sample Rate · DSP Bypassed",
+                            palette.accent,
+                        )
+                    } else {
+                        (
+                            "RESAMPLED PLAYBACK",
+                            "High-Precision Rubato Sinc Conversion Active",
+                            palette.accent_bright,
+                        )
+                    };
+                Frame::new()
+                    .fill(verdict_col.gamma_multiply(0.11))
+                    .stroke(Stroke::new(1.0, verdict_col.gamma_multiply(0.55)))
+                    .corner_radius(6.0)
+                    .inner_margin(Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                            ui.painter()
+                                .circle_filled(dot.center(), 5.0, verdict_col.gamma_multiply(0.28));
+                            ui.painter().circle_filled(dot.center(), 3.2, verdict_col);
+                            ui.vertical(|ui| {
+                                ui.style_mut().spacing.item_spacing.y = 0.5;
+                                ui.label(
+                                    RichText::new(verdict_title)
+                                        .size(10.5)
+                                        .strong()
+                                        .monospace()
+                                        .color(verdict_col),
+                                );
+                                ui.label(
+                                    RichText::new(verdict_sub)
+                                        .size(9.5)
+                                        .color(palette.text_secondary),
+                                );
+                            });
+                        });
+                    });
+                ui.add_space(7.0);
+
                 let bits = s.bit_depth.map(|b| format!("{b}-bit · ")).unwrap_or_default();
                 let br = s
                     .bitrate_kbps
@@ -4270,3 +4782,4 @@ pub fn show_command_palette(
 
     chosen
 }
+

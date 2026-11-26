@@ -189,6 +189,100 @@ impl ResamplerQuality {
     }
 }
 
+/// Output quantization dither mode (automatically bypassed in Bit-Perfect mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DitherMode {
+    #[default]
+    Off,
+    Tpdf24,
+    Tpdf16,
+    NoiseShaped16,
+}
+
+impl DitherMode {
+    pub const ALL: &'static [DitherMode] = &[
+        DitherMode::Off,
+        DitherMode::Tpdf24,
+        DitherMode::Tpdf16,
+        DitherMode::NoiseShaped16,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DitherMode::Off => "Off",
+            DitherMode::Tpdf24 => "24-bit TPDF",
+            DitherMode::Tpdf16 => "16-bit TPDF",
+            DitherMode::NoiseShaped16 => "16-bit Shaped",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            DitherMode::Off => "No output dither (pure 32-bit float to DAC / bit-direct)",
+            DitherMode::Tpdf24 => {
+                "Triangular PDF dither at 24-bit LSB (-141 dBFS) for post-DSP purity on 24-bit DACs"
+            }
+            DitherMode::Tpdf16 => {
+                "Classic Red Book 16-bit TPDF dither — eliminates quantization harmonics on 16-bit DACs"
+            }
+            DitherMode::NoiseShaped16 => {
+                "16-bit TPDF with 2nd-order psychoacoustic high-pass noise shaping (>14 kHz)"
+            }
+        }
+    }
+}
+
+/// Classic audiophile headphone crossfeed topologies (head-shadow low-pass + opposite-ear feed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CrossfeedPreset {
+    #[default]
+    Gentle,
+    ChuMoy,
+    JanMeier,
+    BauerStudio,
+    Custom,
+}
+
+impl CrossfeedPreset {
+    pub const SELECTABLE: &'static [CrossfeedPreset] = &[
+        CrossfeedPreset::Gentle,
+        CrossfeedPreset::ChuMoy,
+        CrossfeedPreset::JanMeier,
+        CrossfeedPreset::BauerStudio,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CrossfeedPreset::Gentle => "Gentle",
+            CrossfeedPreset::ChuMoy => "Chu Moy",
+            CrossfeedPreset::JanMeier => "Jan Meier",
+            CrossfeedPreset::BauerStudio => "Bauer Studio",
+            CrossfeedPreset::Custom => "Custom",
+        }
+    }
+
+    /// Returns `(lowpass_cutoff_hz, amount_0_to_1)` for this classic crossfeed profile.
+    pub fn params(self) -> (f32, f32) {
+        match self {
+            CrossfeedPreset::Gentle => (700.0, 0.25),
+            CrossfeedPreset::ChuMoy => (700.0, 0.42),
+            CrossfeedPreset::JanMeier => (650.0, 0.58),
+            CrossfeedPreset::BauerStudio => (700.0, 0.72),
+            CrossfeedPreset::Custom => (700.0, 0.35),
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            CrossfeedPreset::Gentle => "700 Hz · 25% — subtle speaker-like width without narrowing",
+            CrossfeedPreset::ChuMoy => "700 Hz · 42% — classic CMoy balanced headphone crossfeed",
+            CrossfeedPreset::JanMeier => "650 Hz · 58% — natural Meier Corda acoustic soundstage",
+            CrossfeedPreset::BauerStudio => "700 Hz · 72% — BS2B studio nearfield monitor simulation",
+            CrossfeedPreset::Custom => "Custom crossfeed blend",
+        }
+    }
+}
+
 pub const MAX_PARAMETRIC_BANDS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -450,6 +544,10 @@ pub struct DeviceProfile {
     #[serde(default)]
     pub crossfeed_enabled: bool,
     #[serde(default)]
+    pub crossfeed_preset: CrossfeedPreset,
+    #[serde(default)]
+    pub dither: DitherMode,
+    #[serde(default)]
     pub peq_enabled: bool,
     #[serde(default)]
     pub peq_profile_name: String,
@@ -469,6 +567,8 @@ impl DeviceProfile {
             resampler_quality: dsp.resampler_quality,
             dsp_enabled: dsp.enabled,
             crossfeed_enabled: dsp.crossfeed_enabled,
+            crossfeed_preset: dsp.crossfeed_preset,
+            dither: dsp.dither,
             peq_enabled: dsp.peq_enabled,
             peq_profile_name: dsp.peq_profile_name.clone(),
             peq_preamp_db: dsp.peq_preamp_db,
@@ -484,6 +584,13 @@ impl DeviceProfile {
         dsp.resampler_quality = self.resampler_quality;
         dsp.enabled = self.dsp_enabled;
         dsp.crossfeed_enabled = self.crossfeed_enabled;
+        if self.crossfeed_preset != CrossfeedPreset::Custom {
+            let (fc, amt) = self.crossfeed_preset.params();
+            dsp.crossfeed_preset = self.crossfeed_preset;
+            dsp.crossfeed_cutoff_hz = fc;
+            dsp.crossfeed_amount = amt;
+        }
+        dsp.dither = self.dither;
         dsp.peq_enabled = self.peq_enabled;
         dsp.peq_profile_name = self.peq_profile_name.clone();
         dsp.peq_preamp_db = self.peq_preamp_db;
@@ -526,8 +633,14 @@ pub struct DspConfig {
     pub eq_bands_db: [f32; 10],
     #[serde(default)]
     pub crossfeed_enabled: bool,
+    #[serde(default)]
+    pub crossfeed_preset: CrossfeedPreset,
     #[serde(default = "default_crossfeed")]
     pub crossfeed_amount: f32,
+    #[serde(default = "default_crossfeed_cutoff")]
+    pub crossfeed_cutoff_hz: f32,
+    #[serde(default)]
+    pub dither: DitherMode,
     #[serde(default = "default_true")]
     pub soft_limiter: bool,
     #[serde(default)]
@@ -584,6 +697,10 @@ fn default_crossfeed() -> f32 {
     0.35
 }
 
+fn default_crossfeed_cutoff() -> f32 {
+    700.0
+}
+
 impl Default for DspConfig {
     fn default() -> Self {
         Self {
@@ -592,7 +709,10 @@ impl Default for DspConfig {
             eq_preset: EqPreset::Flat,
             eq_bands_db: [0.0; 10],
             crossfeed_enabled: false,
+            crossfeed_preset: CrossfeedPreset::Gentle,
             crossfeed_amount: default_crossfeed(),
+            crossfeed_cutoff_hz: default_crossfeed_cutoff(),
+            dither: DitherMode::Off,
             soft_limiter: true,
             preamp_db: 0.0,
             gapless_enabled: true,
@@ -623,6 +743,18 @@ impl DspConfig {
         }
     }
 
+    pub fn apply_crossfeed_preset(&mut self, preset: CrossfeedPreset) {
+        self.crossfeed_preset = preset;
+        if preset != CrossfeedPreset::Custom {
+            let (cutoff_hz, amt) = preset.params();
+            self.crossfeed_cutoff_hz = cutoff_hz;
+            self.crossfeed_amount = amt;
+        }
+        self.crossfeed_enabled = true;
+        self.enabled = true;
+        self.bit_perfect_mode = false;
+    }
+
     pub fn apply_headphone_preset(&mut self, preset: HeadphonePreset) {
         let (name, preamp, bands) = preset.profile();
         self.peq_profile_name = name;
@@ -634,6 +766,9 @@ impl DspConfig {
     }
 
     pub fn is_actively_processing(&self) -> bool {
+        if self.dither != DitherMode::Off {
+            return true;
+        }
         if !self.enabled {
             return false;
         }
@@ -645,28 +780,42 @@ impl DspConfig {
     }
 
     pub fn summary(&self) -> String {
-        if !self.enabled {
+        if !self.enabled && self.dither == DitherMode::Off {
             return "Bypassed (Bit-Direct)".into();
         }
         let mut parts = Vec::new();
-        if self.peq_enabled && !self.peq_bands.is_empty() {
-            let lbl = if self.peq_profile_name.is_empty() {
-                format!("PEQ ({} bands)", self.peq_bands.len())
-            } else {
-                self.peq_profile_name.clone()
-            };
-            parts.push(lbl);
+        if self.enabled {
+            if self.peq_enabled && !self.peq_bands.is_empty() {
+                let lbl = if self.peq_profile_name.is_empty() {
+                    format!("PEQ ({} bands)", self.peq_bands.len())
+                } else {
+                    self.peq_profile_name.clone()
+                };
+                parts.push(lbl);
+            }
+            if self.eq_enabled
+                && (self.preamp_db.abs() > 0.05
+                    || self.eq_bands_db.iter().any(|g| g.abs() > 0.05))
+            {
+                parts.push(format!("EQ ({})", self.eq_preset.name()));
+            }
+            if self.crossfeed_enabled {
+                if self.crossfeed_preset == CrossfeedPreset::Custom {
+                    parts.push(format!("Crossfeed {:.0}%", self.crossfeed_amount * 100.0));
+                } else {
+                    parts.push(format!(
+                        "Crossfeed {} ({:.0}%)",
+                        self.crossfeed_preset.name(),
+                        self.crossfeed_amount * 100.0
+                    ));
+                }
+            }
+            if self.soft_limiter {
+                parts.push("Limiter".into());
+            }
         }
-        if self.eq_enabled
-            && (self.preamp_db.abs() > 0.05 || self.eq_bands_db.iter().any(|g| g.abs() > 0.05))
-        {
-            parts.push(format!("EQ ({})", self.eq_preset.name()));
-        }
-        if self.crossfeed_enabled {
-            parts.push(format!("Crossfeed {:.0}%", self.crossfeed_amount * 100.0));
-        }
-        if self.soft_limiter {
-            parts.push("Limiter".into());
+        if self.dither != DitherMode::Off {
+            parts.push(self.dither.name().into());
         }
         if parts.is_empty() {
             "Active (Flat)".into()

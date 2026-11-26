@@ -78,7 +78,7 @@ impl VisualizerMode {
                 "Zero-crossing triggered stereo oscilloscope paired with an M/S vectorscope."
             }
             VisualizerMode::MasteringVu => {
-                "Segmented stereo RMS/Peak VU meters with dBFS readout and phase correlation."
+                "Segmented stereo RMS/Peak VU meters, live EBU R128 Momentary/Short-Term LUFS, 4× True Peak (dBTP), and phase correlation."
             }
         }
     }
@@ -444,6 +444,268 @@ impl PrecisionPianoAnalyzer {
     }
 }
 
+/// Real-time ITU-R BS.1770 / EBU R128 K-weighted biquad filter for live LUFS metering.
+#[derive(Clone, Copy)]
+struct R128Biquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    z1: f64,
+    z2: f64,
+}
+
+impl R128Biquad {
+    fn high_shelf(sample_rate: f64) -> Self {
+        let f0 = 1681.974450955533;
+        let g_db = 3.999843853973347;
+        let q = 0.7071752369554196;
+        let k = (std::f64::consts::PI * f0 / sample_rate).tan();
+        let vh = 10.0_f64.powf(g_db / 20.0);
+        let vb = vh.powf(0.4996667741545416);
+        let a0 = 1.0 + k / q + k * k;
+        Self {
+            b0: (vh + vb * k / q + k * k) / a0,
+            b1: 2.0 * (k * k - vh) / a0,
+            b2: (vh - vb * k / q + k * k) / a0,
+            a1: 2.0 * (k * k - 1.0) / a0,
+            a2: (1.0 - k / q + k * k) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    fn high_pass(sample_rate: f64) -> Self {
+        let f0 = 38.13547087602444;
+        let q = 0.5003270373238773;
+        let k = (std::f64::consts::PI * f0 / sample_rate).tan();
+        let a0 = 1.0 + k / q + k * k;
+        Self {
+            b0: 1.0 / a0,
+            b1: -2.0 / a0,
+            b2: 1.0 / a0,
+            a1: 2.0 * (k * k - 1.0) / a0,
+            a2: (1.0 - k / q + k * k) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        if !y.is_finite() {
+            self.z1 = 0.0;
+            self.z2 = 0.0;
+            return 0.0;
+        }
+        y
+    }
+
+    fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+}
+
+/// Real-time EBU R128 Loudness (Momentary 400 ms, Short-Term 3.0 s) & 4x Catmull-Rom True Peak meter.
+struct LiveLufsMeter {
+    sample_rate: u32,
+    tap_cursor: usize,
+    scratch_l: Vec<f32>,
+    scratch_r: Vec<f32>,
+    shelf_l: R128Biquad,
+    shelf_r: R128Biquad,
+    hp_l: R128Biquad,
+    hp_r: R128Biquad,
+    hop_frames: usize,
+    cur_frames: usize,
+    cur_sum_sq: f64,
+    hops_100ms: VecDeque<f64>,
+    hist_l: [f64; 4],
+    hist_r: [f64; 4],
+    hist_count: usize,
+    true_peak_lin: f64,
+    true_peak_hold_secs: f32,
+    pub momentary_lufs: f32,
+    pub short_term_lufs: f32,
+    pub true_peak_dbtp: f32,
+}
+
+impl LiveLufsMeter {
+    fn new(sample_rate: u32) -> Self {
+        let sr = sample_rate.max(8_000);
+        let sr_f = sr as f64;
+        Self {
+            sample_rate: sr,
+            tap_cursor: 0,
+            scratch_l: Vec::with_capacity(4096),
+            scratch_r: Vec::with_capacity(4096),
+            shelf_l: R128Biquad::high_shelf(sr_f),
+            shelf_r: R128Biquad::high_shelf(sr_f),
+            hp_l: R128Biquad::high_pass(sr_f),
+            hp_r: R128Biquad::high_pass(sr_f),
+            hop_frames: (sr as usize / 10).max(1),
+            cur_frames: 0,
+            cur_sum_sq: 0.0,
+            hops_100ms: VecDeque::with_capacity(32),
+            hist_l: [0.0; 4],
+            hist_r: [0.0; 4],
+            hist_count: 0,
+            true_peak_lin: 0.0,
+            true_peak_hold_secs: 0.0,
+            momentary_lufs: -70.0,
+            short_term_lufs: -70.0,
+            true_peak_dbtp: -70.0,
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: u32) {
+        let sr = sample_rate.max(8_000);
+        if sr == self.sample_rate {
+            return;
+        }
+        let sr_f = sr as f64;
+        self.sample_rate = sr;
+        self.shelf_l = R128Biquad::high_shelf(sr_f);
+        self.shelf_r = R128Biquad::high_shelf(sr_f);
+        self.hp_l = R128Biquad::high_pass(sr_f);
+        self.hp_r = R128Biquad::high_pass(sr_f);
+        self.hop_frames = (sr as usize / 10).max(1);
+        self.cur_frames = 0;
+        self.cur_sum_sq = 0.0;
+        self.hops_100ms.clear();
+    }
+
+    fn reset(&mut self) {
+        self.shelf_l.reset();
+        self.shelf_r.reset();
+        self.hp_l.reset();
+        self.hp_r.reset();
+        self.cur_frames = 0;
+        self.cur_sum_sq = 0.0;
+        self.hops_100ms.clear();
+        self.hist_l = [0.0; 4];
+        self.hist_r = [0.0; 4];
+        self.hist_count = 0;
+        self.true_peak_lin = 0.0;
+        self.true_peak_hold_secs = 0.0;
+        self.momentary_lufs = -70.0;
+        self.short_term_lufs = -70.0;
+        self.true_peak_dbtp = -70.0;
+    }
+
+    fn push_stereo(&mut self, left: &[f32], right: &[f32], dt: f32) {
+        let mut block_tp = 0.0_f64;
+        for (&sl, &sr) in left.iter().zip(right.iter()) {
+            let l = sl as f64;
+            let r = sr as f64;
+            block_tp = block_tp.max(l.abs()).max(r.abs());
+
+            // 4x Catmull-Rom cubic interpolation for inter-sample True Peak
+            self.hist_l = [self.hist_l[1], self.hist_l[2], self.hist_l[3], l];
+            self.hist_r = [self.hist_r[1], self.hist_r[2], self.hist_r[3], r];
+            self.hist_count += 1;
+            if self.hist_count >= 4 {
+                block_tp = block_tp
+                    .max(cubic_peak_4x(self.hist_l))
+                    .max(cubic_peak_4x(self.hist_r));
+            }
+
+            let kl = self.hp_l.process(self.shelf_l.process(l));
+            let kr = self.hp_r.process(self.shelf_r.process(r));
+            self.cur_sum_sq += kl * kl + kr * kr;
+            self.cur_frames += 1;
+            if self.cur_frames >= self.hop_frames {
+                let hop_ms = self.cur_sum_sq / self.cur_frames as f64;
+                if self.hops_100ms.len() >= 30 {
+                    self.hops_100ms.pop_front();
+                }
+                self.hops_100ms.push_back(hop_ms);
+                self.cur_sum_sq = 0.0;
+                self.cur_frames = 0;
+            }
+        }
+
+        // Smooth True Peak hold (1.8 s hold, then gentle fall)
+        if block_tp >= self.true_peak_lin {
+            self.true_peak_lin = block_tp;
+            self.true_peak_hold_secs = 1.8;
+        } else if self.true_peak_hold_secs > 0.0 {
+            self.true_peak_hold_secs = (self.true_peak_hold_secs - dt).max(0.0);
+        } else {
+            self.true_peak_lin *= (-dt as f64 * 1.4).exp();
+        }
+        self.true_peak_dbtp = if self.true_peak_lin > 1e-4 {
+            (20.0 * self.true_peak_lin.log10()).clamp(-70.0, 6.0) as f32
+        } else {
+            -70.0
+        };
+
+        // Momentary (400 ms = last 4 x 100 ms blocks)
+        let m_mean = if !self.hops_100ms.is_empty() {
+            let take = self.hops_100ms.len().min(4);
+            let sum: f64 = self.hops_100ms.iter().rev().take(take).sum();
+            sum / take as f64
+        } else if self.cur_frames > 0 {
+            self.cur_sum_sq / self.cur_frames as f64
+        } else {
+            0.0
+        };
+        let target_m = if m_mean > 1e-7 {
+            (-0.691 + 10.0 * m_mean.log10()).clamp(-70.0, 6.0) as f32
+        } else {
+            -70.0
+        };
+
+        // Short-Term (3.0 s = last 30 x 100 ms blocks)
+        let s_mean = if !self.hops_100ms.is_empty() {
+            self.hops_100ms.iter().sum::<f64>() / self.hops_100ms.len() as f64
+        } else {
+            m_mean
+        };
+        let target_s = if s_mean > 1e-7 {
+            (-0.691 + 10.0 * s_mean.log10()).clamp(-70.0, 6.0) as f32
+        } else {
+            -70.0
+        };
+
+        let alpha = 1.0 - (-dt * 8.0).exp();
+        self.momentary_lufs += (target_m - self.momentary_lufs) * alpha;
+        self.short_term_lufs += (target_s - self.short_term_lufs) * (alpha * 0.5);
+    }
+
+    fn update_from_tap(&mut self, tap: &VisualTap, dt: f32) {
+        self.set_sample_rate(tap.sample_rate());
+        let mut l = std::mem::take(&mut self.scratch_l);
+        let mut r = std::mem::take(&mut self.scratch_r);
+        let n = tap.read_new_stereo(&mut self.tap_cursor, &mut l, &mut r);
+        if n > 0 {
+            self.push_stereo(&l[..n], &r[..n], dt);
+        }
+        self.scratch_l = l;
+        self.scratch_r = r;
+    }
+}
+
+#[inline(always)]
+fn cubic_peak_4x(h: [f64; 4]) -> f64 {
+    let [y0, y1, y2, y3] = h;
+    let mut best = y1.abs().max(y2.abs());
+    let a = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
+    let b = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+    let c = -0.5 * y0 + 0.5 * y2;
+    let d = y1;
+    for t in [0.25_f64, 0.5, 0.75] {
+        let v = ((a * t + b) * t + c) * t + d;
+        best = best.max(v.abs());
+    }
+    best
+}
+
 pub struct VisualizerState {
     pub mode: VisualizerMode,
     pub show_piano_keys: bool,
@@ -478,7 +740,7 @@ pub struct VisualizerState {
     /// Stereo waveform buffers
     scope_l: Vec<f32>,
     scope_r: Vec<f32>,
-    /// Stereo mastering VU + phase correlation
+    /// Stereo mastering VU + phase correlation + live EBU R128 LUFS / True Peak
     vu_left: f32,
     vu_right: f32,
     vu_peak_left: f32,
@@ -486,6 +748,7 @@ pub struct VisualizerState {
     rms_db_l: f32,
     rms_db_r: f32,
     correlation: f32,
+    lufs_meter: LiveLufsMeter,
 }
 
 impl VisualizerState {
@@ -541,6 +804,7 @@ impl VisualizerState {
             rms_db_l: -60.0,
             rms_db_r: -60.0,
             correlation: 0.0,
+            lufs_meter: LiveLufsMeter::new(44_100),
         }
     }
 
@@ -561,6 +825,7 @@ impl VisualizerState {
         self.vu_right = 0.0;
         self.vu_peak_left = 0.0;
         self.vu_peak_right = 0.0;
+        self.lufs_meter.reset();
     }
 
     /// Seeds a realistic musical Chopin-style Eb-major / C-minor voicing for CLI screenshot capture (`--demo-piano`).
@@ -653,6 +918,7 @@ impl VisualizerState {
             self.rms_db_l = -60.0;
             self.rms_db_r = -60.0;
             self.correlation *= decay;
+            self.lufs_meter.reset();
             self.scope_l.fill(0.0);
             self.scope_r.fill(0.0);
             self.detected_harmony.clear();
@@ -695,6 +961,7 @@ impl VisualizerState {
                 .max(target_pk_r)
                 .max(self.vu_right);
             self.correlation += (corr - self.correlation) * (1.0 - (-dt * 12.0).exp());
+            self.lufs_meter.update_from_tap(tap, dt);
         }
 
         if needs_scope {
@@ -1701,10 +1968,12 @@ impl VisualizerState {
 
     fn paint_vu_mastering(&self, painter: &egui::Painter, inner: Rect, palette: &Palette) {
         let meter_right = inner.right() - 62.0;
-        let row_h = ((inner.height() - 34.0) * 0.5).clamp(14.0, 26.0);
+        let show_lufs_strip = inner.height() >= 68.0;
+        let reserved_bottom = if show_lufs_strip { 42.0 } else { 20.0 };
+        let row_h = ((inner.height() - reserved_bottom - 8.0) * 0.5).clamp(11.0, 22.0);
         let rows = [
             ("L", self.vu_left, self.vu_peak_left, inner.top() + 2.0),
-            ("R", self.vu_right, self.vu_peak_right, inner.top() + row_h + 8.0),
+            ("R", self.vu_right, self.vu_peak_right, inner.top() + row_h + 7.0),
         ];
         self.paint_vu_bars(painter, inner.left(), meter_right, row_h, &rows, 42, palette);
 
@@ -1723,7 +1992,77 @@ impl VisualizerState {
             palette.muted,
         );
 
-        let corr_y = inner.bottom() - 14.0;
+        // Live Real-Time EBU R128 Momentary (400 ms) · Short-Term (3 s) · 4x True Peak (dBTP)
+        if show_lufs_strip {
+            let strip_top = inner.bottom() - 36.0;
+            let strip_rect = Rect::from_min_max(
+                pos2(inner.left(), strip_top),
+                pos2(inner.right(), strip_top + 18.0),
+            );
+            painter.rect_filled(strip_rect, 4.0, palette.surface);
+            painter.rect_stroke(
+                strip_rect,
+                4.0,
+                Stroke::new(0.7, palette.border),
+                StrokeKind::Inside,
+            );
+            let m_val = self.lufs_meter.momentary_lufs;
+            let s_val = self.lufs_meter.short_term_lufs;
+            let tp_val = self.lufs_meter.true_peak_dbtp;
+            let fmt_lufs = |v: f32| {
+                if v <= -69.5 {
+                    "  -∞ ".to_string()
+                } else {
+                    format!("{:5.1}", v)
+                }
+            };
+            let m_col = if m_val > -8.0 {
+                palette.hires_gold
+            } else if m_val > -69.5 {
+                palette.accent_bright
+            } else {
+                palette.faint
+            };
+            let s_col = if s_val > -69.5 {
+                palette.text
+            } else {
+                palette.faint
+            };
+            let tp_col = if tp_val > -0.3 {
+                palette.danger
+            } else if tp_val > -1.0 {
+                palette.hires_gold
+            } else if tp_val > -69.5 {
+                palette.accent
+            } else {
+                palette.faint
+            };
+            let cy = strip_rect.center().y;
+            let third = strip_rect.width() / 3.0;
+            painter.text(
+                pos2(strip_rect.left() + 8.0, cy),
+                Align2::LEFT_CENTER,
+                format!("M {} LUFS", fmt_lufs(m_val)),
+                FontId::monospace(9.5),
+                m_col,
+            );
+            painter.text(
+                pos2(strip_rect.left() + third * 1.5, cy),
+                Align2::CENTER_CENTER,
+                format!("S {} LUFS", fmt_lufs(s_val)),
+                FontId::monospace(9.5),
+                s_col,
+            );
+            painter.text(
+                pos2(strip_rect.right() - 8.0, cy),
+                Align2::RIGHT_CENTER,
+                format!("TP {} dBTP", fmt_lufs(tp_val)),
+                FontId::monospace(9.5),
+                tp_col,
+            );
+        }
+
+        let corr_y = inner.bottom() - 13.0;
         painter.text(
             pos2(inner.left(), corr_y + 6.0),
             Align2::LEFT_CENTER,
@@ -2290,6 +2629,44 @@ mod tests {
             lum(c_pp),
             lum(c_mf),
             lum(c_ff)
+        );
+    }
+
+    #[test]
+    fn live_r128_lufs_meter_matches_reference_stereo_1khz_sine() {
+        let sr = 48_000_u32;
+        let mut meter = LiveLufsMeter::new(sr);
+        // ITU-R BS.1770 reference: 0 dBFS stereo 1 kHz sine wave => ~ -0.691 LUFS (L+R = 0.5+0.5 = 1.0)
+        // At -14 dBFS amplitude (0.1995), stereo 1 kHz sine => ~ -14.7 LUFS, True Peak ~ -14.0 dBTP
+        let amp = 10.0_f32.powf(-14.0 / 20.0);
+        let chunk = 960usize; // 20 ms chunks
+        let mut l = vec![0.0_f32; chunk];
+        let mut r = vec![0.0_f32; chunk];
+        let mut phase = 0usize;
+        for _ in 0..80 {
+            // 1.6 seconds total
+            for i in 0..chunk {
+                let s = amp * (TAU * 1000.0 * (phase + i) as f32 / sr as f32).sin();
+                l[i] = s;
+                r[i] = s;
+            }
+            phase += chunk;
+            meter.push_stereo(&l, &r, 0.02);
+        }
+        assert!(
+            (meter.momentary_lufs - (-14.7)).abs() < 1.2,
+            "Expected Momentary LUFS near -14.7, got {}",
+            meter.momentary_lufs
+        );
+        assert!(
+            (meter.short_term_lufs - (-14.7)).abs() < 2.2,
+            "Expected Short-Term LUFS near -14.7, got {}",
+            meter.short_term_lufs
+        );
+        assert!(
+            (meter.true_peak_dbtp - (-14.0)).abs() < 0.35,
+            "Expected True Peak near -14.0 dBTP, got {}",
+            meter.true_peak_dbtp
         );
     }
 }

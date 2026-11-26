@@ -531,6 +531,7 @@ pub struct TxPlayerApp {
     rename_playlist_modal: Option<(u64, String)>,
     inspect_track_id: Option<u64>,
     inspect_file_size: Option<(u64, Option<u64>)>,
+    album_audit: Option<(String, Vec<u64>)>,
     file_size_cache: HashMap<PathBuf, Option<u64>>,
     tag_editor: TagEditorState,
     command_palette: CommandPaletteState,
@@ -757,6 +758,7 @@ impl TxPlayerApp {
             rename_playlist_modal: None,
             inspect_track_id: None,
             inspect_file_size: None,
+            album_audit: None,
             file_size_cache: HashMap::new(),
             tag_editor: TagEditorState::new(),
             command_palette: CommandPaletteState::default(),
@@ -4791,6 +4793,7 @@ impl TxPlayerApp {
         let cols = ((ui.available_width() + gap) / (card_w + gap)).floor().max(1.0) as usize;
         let mut open_album: Option<(String, String)> = None;
         let mut play_album: Option<(String, String)> = None;
+        let mut audit_album: Option<(String, String)> = None;
 
         ScrollArea::vertical()
             .id_salt("albums_grid_scroll")
@@ -4895,6 +4898,21 @@ impl TxPlayerApp {
                                     open_album = Some((alb.clone(), art.clone()));
                                 }
                             }
+                            resp.context_menu(|ui| {
+                                if ui.button("Play Album").clicked() {
+                                    play_album = Some((alb.clone(), art.clone()));
+                                    ui.close();
+                                }
+                                if ui.button("Open Album Tracks").clicked() {
+                                    open_album = Some((alb.clone(), art.clone()));
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button("Verify Album TrueHz / DR…").clicked() {
+                                    audit_album = Some((alb.clone(), art.clone()));
+                                    ui.close();
+                                }
+                            });
                         }
                     });
                     ui.add_space(gap);
@@ -4913,6 +4931,13 @@ impl TxPlayerApp {
         } else if let Some((alb, art)) = open_album {
             self.album_filter = Some((alb, art));
             self.browse_mode = BrowseMode::Tracks;
+        } else if let Some((alb, art)) = audit_album {
+            let ids: Vec<u64> = tracks
+                .iter()
+                .filter(|t| t.album == alb && t.artist == art)
+                .map(|t| t.id)
+                .collect();
+            self.start_album_audit(format!("{alb} — {art}"), ids);
         }
     }
 
@@ -5705,6 +5730,15 @@ impl TxPlayerApp {
                     ctx_action = Some(ContextMenuAction::EditTags);
                     ui.close();
                 }
+                let audit_lbl = if sel_count > 1 {
+                    format!("Verify {sel_count} Tracks TrueHz / DR…")
+                } else {
+                    "Verify Album TrueHz / DR…".to_string()
+                };
+                if ui.button(audit_lbl).clicked() {
+                    ctx_action = Some(ContextMenuAction::VerifyAlbumAudit(tid));
+                    ui.close();
+                }
                 if sel_count == 1 {
                     if ui.button("Track Info…").clicked() {
                         ctx_action = Some(ContextMenuAction::TrackInfo(tid));
@@ -5864,6 +5898,28 @@ impl TxPlayerApp {
                 self.open_tag_editor_for_ids(&ids);
             }
             ContextMenuAction::TrackInfo(id) => self.inspect_track_id = Some(id),
+            ContextMenuAction::VerifyAlbumAudit(id) => {
+                let sel_ids = self.selected_ordered_ids(visible);
+                if sel_ids.len() > 1 {
+                    let title = format!("Selected Tracks ({} tracks)", sel_ids.len());
+                    self.start_album_audit(title, sel_ids);
+                } else if let Some(t) = self.track(id).cloned() {
+                    if !t.album.trim().is_empty() {
+                        let alb_ids: Vec<u64> = self
+                            .store
+                            .active()
+                            .tracks
+                            .iter()
+                            .filter(|x| x.album == t.album && x.artist == t.artist)
+                            .map(|x| x.id)
+                            .collect();
+                        let title = format!("{} — {}", t.album, t.artist);
+                        self.start_album_audit(title, if alb_ids.is_empty() { vec![id] } else { alb_ids });
+                    } else {
+                        self.start_album_audit(t.title.clone(), vec![id]);
+                    }
+                }
+            }
             ContextMenuAction::RevealInFinder(id) => {
                 if let Some(t) = self.track(id) {
                     reveal_in_file_manager(&t.path);
@@ -5875,6 +5931,45 @@ impl TxPlayerApp {
                 self.store.save();
             }
             ContextMenuAction::RemoveSelected => self.remove_selected_in_current_view(visible),
+        }
+    }
+
+    fn start_album_audit(&mut self, title: String, track_ids: Vec<u64>) {
+        let mut unique = Vec::with_capacity(track_ids.len());
+        let mut seen = HashSet::new();
+        for id in track_ids {
+            if seen.insert(id) {
+                unique.push(id);
+            }
+        }
+        if unique.is_empty() {
+            return;
+        }
+        let mut queued = 0usize;
+        for &tid in &unique {
+            if self.analysis_cache.contains_key(&tid) {
+                continue;
+            }
+            if let Some(track) = self.track(tid).cloned()
+                && self.analysis_inflight.insert(tid)
+            {
+                self.analysis_errors.remove(&tid);
+                let _ = self.analyzer_req_tx.send((
+                    tid,
+                    track.path.clone(),
+                    track.cue_start,
+                    track.cue_end,
+                ));
+                queued += 1;
+            }
+        }
+        self.album_audit = Some((title.clone(), unique.clone()));
+        if queued > 0 {
+            self.set_status(format!(
+                "TrueHz / DR audit started: {queued} track(s) queued for \"{title}\""
+            ));
+        } else {
+            self.set_status(format!("TrueHz / DR audit ready for \"{title}\""));
         }
     }
 
@@ -7017,6 +7112,33 @@ impl TxPlayerApp {
                 }
             } else {
                 self.inspect_track_id = None;
+            }
+        }
+
+        // 3b) Batch Album TrueHz & Dynamic Range Authenticity Auditor Window
+        if let Some((audit_title, audit_ids)) = self.album_audit.clone() {
+            let owned_tracks: Vec<Track> = audit_ids
+                .iter()
+                .filter_map(|id| self.track(*id).cloned())
+                .collect();
+            let rows: Vec<modals::AlbumAuditRow<'_>> = owned_tracks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| modals::AlbumAuditRow {
+                    index: i,
+                    track: t,
+                    analysis: self.analysis_cache.get(&t.id),
+                    analyzing: self.analysis_inflight.contains(&t.id),
+                    error: self.analysis_errors.get(&t.id).map(|s| s.as_str()),
+                })
+                .collect();
+            let (open_stay, inspect_id) =
+                modals::show_album_audit_window(context, &audit_title, &rows, &p);
+            if !open_stay {
+                self.album_audit = None;
+            }
+            if let Some(tid) = inspect_id {
+                self.inspect_track_id = Some(tid);
             }
         }
 
@@ -8983,6 +9105,10 @@ impl TxPlayerApp {
                                             ctx_action = Some(ContextMenuAction::TrackInfo(tid));
                                             ui.close();
                                         }
+                                        if ui.button("Verify Album TrueHz / DR…").clicked() {
+                                            ctx_action = Some(ContextMenuAction::VerifyAlbumAudit(tid));
+                                            ui.close();
+                                        }
                                         if ui
                                             .button(format!("Reveal in {FILE_MANAGER_NAME}"))
                                             .clicked()
@@ -9577,6 +9703,7 @@ enum ContextMenuAction {
     NewPlaylistWithSelected,
     EditTags,
     TrackInfo(u64),
+    VerifyAlbumAudit(u64),
     RevealInFinder(u64),
     SetRating(u64, u8),
     RemoveSelected,

@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::plugins::{
-    DspConfig, EQ_FREQS_HZ, MAX_PARAMETRIC_BANDS, ParametricBand, ParametricFilterKind,
+    DitherMode, DspConfig, EQ_FREQS_HZ, MAX_PARAMETRIC_BANDS, ParametricBand, ParametricFilterKind,
 };
 
 /// Atomic-generation guarded DSP parameter bridge so UI EQ / AutoEQ Parametric / Crossfeed
@@ -267,12 +267,18 @@ pub struct RealtimeDsp {
     peq_active_count: usize,
     crossfeed_enabled: bool,
     soft_limiter: bool,
+    dither: DitherMode,
     preamp_gain: f64,
     peq_preamp_gain: f64,
     crossfeed_mix: f64,
     cf_lp_alpha: f64,
     cf_lp_l: f64,
     cf_lp_r: f64,
+    rng_state: u64,
+    ns_e1_l: f64,
+    ns_e2_l: f64,
+    ns_e1_r: f64,
+    ns_e2_r: f64,
     eq_l: [Biquad; 10],
     eq_r: [Biquad; 10],
     peq_l: [Biquad; MAX_PARAMETRIC_BANDS],
@@ -293,12 +299,18 @@ impl RealtimeDsp {
             peq_active_count: 0,
             crossfeed_enabled: false,
             soft_limiter: true,
+            dither: DitherMode::Off,
             preamp_gain: 1.0,
             peq_preamp_gain: 1.0,
             crossfeed_mix: 0.0,
             cf_lp_alpha,
             cf_lp_l: 0.0,
             cf_lp_r: 0.0,
+            rng_state: 0x9E37_79B9_7F4A_7C15,
+            ns_e1_l: 0.0,
+            ns_e2_l: 0.0,
+            ns_e1_r: 0.0,
+            ns_e2_r: 0.0,
             eq_l: [Biquad::default(); 10],
             eq_r: [Biquad::default(); 10],
             peq_l: [Biquad::default(); MAX_PARAMETRIC_BANDS],
@@ -321,9 +333,12 @@ impl RealtimeDsp {
         self.peq_enabled = snap.peq_enabled;
         self.crossfeed_enabled = snap.crossfeed_enabled;
         self.soft_limiter = snap.soft_limiter;
+        self.dither = snap.dither;
         self.preamp_gain = 10.0_f64.powf(snap.preamp_db.clamp(-12.0, 12.0) as f64 / 20.0);
         self.peq_preamp_gain = 10.0_f64.powf(snap.peq_preamp_db.clamp(-18.0, 12.0) as f64 / 20.0);
         self.crossfeed_mix = (snap.crossfeed_amount as f64).clamp(0.0, 1.0) * 0.34;
+        let cf_cutoff = (snap.crossfeed_cutoff_hz as f64).clamp(300.0, 2_000.0);
+        self.cf_lp_alpha = 1.0 - (-TAU * cf_cutoff / self.sample_rate).exp();
 
         // Constant-Q octave graphic EQ spacing
         for (i, &freq_hz) in EQ_FREQS_HZ.iter().enumerate() {
@@ -363,52 +378,111 @@ impl RealtimeDsp {
         }
         self.cf_lp_l = 0.0;
         self.cf_lp_r = 0.0;
+        self.ns_e1_l = 0.0;
+        self.ns_e2_l = 0.0;
+        self.ns_e1_r = 0.0;
+        self.ns_e2_r = 0.0;
+    }
+
+    /// Lock-free xorshift64 uniform in [-0.5, 0.5).
+    #[inline(always)]
+    fn next_uniform(&mut self) -> f64 {
+        let mut x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng_state = x;
+        // Top 53 bits -> [0, 1) -> [-0.5, 0.5)
+        ((x >> 11) as f64) * (1.0 / ((1u64 << 53) as f64)) - 0.5
+    }
+
+    /// Exact triangular probability density function (TPDF) noise in [-1.0, 1.0].
+    #[inline(always)]
+    fn next_tpdf(&mut self) -> f64 {
+        self.next_uniform() + self.next_uniform()
     }
 
     #[inline(always)]
     pub fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
-        if !self.enabled {
+        if !self.enabled && self.dither == DitherMode::Off {
             return (left, right);
         }
         let mut l = left as f64;
         let mut r = right as f64;
 
-        if self.peq_enabled && self.peq_active_count > 0 {
-            l *= self.peq_preamp_gain;
-            r *= self.peq_preamp_gain;
-            for i in 0..self.peq_active_count {
-                l = self.peq_l[i].process(l);
-                r = self.peq_r[i].process(r);
+        if self.enabled {
+            if self.peq_enabled && self.peq_active_count > 0 {
+                l *= self.peq_preamp_gain;
+                r *= self.peq_preamp_gain;
+                for i in 0..self.peq_active_count {
+                    l = self.peq_l[i].process(l);
+                    r = self.peq_r[i].process(r);
+                }
+            }
+
+            if self.eq_enabled {
+                l *= self.preamp_gain;
+                r *= self.preamp_gain;
+                for i in 0..10 {
+                    l = self.eq_l[i].process(l);
+                    r = self.eq_r[i].process(r);
+                }
+            }
+
+            if self.crossfeed_enabled && self.crossfeed_mix > 1e-4 {
+                // Head-shadow low-passed opposite-channel bleed with energy-preserving attenuation
+                self.cf_lp_l += self.cf_lp_alpha * (l - self.cf_lp_l);
+                self.cf_lp_r += self.cf_lp_alpha * (r - self.cf_lp_r);
+                let m = self.crossfeed_mix;
+                let norm = 1.0 / (1.0 + m * 0.55);
+                let out_l = (l + self.cf_lp_r * m) * norm;
+                let out_r = (r + self.cf_lp_l * m) * norm;
+                l = out_l;
+                r = out_r;
+            }
+
+            if self.soft_limiter {
+                l = soft_limit(l);
+                r = soft_limit(r);
             }
         }
 
-        if self.eq_enabled {
-            l *= self.preamp_gain;
-            r *= self.preamp_gain;
-            for i in 0..10 {
-                l = self.eq_l[i].process(l);
-                r = self.eq_r[i].process(r);
-            }
-        }
-
-        if self.crossfeed_enabled && self.crossfeed_mix > 1e-4 {
-            // Head-shadow low-passed opposite-channel bleed with energy-preserving attenuation
-            self.cf_lp_l += self.cf_lp_alpha * (l - self.cf_lp_l);
-            self.cf_lp_r += self.cf_lp_alpha * (r - self.cf_lp_r);
-            let m = self.crossfeed_mix;
-            let norm = 1.0 / (1.0 + m * 0.55);
-            let out_l = (l + self.cf_lp_r * m) * norm;
-            let out_r = (r + self.cf_lp_l * m) * norm;
-            l = out_l;
-            r = out_r;
-        }
-
-        if self.soft_limiter {
-            l = soft_limit(l);
-            r = soft_limit(r);
+        if self.dither != DitherMode::Off {
+            let dl = self.next_tpdf();
+            let dr = self.next_tpdf();
+            l = apply_dither(l, self.dither, dl, &mut self.ns_e1_l, &mut self.ns_e2_l);
+            r = apply_dither(r, self.dither, dr, &mut self.ns_e1_r, &mut self.ns_e2_r);
         }
 
         (l as f32, r as f32)
+    }
+}
+
+/// Applies 24-bit TPDF, 16-bit TPDF, or 16-bit 2nd-order psychoacoustic high-pass noise-shaped
+/// dither to eliminate quantization distortion before integer DAC output.
+#[inline(always)]
+fn apply_dither(x: f64, mode: DitherMode, tpdf: f64, e1: &mut f64, e2: &mut f64) -> f64 {
+    match mode {
+        DitherMode::Off => x,
+        DitherMode::Tpdf24 => {
+            const SCALE: f64 = 8_388_607.0; // 2^23 - 1
+            ((x * SCALE + tpdf).round().clamp(-SCALE, SCALE)) / SCALE
+        }
+        DitherMode::Tpdf16 => {
+            const SCALE: f64 = 32_767.0; // 2^15 - 1
+            ((x * SCALE + tpdf).round().clamp(-SCALE, SCALE)) / SCALE
+        }
+        DitherMode::NoiseShaped16 => {
+            const SCALE: f64 = 32_767.0;
+            // 2nd-order high-pass error-feedback noise shaper: pushes quantization noise > 14 kHz
+            let fb = 1.5 * (*e1) - 0.55 * (*e2);
+            let shaped = x * SCALE - fb;
+            let q = (shaped + tpdf).round().clamp(-SCALE, SCALE);
+            let err = q - shaped;
+            *e2 = *e1;
+            *e1 = err.clamp(-2.5, 2.5);
+            q / SCALE
+        }
     }
 }
 
@@ -476,6 +550,72 @@ mod tests {
             "Expected sub-bass shelf boost relative to 200 Hz (20Hz={}, mid={})",
             curve[0],
             curve[20]
+        );
+    }
+
+    #[test]
+    fn tpdf_and_noise_shaped_dither_are_bounded_and_finite() {
+        for mode in [DitherMode::Tpdf24, DitherMode::Tpdf16, DitherMode::NoiseShaped16] {
+            let cfg = DspConfig {
+                enabled: false,
+                dither: mode,
+                ..Default::default()
+            };
+            let shared = SharedDspParams::new(&cfg);
+            let mut dsp = RealtimeDsp::new(48_000, &shared);
+            let mut max_err = 0.0_f32;
+            let mut non_zero_diff = 0usize;
+            for i in 0..2048 {
+                let s = (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.25;
+                let (l, r) = dsp.process_stereo(s, -s);
+                assert!(l.is_finite() && r.is_finite());
+                assert!(l.abs() <= 1.0 && r.abs() <= 1.0);
+                let err = (l - s).abs();
+                max_err = max_err.max(err);
+                if err > 0.0 {
+                    non_zero_diff += 1;
+                }
+            }
+            assert!(non_zero_diff > 1000, "{mode:?} should actively dither signal");
+            let tol = match mode {
+                DitherMode::Tpdf24 => 5e-6,
+                DitherMode::Tpdf16 => 1e-4,
+                DitherMode::NoiseShaped16 => 3e-4,
+                DitherMode::Off => 0.0,
+            };
+            assert!(
+                max_err <= tol,
+                "{mode:?} quantization error {max_err} exceeded tolerance {tol}"
+            );
+        }
+    }
+
+    #[test]
+    fn crossfeed_presets_produce_distinct_head_shadow_bleed() {
+        use crate::plugins::CrossfeedPreset;
+        let measure_bleed = |preset: CrossfeedPreset| -> f32 {
+            let mut cfg = DspConfig::default();
+            cfg.apply_crossfeed_preset(preset);
+            let shared = SharedDspParams::new(&cfg);
+            let mut dsp = RealtimeDsp::new(48_000, &shared);
+            let mut rms_r = 0.0_f64;
+            for i in 0..2048 {
+                // Pure left-channel 250 Hz tone -> right channel receives head-shadow bleed only
+                let s = (std::f32::consts::TAU * 250.0 * i as f32 / 48_000.0).sin() * 0.5;
+                let (_l, r) = dsp.process_stereo(s, 0.0);
+                if i >= 512 {
+                    rms_r += (r as f64) * (r as f64);
+                }
+            }
+            (rms_r / 1536.0).sqrt() as f32
+        };
+        let gentle = measure_bleed(CrossfeedPreset::Gentle);
+        let cmoy = measure_bleed(CrossfeedPreset::ChuMoy);
+        let meier = measure_bleed(CrossfeedPreset::JanMeier);
+        let bauer = measure_bleed(CrossfeedPreset::BauerStudio);
+        assert!(
+            gentle > 0.01 && cmoy > gentle && meier > cmoy && bauer > meier,
+            "Expected monotonic crossfeed bleed: gentle={gentle}, cmoy={cmoy}, meier={meier}, bauer={bauer}"
         );
     }
 }

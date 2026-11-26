@@ -143,6 +143,37 @@ impl VisualTap {
         }
     }
 
+    /// Reads only the newly arrived stereo samples since `cursor`, updating `cursor` to the latest
+    /// write position. Used for continuous sample-accurate real-time EBU R128 LUFS & True Peak metering.
+    pub fn read_new_stereo(
+        &self,
+        cursor: &mut usize,
+        out_l: &mut Vec<f32>,
+        out_r: &mut Vec<f32>,
+    ) -> usize {
+        out_l.clear();
+        out_r.clear();
+        if !self.is_active() {
+            return 0;
+        }
+        let end = self.write_pos.load(Ordering::Acquire);
+        let avail = end.wrapping_sub(*cursor);
+        if avail == 0 {
+            return 0;
+        }
+        let count = avail.min(VISUAL_BUFFER_LEN);
+        let start = end.wrapping_sub(count);
+        out_l.reserve(count);
+        out_r.reserve(count);
+        for i in 0..count {
+            let idx = start.wrapping_add(i) & (VISUAL_BUFFER_LEN - 1);
+            out_l.push(f32::from_bits(self.left[idx].load(Ordering::Relaxed)));
+            out_r.push(f32::from_bits(self.right[idx].load(Ordering::Relaxed)));
+        }
+        *cursor = end;
+        count
+    }
+
     fn push_callback_frame(&self, write_cursor: &mut usize, l: f32, r: f32) {
         let idx = *write_cursor & (VISUAL_BUFFER_LEN - 1);
         self.left[idx].store(l.to_bits(), Ordering::Relaxed);
