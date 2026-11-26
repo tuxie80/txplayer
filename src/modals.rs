@@ -522,8 +522,9 @@ pub fn pill_button(
     response
 }
 
-/// Renders a crisp, theme-aligned modal window with a slim 28px custom header bar
-/// (replaces egui's oversized default title bar). Dragging anywhere on the window moves it.
+/// Renders a crisp, theme-aligned modal window with a slim 28px custom header bar.
+/// Automatically clamps dimensions to the active viewport (so modals NEVER overflow Compact Mode!)
+/// and wraps body content in a smooth scroll area when constrained.
 #[allow(clippy::too_many_arguments)]
 pub fn themed_modal_window(
     context: &egui::Context,
@@ -541,11 +542,16 @@ pub fn themed_modal_window(
     if !*open {
         return;
     }
-    let center = context.content_rect().center();
-    let default_pos = pos2(
-        (center.x - default_size[0] * 0.5).max(16.0),
-        (center.y - default_size[1] * 0.5).max(20.0),
-    );
+    let screen = context.content_rect();
+    let max_w = (screen.width() - 16.0).max(280.0);
+    let max_h = (screen.height() - 16.0).max(180.0);
+    let win_w = default_size[0].min(max_w);
+    let win_h = default_size[1].min(max_h);
+    let is_tight = win_w < default_size[0] - 4.0 || win_h < default_size[1] - 4.0;
+
+    let pos_x = (screen.center().x - win_w * 0.5).clamp(screen.left() + 8.0, (screen.right() - win_w - 8.0).max(screen.left() + 8.0));
+    let pos_y = (screen.center().y - win_h * 0.5).clamp(screen.top() + 8.0, (screen.bottom() - win_h - 8.0).max(screen.top() + 8.0));
+
     let mut close_clicked = false;
     let frame = Frame::new()
         .fill(palette.panel)
@@ -556,19 +562,37 @@ pub fn themed_modal_window(
             offset: [0, 8],
             blur: 20,
             spread: 0,
-            color: Color32::from_rgba_unmultiplied(0, 0, 0, if palette.is_light { 45 } else { 135 }),
+            color: Color32::from_rgba_unmultiplied(
+                0,
+                0,
+                0,
+                if palette.is_light { 45 } else { 135 },
+            ),
         });
 
     let mut win = egui::Window::new(id)
         .id(egui::Id::unique(id))
         .title_bar(false)
         .collapsible(false)
-        .resizable(resizable)
+        .resizable(resizable && !is_tight)
         .frame(frame)
-        .default_pos(default_pos)
-        .default_size(default_size);
-    if let Some(ms) = min_size {
-        win = win.min_size(ms);
+        .constrain_to(screen.shrink(6.0))
+        .max_size([max_w, max_h]);
+
+    if is_tight || !resizable {
+        win = win.fixed_size([win_w, win_h]);
+        if is_tight {
+            win = win.fixed_pos(pos2(pos_x, pos_y));
+        } else {
+            win = win.default_pos(pos2(pos_x, pos_y));
+        }
+    } else {
+        win = win
+            .default_pos(pos2(pos_x, pos_y))
+            .default_size([win_w, win_h]);
+        if let Some(ms) = min_size {
+            win = win.min_size([ms[0].min(max_w), ms[1].min(max_h)]);
+        }
     }
 
     win.show(context, |ui| {
@@ -596,13 +620,13 @@ pub fn themed_modal_window(
         );
 
         let icon_rect = Rect::from_center_size(
-            pos2(hdr_rect.left() + 16.0, hdr_rect.center().y),
-            Vec2::splat(13.0),
+            pos2(hdr_rect.left() + 15.0, hdr_rect.center().y),
+            Vec2::splat(12.5),
         );
         icons::paint_icon(p, icon_rect, icon, palette.accent);
 
         p.text(
-            pos2(hdr_rect.left() + 28.0, hdr_rect.center().y),
+            pos2(hdr_rect.left() + 27.0, hdr_rect.center().y),
             Align2::LEFT_CENTER,
             title,
             FontId::proportional(12.0),
@@ -643,11 +667,18 @@ pub fn themed_modal_window(
             );
         }
 
-        // Body content with crisp padding
+        // Body content with crisp padding & viewport-safe vertical scrolling
+        let body_max_h = (win_h - hdr_h - 20.0).max(120.0);
         Frame::new()
             .inner_margin(Margin::symmetric(12, 10))
             .show(ui, |ui| {
-                content(ui);
+                ScrollArea::vertical()
+                    .id_salt((id, "modal_body_scroll"))
+                    .max_height(body_max_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        content(ui);
+                    });
             });
     });
 
@@ -658,6 +689,7 @@ pub fn themed_modal_window(
 
 pub struct SettingsViewActions {
     pub theme_changed: Option<ThemeId>,
+    pub compact_mode_changed: Option<bool>,
     pub device_changed: Option<Option<String>>,
     pub linear_vol_changed: Option<bool>,
     pub dsp_changed: bool,
@@ -676,6 +708,7 @@ pub fn show_settings_window(
     tab: &mut SettingsTab,
     palette: &Palette,
     theme_id: ThemeId,
+    compact_mode: bool,
     progress_style: &mut ProgressBarStyle,
     row_density: &mut RowDensity,
     close_to_tray: &mut bool,
@@ -695,6 +728,7 @@ pub fn show_settings_window(
 ) -> SettingsViewActions {
     let mut actions = SettingsViewActions {
         theme_changed: None,
+        compact_mode_changed: None,
         device_changed: None,
         linear_vol_changed: None,
         dsp_changed: false,
@@ -723,14 +757,15 @@ pub fn show_settings_window(
         &mut is_open,
         palette,
         |ui| {
-            // Top segmented tab bar
-            ui.horizontal(|ui| {
+            // Responsive segmented tab bar (wraps cleanly in Compact Mode!)
+            let narrow = ui.available_width() < 520.0;
+            ui.horizontal_wrapped(|ui| {
                 for (t, label, icon) in [
                     (SettingsTab::Appearance, "Appearance", Icon::Palette),
                     (SettingsTab::Visualizer, "Visualizer", Icon::Visualizer),
                     (SettingsTab::Audio, "Audio & DSP", Icon::Sliders),
-                    (SettingsTab::Plugins, "Plugins", Icon::Plugin),
-                    (SettingsTab::LibraryTags, "Library & Tags", Icon::Tag),
+                    (SettingsTab::Plugins, "Modules", Icon::Plugin),
+                    (SettingsTab::LibraryTags, "Library", Icon::Tag),
                 ] {
                     let style = if *tab == t {
                         PillStyle::Active
@@ -749,25 +784,77 @@ pub fn show_settings_window(
             match *tab {
                 SettingsTab::Appearance => {
                     ui.label(
+                        RichText::new("WINDOW LAYOUT")
+                            .size(10.0)
+                            .strong()
+                            .color(palette.faint),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if pill_button(
+                            ui,
+                            "Compact Mode",
+                            Some(Icon::Compact),
+                            if compact_mode {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            palette,
+                        )
+                        .on_hover_text("Compact mini-player with optional playlist drawer")
+                        .clicked()
+                            && !compact_mode
+                        {
+                            actions.compact_mode_changed = Some(true);
+                        }
+                        if pill_button(
+                            ui,
+                            "Classic Mode",
+                            Some(Icon::Expand),
+                            if !compact_mode {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            palette,
+                        )
+                        .on_hover_text("Full library browser with sidebar, albums, and lyrics")
+                        .clicked()
+                            && compact_mode
+                        {
+                            actions.compact_mode_changed = Some(false);
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.label(
                         RichText::new("COLOR THEME")
                             .size(10.0)
                             .strong()
                             .color(palette.faint),
                     );
                     ui.add_space(4.0);
+                    let cols = if narrow { 1 } else { 2 };
+                    let card_w = if narrow {
+                        (ui.available_width() - 4.0).max(240.0)
+                    } else {
+                        ((ui.available_width() - 12.0) * 0.5).clamp(220.0, 290.0)
+                    };
+                    let card_h = if narrow { 40.0 } else { 44.0 };
                     egui::Grid::new("theme_grid")
-                        .num_columns(2)
-                        .spacing([8.0, 8.0])
+                        .num_columns(cols)
+                        .spacing([8.0, 6.0])
                         .show(ui, |ui| {
                             for (idx, &tid) in ThemeId::ALL.iter().enumerate() {
                                 let tp = tid.palette();
                                 let active = tid == theme_id;
                                 let (rect, resp) =
-                                    ui.allocate_exact_size(vec2(268.0, 46.0), Sense::click());
+                                    ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
                                 let hovered = resp.hovered();
                                 ui.painter().rect_filled(
                                     rect,
-                                    8.0,
+                                    6.0,
                                     if active {
                                         palette.selected
                                     } else if hovered {
@@ -778,9 +865,9 @@ pub fn show_settings_window(
                                 );
                                 ui.painter().rect_stroke(
                                     rect,
-                                    8.0,
+                                    6.0,
                                     Stroke::new(
-                                        if active { 1.5 } else { 1.0 },
+                                        if active { 1.4 } else { 1.0 },
                                         if active {
                                             palette.accent
                                         } else {
@@ -793,7 +880,7 @@ pub fn show_settings_window(
                                 let swatches = [tp.background, tp.sidebar, tp.accent, tp.hires_gold];
                                 for (si, col) in swatches.iter().enumerate() {
                                     let sr = Rect::from_min_size(
-                                        pos2(rect.left() + 10.0 + si as f32 * 13.0, rect.center().y - 6.0),
+                                        pos2(rect.left() + 10.0 + si as f32 * 13.0, rect.center().y - 5.5),
                                         Vec2::splat(11.0),
                                     );
                                     ui.painter().rect_filled(sr, 3.0, *col);
@@ -804,15 +891,19 @@ pub fn show_settings_window(
                                         StrokeKind::Inside,
                                     );
                                 }
-                                ui.painter().text(
-                                    pos2(rect.left() + 68.0, rect.top() + 15.0),
+                                let text_clip = Rect::from_min_max(
+                                    pos2(rect.left() + 66.0, rect.top()),
+                                    pos2(rect.right() - 8.0, rect.bottom()),
+                                );
+                                ui.painter().with_clip_rect(text_clip).text(
+                                    pos2(rect.left() + 68.0, rect.top() + card_h * 0.34),
                                     Align2::LEFT_CENTER,
                                     tid.name(),
-                                    FontId::proportional(12.0),
+                                    FontId::proportional(11.5),
                                     palette.text,
                                 );
-                                ui.painter().text(
-                                    pos2(rect.left() + 68.0, rect.top() + 31.0),
+                                ui.painter().with_clip_rect(text_clip).text(
+                                    pos2(rect.left() + 68.0, rect.top() + card_h * 0.70),
                                     Align2::LEFT_CENTER,
                                     tid.subtitle(),
                                     FontId::proportional(9.5),
@@ -821,13 +912,13 @@ pub fn show_settings_window(
                                 if resp.clicked() {
                                     actions.theme_changed = Some(tid);
                                 }
-                                if idx % 2 == 1 {
+                                if cols == 1 || idx % cols == cols - 1 {
                                     ui.end_row();
                                 }
                             }
                         });
 
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
                     ui.label(
                         RichText::new("TIMELINE & TRACK LIST")
                             .size(10.0)
@@ -835,7 +926,7 @@ pub fn show_settings_window(
                             .color(palette.faint),
                     );
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new("Track Progress:")
                                 .size(11.5)
@@ -864,9 +955,9 @@ pub fn show_settings_window(
                         }
                     });
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            RichText::new("Track Row Density:")
+                            RichText::new("Row Density:")
                                 .size(11.5)
                                 .color(palette.text_secondary),
                         );
@@ -905,7 +996,7 @@ pub fn show_settings_window(
                     aligned_checkbox_row(
                         ui,
                         close_to_tray,
-                        "Minimize to system tray instead of quitting on close",
+                        "Minimize to system tray when closing window",
                         palette,
                     );
                 }
@@ -954,7 +1045,7 @@ pub fn show_settings_window(
                             .color(palette.faint),
                     );
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         for &eng in PianoEngineId::ALL {
                             if pill_button(
                                 ui,
@@ -1006,7 +1097,7 @@ pub fn show_settings_window(
                         palette,
                     );
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new("Concert Stage Height:")
                                 .size(11.5)
@@ -1045,174 +1136,239 @@ pub fn show_settings_window(
                     });
                 }
                 SettingsTab::Audio => {
-                    ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!("{} OUTPUT DEVICE", AUDIO_BACKEND_NAME.to_uppercase()))
+                            .size(10.0)
+                            .strong()
+                            .color(palette.faint),
+                    );
+                    ui.add_space(4.0);
+                    Frame::new()
+                        .fill(palette.background)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .corner_radius(6.0)
+                        .inner_margin(Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            ScrollArea::vertical().max_height(105.0).show(ui, |ui| {
+                                let is_default = preferred_device.is_none();
+                                let default_label = match default_output_device_name() {
+                                    Some(name) => format!("System Default ({name})"),
+                                    None => "System Default (Auto-follow headphones & Bluetooth)".into(),
+                                };
+                                if ui.selectable_label(is_default, default_label).clicked() {
+                                    actions.device_changed = Some(None);
+                                }
+                                ui.separator();
+                                for dev in available_devices.iter() {
+                                    let selected = preferred_device.as_deref() == Some(dev.as_str());
+                                    if ui.selectable_label(selected, dev).clicked() {
+                                        actions.device_changed = Some(Some(dev.clone()));
+                                    }
+                                }
+                            });
+                        });
+                    ui.add_space(5.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if pill_button(
+                            ui,
+                            "Refresh Output Devices",
+                            Some(Icon::Refresh),
+                            PillStyle::Secondary,
+                            palette,
+                        )
+                        .clicked()
+                        {
+                            *available_devices = list_output_devices();
+                        }
+                        let prev_lin = *linear_volume;
+                        aligned_checkbox_row(
+                            ui,
+                            linear_volume,
+                            "Linear volume curve",
+                            palette,
+                        );
+                        if *linear_volume != prev_lin {
+                            actions.linear_vol_changed = Some(*linear_volume);
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // DSP & Equalizer
+                    ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(format!("{} OUTPUT DEVICE", AUDIO_BACKEND_NAME.to_uppercase()))
+                            RichText::new("EQUALIZER & CROSSFEED")
                                 .size(10.0)
                                 .strong()
                                 .color(palette.faint),
                         );
-                        ui.add_space(4.0);
-                        Frame::new()
-                            .fill(palette.background)
-                            .stroke(Stroke::new(1.0, palette.border))
-                            .corner_radius(6.0)
-                            .inner_margin(Margin::symmetric(8, 6))
-                            .show(ui, |ui| {
-                                ScrollArea::vertical().max_height(105.0).show(ui, |ui| {
-                                    let is_default = preferred_device.is_none();
-                                    let default_label = match default_output_device_name() {
-                                        Some(name) => format!("System Default ({name})"),
-                                        None => "System Default (Auto-follow headphones & Bluetooth)".into(),
-                                    };
-                                    if ui.selectable_label(is_default, default_label).clicked() {
-                                        actions.device_changed = Some(None);
-                                    }
-                                    ui.separator();
-                                    for dev in available_devices.iter() {
-                                        let selected = preferred_device.as_deref() == Some(dev.as_str());
-                                        if ui.selectable_label(selected, dev).clicked() {
-                                            actions.device_changed = Some(Some(dev.clone()));
-                                        }
-                                    }
-                                });
-                            });
-                        ui.add_space(5.0);
-                        ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if pill_button(
                                 ui,
-                                "Refresh Output Devices",
-                                Some(Icon::Refresh),
-                                PillStyle::Secondary,
+                                if plugins.dsp.enabled {
+                                    "DSP Active"
+                                } else {
+                                    "DSP Bypassed"
+                                },
+                                Some(Icon::Sliders),
+                                if plugins.dsp.enabled {
+                                    PillStyle::Accent
+                                } else {
+                                    PillStyle::Secondary
+                                },
                                 palette,
                             )
                             .clicked()
                             {
-                                *available_devices = list_output_devices();
-                            }
-                            let prev_lin = *linear_volume;
-                            aligned_checkbox_row(
-                                ui,
-                                linear_volume,
-                                "Linear volume curve",
-                                palette,
-                            );
-                            if *linear_volume != prev_lin {
-                                actions.linear_vol_changed = Some(*linear_volume);
+                                plugins.dsp.enabled = !plugins.dsp.enabled;
+                                actions.dsp_changed = true;
                             }
                         });
+                    });
+                    ui.add_space(6.0);
 
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(8.0);
+                    if paint_dsp_controls(ui, &mut plugins.dsp, palette) {
+                        actions.dsp_changed = true;
+                    }
 
-                        // DSP & Equalizer
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("EQUALIZER & CROSSFEED")
-                                    .size(10.0)
-                                    .strong()
-                                    .color(palette.faint),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if pill_button(
-                                    ui,
-                                    if plugins.dsp.enabled {
-                                        "DSP Active"
-                                    } else {
-                                        "DSP Bypassed"
-                                    },
-                                    Some(Icon::Sliders),
-                                    if plugins.dsp.enabled {
-                                        PillStyle::Accent
-                                    } else {
-                                        PillStyle::Secondary
-                                    },
-                                    palette,
-                                )
-                                .clicked()
-                                {
-                                    plugins.dsp.enabled = !plugins.dsp.enabled;
-                                    actions.dsp_changed = true;
-                                }
-                            });
-                        });
-                        ui.add_space(6.0);
-
-                        if paint_dsp_controls(ui, &mut plugins.dsp, palette) {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("PLAYBACK ENGINE · GAPLESS · BIT-PERFECT · REPLAYGAIN")
+                            .size(10.0)
+                            .strong()
+                            .color(palette.faint),
+                    );
+                    ui.add_space(4.0);
+                    let prev_bp = plugins.dsp.bit_perfect_mode;
+                    aligned_checkbox_row(
+                        ui,
+                        &mut plugins.dsp.bit_perfect_mode,
+                        "Bit-Perfect Direct Output (bypass DSP & ReplayGain, auto-switch native DAC sample rate)",
+                        palette,
+                    );
+                    let prev_gap = plugins.dsp.gapless_enabled;
+                    aligned_checkbox_row(
+                        ui,
+                        &mut plugins.dsp.gapless_enabled,
+                        "True Gapless Playback (zero-silence transition between tracks & CUE sheets)",
+                        palette,
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(format!("Crossfade: {:.1}s", plugins.dsp.crossfade_secs))
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                        );
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut plugins.dsp.crossfade_secs, 0.0..=6.0)
+                                    .step_by(0.5)
+                                    .show_value(false),
+                            )
+                            .changed()
+                        {
                             actions.dsp_changed = true;
                         }
-
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(6.0);
                         ui.label(
-                            RichText::new("PLAYBACK ENGINE · GAPLESS · BIT-PERFECT · REPLAYGAIN")
-                                .size(10.0)
-                                .strong()
-                                .color(palette.faint),
+                            RichText::new(if plugins.dsp.crossfade_secs <= 0.05 {
+                                "Off (pure gapless)"
+                            } else {
+                                "Equal-power fade"
+                            })
+                            .size(10.0)
+                            .color(palette.faint),
                         );
-                        ui.add_space(4.0);
-                        let prev_bp = plugins.dsp.bit_perfect_mode;
-                        aligned_checkbox_row(
+                    });
+                    if plugins.dsp.bit_perfect_mode != prev_bp
+                        || plugins.dsp.gapless_enabled != prev_gap
+                    {
+                        actions.dsp_changed = true;
+                        actions.rg_changed = true;
+                    }
+
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("ReplayGain:")
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                        );
+                        for &mode in ReplayGainMode::ALL {
+                            if pill_button(
+                                ui,
+                                mode.name(),
+                                None,
+                                if plugins.dsp.replay_gain == mode {
+                                    PillStyle::Active
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                palette,
+                            )
+                            .clicked()
+                            {
+                                plugins.dsp.replay_gain = mode;
+                                actions.rg_changed = true;
+                            }
+                        }
+                        ui.add_space(6.0);
+                        let prev_clip = plugins.dsp.rg_prevent_clipping;
+                        aligned_inline_checkbox(
                             ui,
-                            &mut plugins.dsp.bit_perfect_mode,
-                            "Bit-Perfect Direct Output (bypass DSP & ReplayGain, auto-switch native DAC sample rate)",
+                            &mut plugins.dsp.rg_prevent_clipping,
+                            "Peak Guard",
+                            98.0,
                             palette,
                         );
-                        let prev_gap = plugins.dsp.gapless_enabled;
-                        aligned_checkbox_row(
-                            ui,
-                            &mut plugins.dsp.gapless_enabled,
-                            "True Gapless Playback (zero-silence transition between tracks & CUE sheets)",
-                            palette,
-                        );
+                        if plugins.dsp.rg_prevent_clipping != prev_clip {
+                            actions.rg_changed = true;
+                        }
+                    });
+                    if plugins.dsp.replay_gain != ReplayGainMode::Off {
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format!("Crossfade: {:.1}s", plugins.dsp.crossfade_secs))
-                                    .size(11.0)
-                                    .color(palette.text_secondary),
+                                RichText::new(format!(
+                                    "RG Preamp: {:+.1} dB",
+                                    plugins.dsp.rg_preamp_db
+                                ))
+                                .size(11.0)
+                                .color(palette.text_secondary),
                             );
                             if ui
                                 .add(
-                                    egui::Slider::new(&mut plugins.dsp.crossfade_secs, 0.0..=6.0)
+                                    egui::Slider::new(&mut plugins.dsp.rg_preamp_db, -6.0..=6.0)
                                         .step_by(0.5)
                                         .show_value(false),
                                 )
                                 .changed()
                             {
-                                actions.dsp_changed = true;
+                                actions.rg_changed = true;
                             }
-                            ui.label(
-                                RichText::new(if plugins.dsp.crossfade_secs <= 0.05 {
-                                    "Off (pure gapless)"
-                                } else {
-                                    "Equal-power fade"
-                                })
-                                .size(10.0)
-                                .color(palette.faint),
-                            );
                         });
-                        if plugins.dsp.bit_perfect_mode != prev_bp
-                            || plugins.dsp.gapless_enabled != prev_gap
-                        {
-                            actions.dsp_changed = true;
-                            actions.rg_changed = true;
-                        }
+                    }
+                }
+                SettingsTab::Plugins => {
+                    ui.label(
+                        RichText::new("MODULES & TOOLS")
+                            .size(10.0)
+                            .strong()
+                            .color(palette.faint),
+                    );
+                    ui.add_space(6.0);
 
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("ReplayGain:")
-                                    .size(11.0)
-                                    .color(palette.text_secondary),
-                            );
-                            for &mode in ReplayGainMode::ALL {
+                    // 1. Piano Pitch Detection Engine Module
+                    plugin_section_card(ui, "PIANO PITCH ENGINE", palette, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for &eng in PianoEngineId::ALL {
                                 if pill_button(
                                     ui,
-                                    mode.name(),
+                                    eng.short_name(),
                                     None,
-                                    if plugins.dsp.replay_gain == mode {
+                                    if plugins.visualizers.piano_engine == eng {
                                         PillStyle::Active
                                     } else {
                                         PillStyle::Secondary
@@ -1221,228 +1377,157 @@ pub fn show_settings_window(
                                 )
                                 .clicked()
                                 {
-                                    plugins.dsp.replay_gain = mode;
-                                    actions.rg_changed = true;
+                                    plugins.visualizers.piano_engine = eng;
                                 }
                             }
-                            ui.add_space(6.0);
-                            let prev_clip = plugins.dsp.rg_prevent_clipping;
-                            aligned_inline_checkbox(
+                            status_badge(
                                 ui,
-                                &mut plugins.dsp.rg_prevent_clipping,
-                                "Peak Guard",
-                                98.0,
+                                &format!("{:.2} ms/f", vis_compute_ms),
+                                true,
                                 palette,
                             );
-                            if plugins.dsp.rg_prevent_clipping != prev_clip {
-                                actions.rg_changed = true;
-                            }
                         });
-                        if plugins.dsp.replay_gain != ReplayGainMode::Off {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "RG Preamp: {:+.1} dB",
-                                        plugins.dsp.rg_preamp_db
-                                    ))
-                                    .size(11.0)
-                                    .color(palette.text_secondary),
-                                );
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut plugins.dsp.rg_preamp_db, -6.0..=6.0)
-                                            .step_by(0.5)
-                                            .show_value(false),
-                                    )
-                                    .changed()
-                                {
-                                    actions.rg_changed = true;
-                                }
-                            });
+                        ui.label(
+                            RichText::new(plugins.visualizers.piano_engine.description())
+                                .size(10.5)
+                                .color(palette.muted),
+                        );
+                    });
+                    ui.add_space(6.0);
+
+                    // 2. Visualizer Modules
+                    plugin_section_card(ui, "VISUALIZER MODULES (QUICK-CYCLE ROSTER)", palette, |ui| {
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.visualizers.enable_piano_harmonic,
+                            "Piano & Harmonic Ribbon (88-key spline + live keybed)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.visualizers.enable_piano_roll,
+                            "88-Key Concert Piano Roll (real-time note waterfall)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.visualizers.enable_concert_spectrum,
+                            "64-Band Concert Spectrum (27.5 Hz – 18 kHz)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.visualizers.enable_stereo_scope,
+                            "Stereo Scope & M/S Phase Goniometer",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.visualizers.enable_mastering_vu,
+                            "Mastering VU & Phase Correlation",
+                            palette,
+                        );
+                    });
+                    ui.add_space(6.0);
+
+                    // 3. Real-Time Audio DSP Modules
+                    plugin_section_card(ui, "AUDIO DSP MODULES", palette, |ui| {
+                        let prev_en = plugins.dsp.enabled;
+                        let prev_eq = plugins.dsp.eq_enabled;
+                        let prev_cf = plugins.dsp.crossfeed_enabled;
+                        let prev_lim = plugins.dsp.soft_limiter;
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.dsp.enabled,
+                            "Master Audio DSP Chain (disable for bit-direct bypass)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.dsp.eq_enabled,
+                            "10-Band Audiophile Parametric EQ (64-bit Direct Form II)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.dsp.crossfeed_enabled,
+                            "Headphone Acoustic Crossfeed (natural speaker soundstage)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.dsp.soft_limiter,
+                            "Transparent Soft-Knee Limiter (-0.7 dBFS clip guard)",
+                            palette,
+                        );
+                        if plugins.dsp.enabled != prev_en
+                            || plugins.dsp.eq_enabled != prev_eq
+                            || plugins.dsp.crossfeed_enabled != prev_cf
+                            || plugins.dsp.soft_limiter != prev_lim
+                        {
+                            actions.dsp_changed = true;
                         }
                     });
-                }
-                SettingsTab::Plugins => {
-                    ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
-                        ui.label(
-                            RichText::new("MODULES & TOOLS")
-                                .size(10.0)
-                                .strong()
-                                .color(palette.faint),
+                    ui.add_space(6.0);
+
+                    // 4. Metadata & Tag Provider Modules + Tool Health
+                    plugin_section_card(ui, "TAG PROVIDERS & SYSTEM TOOLS", palette, |ui| {
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.tag_providers.local_hash_cache,
+                            "Local Hash Cache (instant offline repeat matching)",
+                            palette,
                         );
-                        ui.add_space(6.0);
-
-                        // 1. Piano Pitch Detection Engine Module
-                        plugin_section_card(ui, "PIANO PITCH ENGINE", palette, |ui| {
-                            ui.horizontal(|ui| {
-                                for &eng in PianoEngineId::ALL {
-                                    if pill_button(
-                                        ui,
-                                        eng.short_name(),
-                                        None,
-                                        if plugins.visualizers.piano_engine == eng {
-                                            PillStyle::Active
-                                        } else {
-                                            PillStyle::Secondary
-                                        },
-                                        palette,
-                                    )
-                                    .clicked()
-                                    {
-                                        plugins.visualizers.piano_engine = eng;
-                                    }
-                                }
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    status_badge(
-                                        ui,
-                                        &format!("{:.2} ms/f", vis_compute_ms),
-                                        true,
-                                        palette,
-                                    );
-                                });
-                            });
-                            ui.label(
-                                RichText::new(plugins.visualizers.piano_engine.description())
-                                    .size(10.5)
-                                    .color(palette.muted),
-                            );
-                        });
-                        ui.add_space(6.0);
-
-                        // 2. Visualizer Modules
-                        plugin_section_card(ui, "VISUALIZER MODULES (QUICK-CYCLE ROSTER)", palette, |ui| {
-                            aligned_checkbox_row(
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.tag_providers.musicbrainz,
+                            "MusicBrainz Web Service (classical & recording metadata)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.tag_providers.itunes,
+                            "iTunes Search + 600px Cover Art Fetcher",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.tag_providers.acoustid,
+                            "AcoustID Chromaprint Fingerprinting",
+                            palette,
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            status_badge(
                                 ui,
-                                &mut plugins.visualizers.enable_piano_harmonic,
-                                "Piano & Harmonic Ribbon (88-key spline + live keybed)",
+                                if tool_health.ffmpeg_path.is_some() {
+                                    "ffmpeg ✓ (tag writes)"
+                                } else {
+                                    "ffmpeg ✗ (optional)"
+                                },
+                                tool_health.ffmpeg_path.is_some(),
                                 palette,
                             );
-                            aligned_checkbox_row(
+                            status_badge(
                                 ui,
-                                &mut plugins.visualizers.enable_piano_roll,
-                                "88-Key Concert Piano Roll (real-time note waterfall)",
+                                if tool_health.fpcalc_path.is_some() {
+                                    "fpcalc ✓ (AcoustID)"
+                                } else {
+                                    "fpcalc ✗ (optional)"
+                                },
+                                tool_health.fpcalc_path.is_some(),
                                 palette,
                             );
-                            aligned_checkbox_row(
+                            status_badge(
                                 ui,
-                                &mut plugins.visualizers.enable_concert_spectrum,
-                                "64-Band Concert Spectrum (27.5 Hz – 18 kHz)",
+                                if tool_health.curl_available {
+                                    "curl ✓ (online lookup)"
+                                } else {
+                                    "curl ✗"
+                                },
+                                tool_health.curl_available,
                                 palette,
                             );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.visualizers.enable_stereo_scope,
-                                "Stereo Scope & M/S Phase Goniometer",
-                                palette,
-                            );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.visualizers.enable_mastering_vu,
-                                "Mastering VU & Phase Correlation",
-                                palette,
-                            );
-                        });
-                        ui.add_space(6.0);
-
-                        // 3. Real-Time Audio DSP Modules
-                        plugin_section_card(ui, "AUDIO DSP MODULES", palette, |ui| {
-                            let prev_en = plugins.dsp.enabled;
-                            let prev_eq = plugins.dsp.eq_enabled;
-                            let prev_cf = plugins.dsp.crossfeed_enabled;
-                            let prev_lim = plugins.dsp.soft_limiter;
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.dsp.enabled,
-                                "Master Audio DSP Chain (disable for bit-direct bypass)",
-                                palette,
-                            );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.dsp.eq_enabled,
-                                "10-Band Audiophile Parametric EQ (64-bit Direct Form II)",
-                                palette,
-                            );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.dsp.crossfeed_enabled,
-                                "Headphone Acoustic Crossfeed (natural speaker soundstage)",
-                                palette,
-                            );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.dsp.soft_limiter,
-                                "Transparent Soft-Knee Limiter (-0.7 dBFS clip guard)",
-                                palette,
-                            );
-                            if plugins.dsp.enabled != prev_en
-                                || plugins.dsp.eq_enabled != prev_eq
-                                || plugins.dsp.crossfeed_enabled != prev_cf
-                                || plugins.dsp.soft_limiter != prev_lim
-                            {
-                                actions.dsp_changed = true;
-                            }
-                        });
-                        ui.add_space(6.0);
-
-                        // 4. Metadata & Tag Provider Modules + Tool Health
-                        plugin_section_card(ui, "TAG PROVIDERS & SYSTEM TOOLS", palette, |ui| {
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.tag_providers.local_hash_cache,
-                                "Local Hash Cache (instant offline repeat matching)",
-                                palette,
-                            );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.tag_providers.musicbrainz,
-                                "MusicBrainz Web Service (classical & recording metadata)",
-                                palette,
-                            );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.tag_providers.itunes,
-                                "iTunes Search + 600px Cover Art Fetcher",
-                                palette,
-                            );
-                            aligned_checkbox_row(
-                                ui,
-                                &mut plugins.tag_providers.acoustid,
-                                "AcoustID Chromaprint Fingerprinting",
-                                palette,
-                            );
-                            ui.add_space(4.0);
-                            ui.horizontal_wrapped(|ui| {
-                                status_badge(
-                                    ui,
-                                    if tool_health.ffmpeg_path.is_some() {
-                                        "ffmpeg ✓ (tag writes)"
-                                    } else {
-                                        "ffmpeg ✗ (brew install ffmpeg)"
-                                    },
-                                    tool_health.ffmpeg_path.is_some(),
-                                    palette,
-                                );
-                                status_badge(
-                                    ui,
-                                    if tool_health.fpcalc_path.is_some() {
-                                        "fpcalc ✓ (AcoustID)"
-                                    } else {
-                                        "fpcalc ✗ (brew install chromaprint)"
-                                    },
-                                    tool_health.fpcalc_path.is_some(),
-                                    palette,
-                                );
-                                status_badge(
-                                    ui,
-                                    if tool_health.curl_available {
-                                        "curl ✓ (online lookup)"
-                                    } else {
-                                        "curl ✗"
-                                    },
-                                    tool_health.curl_available,
-                                    palette,
-                                );
-                            });
                         });
                     });
                 }
@@ -1454,7 +1539,7 @@ pub fn show_settings_window(
                             .color(palette.faint),
                     );
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if pill_button(
                             ui,
                             "Manage Libraries…",
@@ -1530,14 +1615,15 @@ pub fn show_settings_window(
                         .color(palette.muted),
                     );
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new("AcoustID API Key:")
                                 .size(11.5)
                                 .color(palette.text_secondary),
                         );
+                        let key_w = (ui.available_width() - 8.0).clamp(160.0, 260.0);
                         ui.add_sized(
-                            [260.0, 24.0],
+                            [key_w, 24.0],
                             egui::TextEdit::singleline(acoustid_key)
                                 .hint_text("Optional (uses default demo key if blank)"),
                         );
@@ -1642,9 +1728,15 @@ pub fn show_tag_editor_window(
             }
 
             ui.add_space(8.0);
-            // Editable Metadata Form
+            // Editable Metadata Form (adapts cleanly to 2 columns in Compact Mode)
+            let tag_narrow = ui.available_width() < 540.0;
+            let field_w = if tag_narrow {
+                (ui.available_width() - 96.0).clamp(140.0, 290.0)
+            } else {
+                225.0
+            };
             egui::Grid::new("tag_editor_form")
-                .num_columns(4)
+                .num_columns(if tag_narrow { 2 } else { 4 })
                 .spacing([10.0, 6.0])
                 .show(ui, |ui| {
                     let lbl = |ui: &mut Ui, text: &str| {
@@ -1652,7 +1744,7 @@ pub fn show_tag_editor_window(
                     };
                     if batch_count == 1 {
                         lbl(ui, "Title");
-                        ui.add_sized([225.0, 24.0], egui::TextEdit::singleline(&mut state.form.title));
+                        ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut state.form.title));
                     } else {
                         lbl(ui, "Title");
                         ui.label(
@@ -1661,34 +1753,46 @@ pub fn show_tag_editor_window(
                                 .color(palette.faint),
                         );
                     }
+                    if tag_narrow {
+                        ui.end_row();
+                    }
                     lbl(ui, "Artist");
-                    ui.add_sized([225.0, 24.0], egui::TextEdit::singleline(&mut state.form.artist));
+                    ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut state.form.artist));
                     ui.end_row();
 
                     lbl(ui, "Album");
-                    ui.add_sized([225.0, 24.0], egui::TextEdit::singleline(&mut state.form.album));
+                    ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut state.form.album));
+                    if tag_narrow {
+                        ui.end_row();
+                    }
                     lbl(ui, "Album Artist");
                     ui.add_sized(
-                        [225.0, 24.0],
+                        [field_w, 24.0],
                         egui::TextEdit::singleline(&mut state.form.album_artist),
                     );
                     ui.end_row();
 
                     lbl(ui, "Year");
-                    ui.add_sized([225.0, 24.0], egui::TextEdit::singleline(&mut state.form.year));
+                    ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut state.form.year));
+                    if tag_narrow {
+                        ui.end_row();
+                    }
                     lbl(ui, "Genre");
-                    ui.add_sized([225.0, 24.0], egui::TextEdit::singleline(&mut state.form.genre));
+                    ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut state.form.genre));
                     ui.end_row();
 
                     if batch_count == 1 {
                         lbl(ui, "Track #");
                         ui.add_sized(
-                            [225.0, 24.0],
+                            [field_w, 24.0],
                             egui::TextEdit::singleline(&mut state.form.track_number),
                         );
+                        if tag_narrow {
+                            ui.end_row();
+                        }
                         lbl(ui, "Disc #");
                         ui.add_sized(
-                            [225.0, 24.0],
+                            [field_w, 24.0],
                             egui::TextEdit::singleline(&mut state.form.disc_number),
                         );
                         ui.end_row();
@@ -1700,7 +1804,7 @@ pub fn show_tag_editor_window(
             ui.add_space(8.0);
 
             // Online Lookup Services Section
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new("ONLINE TAG LOOKUP (MUSICBRAINZ · ITUNES · ACOUSTID · HASH)")
                         .size(10.0)
@@ -1717,9 +1821,9 @@ pub fn show_tag_editor_window(
                 }
             });
             ui.add_space(5.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
-                    [190.0, 24.0],
+                    [if tag_narrow { 175.0 } else { 190.0 }, 24.0],
                     egui::TextEdit::singleline(&mut state.query_title)
                         .hint_text("Title or work (e.g. Nocturne Op. 9)"),
                 );
@@ -2141,7 +2245,7 @@ pub fn show_track_info_window(
                 });
 
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if pill_button(ui, "Play", Some(Icon::Play), PillStyle::Accent, palette).clicked() {
                     action = Some(TrackInfoAction::Play);
                 }
@@ -2161,13 +2265,11 @@ pub fn show_track_info_window(
                 {
                     action = Some(TrackInfoAction::RevealInFinder);
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if pill_button(ui, "Remove", Some(Icon::Trash), PillStyle::Danger, palette)
-                        .clicked()
-                    {
-                        action = Some(TrackInfoAction::Remove);
-                    }
-                });
+                if pill_button(ui, "Remove", Some(Icon::Trash), PillStyle::Danger, palette)
+                    .clicked()
+                {
+                    action = Some(TrackInfoAction::Remove);
+                }
             });
         });
 
@@ -2414,18 +2516,20 @@ pub fn paint_dsp_controls(ui: &mut Ui, dsp: &mut DspConfig, palette: &Palette) -
     });
     ui.add_space(6.0);
 
-    // 10-band vertical EQ bank
+    // 10-band vertical EQ bank (responsive band width so it fits both Compact & Classic modes!)
+    let eq_band_w = ((ui.available_width() - 48.0) / 10.0).clamp(30.0, 48.0);
+    let eq_gap = if eq_band_w < 38.0 { 2.0 } else { 5.0 };
     Frame::new()
         .fill(palette.background)
         .stroke(Stroke::new(1.0, palette.border))
-        .corner_radius(8.0)
-        .inner_margin(Margin::symmetric(10, 8))
+        .corner_radius(6.0)
+        .inner_margin(Margin::symmetric(8, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.x = eq_gap;
                 for (i, label) in EQ_FREQ_LABELS.iter().enumerate() {
                     ui.vertical(|ui| {
-                        ui.set_width(48.0);
+                        ui.set_width(eq_band_w);
                         ui.with_layout(Layout::top_down(Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format!("{:+.1}", dsp.eq_bands_db[i]))
@@ -2570,7 +2674,8 @@ fn anchored_popover(
 
     let screen = context.content_rect();
     let caret_h = 7.0;
-    let margin = 12.0;
+    let margin = 10.0;
+    let width = width.min((screen.width() - margin * 2.0).max(260.0));
 
     let (anchor_cx, bottom_y) = if let Some(ar) = anchor_rect {
         (ar.center().x, ar.top() - caret_h - 4.0)
@@ -3253,28 +3358,35 @@ pub fn show_command_palette(
         return chosen;
     }
 
+    let screen = context.content_rect();
+    let palette_w = (screen.width() - 32.0).clamp(300.0, 540.0);
     egui::Area::new(egui::Id::unique("command_palette_area"))
-        .anchor(Align2::CENTER_TOP, vec2(0.0, 72.0))
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 48.0))
         .order(egui::Order::Foreground)
         .show(context, |ui| {
             Frame::new()
                 .fill(palette.panel)
-                .stroke(Stroke::new(1.2, palette.selected_border))
-                .corner_radius(12.0)
+                .stroke(Stroke::new(1.0, palette.selected_border))
+                .corner_radius(8.0)
                 .inner_margin(Margin::symmetric(12, 10))
                 .shadow(egui::Shadow {
-                    offset: [0, 12],
-                    blur: 28,
-                    spread: 2,
-                    color: Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+                    offset: [0, 10],
+                    blur: 24,
+                    spread: 0,
+                    color: Color32::from_rgba_unmultiplied(
+                        0,
+                        0,
+                        0,
+                        if palette.is_light { 48 } else { 150 },
+                    ),
                 })
                 .show(ui, |ui| {
-                    ui.set_width(540.0);
+                    ui.set_width(palette_w);
                     ui.horizontal(|ui| {
-                        let (ir, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                        let (ir, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
                         icons::paint_icon(ui.painter(), ir, Icon::Search, palette.accent);
                         let resp = ui.add_sized(
-                            [470.0, 26.0],
+                            [(palette_w - 64.0).max(160.0), 24.0],
                             egui::TextEdit::singleline(&mut state.query)
                                 .frame(Frame::NONE)
                                 .hint_text(

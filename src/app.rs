@@ -39,10 +39,10 @@ const TRANSPORT_HEIGHT: f32 = 96.0;
 const WAVEFORM_BINS: usize = 160;
 
 pub const COMPACT_WIDTH: f32 = 468.0;
-pub const COMPACT_COLLAPSED_HEIGHT: f32 = 178.0;
-pub const COMPACT_EXPANDED_HEIGHT: f32 = 456.0;
+pub const COMPACT_COLLAPSED_HEIGHT: f32 = 200.0;
+pub const COMPACT_EXPANDED_HEIGHT: f32 = 476.0;
 pub const COMPACT_MIN_WIDTH: f32 = 380.0;
-pub const COMPACT_MIN_HEIGHT: f32 = 164.0;
+pub const COMPACT_MIN_HEIGHT: f32 = 186.0;
 pub const FULL_WIDTH: f32 = 1240.0;
 pub const FULL_HEIGHT: f32 = 790.0;
 pub const FULL_MIN_WIDTH: f32 = 900.0;
@@ -52,13 +52,16 @@ pub fn startup_window_layout() -> (bool, bool, bool) {
     let args: Vec<String> = std::env::args().collect();
     if args
         .iter()
-        .any(|a| a == "--full" || a == "--open-settings" || a == "--vis-mode" || a == "--demo-piano")
+        .any(|a| a == "--full" || a == "--vis-mode" || a == "--demo-piano")
     {
         return (false, true, false);
     }
     if args.iter().any(|a| a == "--compact") {
         let prefs = Preferences::load();
         return (true, true, prefs.show_concert_visualizer);
+    }
+    if args.iter().any(|a| a == "--open-settings") {
+        return (false, true, false);
     }
     let prefs = Preferences::load();
     (
@@ -361,6 +364,7 @@ pub struct TxPlayerApp {
     concert_visualizer_height: f32,
     compact_mode: bool,
     compact_show_playlist: bool,
+    compact_modal_expanded: bool,
     close_to_tray: bool,
     auto_watch_folders: bool,
     force_quit: bool,
@@ -563,6 +567,7 @@ impl TxPlayerApp {
             concert_visualizer_height: preferences.concert_visualizer_height,
             compact_mode: preferences.compact_mode,
             compact_show_playlist: preferences.compact_show_playlist,
+            compact_modal_expanded: false,
             close_to_tray: preferences.close_to_tray,
             auto_watch_folders: preferences.auto_watch_folders,
             force_quit: false,
@@ -653,11 +658,14 @@ impl TxPlayerApp {
             ephemeral_session: false,
         };
 
-        if arguments.iter().any(|a| a == "--compact") {
+        let force_compact = arguments.iter().any(|a| a == "--compact");
+        if force_compact {
             app.compact_mode = true;
             app.compact_show_playlist = true;
         }
-        if arguments.iter().any(|a| a == "--full" || a == "--open-settings" || a == "--vis-mode" || a == "--demo-piano") {
+        if arguments.iter().any(|a| a == "--full" || a == "--vis-mode" || a == "--demo-piano")
+            || (!force_compact && arguments.iter().any(|a| a == "--open-settings"))
+        {
             app.compact_mode = false;
         }
         if let Some(index) = arguments.iter().position(|a| a == "--theme")
@@ -2431,27 +2439,34 @@ impl TxPlayerApp {
         }
     }
 
-    /// Custom theme-aligned macOS traffic-light window controls + draggable chrome strip.
-    fn window_controls_strip(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+    /// Unified 32px top window bar for Classic Mode — matches Compact Mode's chrome geometry and visual language.
+    fn classic_top_bar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         let p = self.palette;
-        let (strip_rect, strip_resp) =
-            ui.allocate_exact_size(vec2(SIDEBAR_WIDTH, 32.0), Sense::click_and_drag());
+        let avail_w = ui.available_width();
+        let (bar_rect, bar_resp) =
+            ui.allocate_exact_size(vec2(avail_w, 32.0), Sense::click_and_drag());
 
         let is_focused = ctx.input(|i| i.focused);
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let alt_held = ctx.input(|i| i.modifiers.alt || i.modifiers.shift);
 
-        // 3 custom themed traffic dots positioned cleanly at top-left
-        let dot_r = 6.0;
-        let dot_y = strip_rect.top() + 17.0;
-        let start_x = strip_rect.left() + 18.0;
-        let spacing = 20.0;
+        // Background + bottom 1px hairline
+        ui.painter().rect_filled(bar_rect, 0.0, p.sidebar);
+        ui.painter().line_segment(
+            [pos2(bar_rect.left(), bar_rect.bottom()), pos2(bar_rect.right(), bar_rect.bottom())],
+            Stroke::new(1.0, p.border),
+        );
 
-        let close_rect = Rect::from_center_size(pos2(start_x, dot_y), Vec2::splat(16.0));
-        let min_rect = Rect::from_center_size(pos2(start_x + spacing, dot_y), Vec2::splat(16.0));
+        let cy = bar_rect.center().y;
+        let dot_r = 5.5;
+        let start_x = bar_rect.left() + 16.0;
+        let spacing = 19.0;
+
+        let close_rect = Rect::from_center_size(pos2(start_x, cy), Vec2::splat(16.0));
+        let min_rect = Rect::from_center_size(pos2(start_x + spacing, cy), Vec2::splat(16.0));
         let zoom_rect =
-            Rect::from_center_size(pos2(start_x + spacing * 2.0, dot_y), Vec2::splat(16.0));
+            Rect::from_center_size(pos2(start_x + spacing * 2.0, cy), Vec2::splat(16.0));
 
         let close_resp = ui
             .interact(close_rect, ui.scope_id().with("win_btn_close"), Sense::click())
@@ -2467,140 +2482,164 @@ impl TxPlayerApp {
                 "Zoom Window · Option+Click for Fullscreen"
             });
 
-        // Compact Mode toggle + Always-on-Top pin on top-right of sidebar chrome
-        let pin_rect = Rect::from_center_size(pos2(strip_rect.right() - 16.0, dot_y), Vec2::splat(18.0));
-        let compact_rect =
-            Rect::from_center_size(pos2(strip_rect.right() - 38.0, dot_y), Vec2::splat(18.0));
-        let compact_resp = ui
-            .interact(compact_rect, ui.scope_id().with("win_btn_compact"), Sense::click())
-            .on_hover_text(format!("Switch to Compact Player ({MOD_SHORT}Shift+M)"));
-        let pin_resp = ui
-            .interact(pin_rect, ui.scope_id().with("win_btn_pin"), Sense::click())
-            .on_hover_text(if self.always_on_top {
-                "Always on Top: On (Click to disable)"
-            } else {
-                "Pin Window Always on Top"
-            });
-
         let cluster_rect = Rect::from_min_max(close_rect.min, zoom_rect.max).expand(2.0);
         let cluster_hovered = ctx
             .pointer_hover_pos()
             .is_some_and(|pt| cluster_rect.contains(pt));
 
-        let painter = ui.painter();
-        let glyph_col = if p.is_light {
-            Color32::from_rgb(24, 34, 38)
-        } else {
-            Color32::from_rgb(12, 16, 18)
-        };
+        paint_traffic_dot(
+            ui.painter(),
+            close_rect.center(),
+            dot_r,
+            p.danger,
+            is_focused,
+            cluster_hovered,
+            close_resp.hovered(),
+            0,
+            &p,
+        );
+        paint_traffic_dot(
+            ui.painter(),
+            min_rect.center(),
+            dot_r,
+            p.hires_gold,
+            is_focused,
+            cluster_hovered,
+            min_resp.hovered(),
+            1,
+            &p,
+        );
+        paint_traffic_dot(
+            ui.painter(),
+            zoom_rect.center(),
+            dot_r,
+            p.accent,
+            is_focused,
+            cluster_hovered,
+            zoom_resp.hovered(),
+            2,
+            &p,
+        );
 
-        let paint_dot = |center: egui::Pos2, base_col: Color32, hovered: bool, kind: u8| {
-            let fill = if !is_focused && !cluster_hovered {
-                p.surface_elevated
-            } else if hovered {
-                lerp_c(base_col, Color32::WHITE, 0.18)
-            } else {
-                base_col
-            };
-            let border = if !is_focused && !cluster_hovered {
-                p.border_strong
-            } else {
-                Color32::from_rgba_unmultiplied(0, 0, 0, if p.is_light { 45 } else { 90 })
-            };
-            painter.circle_filled(center, dot_r, fill);
-            painter.circle_stroke(center, dot_r, Stroke::new(0.8, border));
+        // Brand mark + wordmark + version aligned cleanly right of traffic dots
+        let mark_r = Rect::from_center_size(pos2(zoom_rect.right() + 18.0, cy), Vec2::splat(17.0));
+        self.paint_brand_icon(ui.painter(), mark_r);
+        let tx_g = ui.painter().layout_no_wrap(
+            "Tx".into(),
+            FontId::proportional(12.5),
+            p.accent,
+        );
+        let tx_pos = pos2(mark_r.right() + 7.0, cy - tx_g.size().y * 0.5);
+        let tx_w = tx_g.size().x;
+        ui.painter().galley(tx_pos, tx_g, p.accent);
+        let pl_g = ui.painter().layout_no_wrap(
+            "Player".into(),
+            FontId::proportional(12.5),
+            p.text,
+        );
+        let pl_pos = pos2(tx_pos.x + tx_w, cy - pl_g.size().y * 0.5);
+        let pl_w = pl_g.size().x;
+        ui.painter().galley(pl_pos, pl_g, p.text);
+        ui.painter().text(
+            pos2(pl_pos.x + pl_w + 6.0, cy),
+            Align2::LEFT_CENTER,
+            format!("v{}", crate::APP_VERSION),
+            FontId::monospace(9.5),
+            p.faint,
+        );
 
-            if cluster_hovered {
-                let st = Stroke::new(1.3, glyph_col);
-                match kind {
-                    // Close (×)
-                    0 => {
-                        let d = 2.6;
-                        painter.line_segment(
-                            [pos2(center.x - d, center.y - d), pos2(center.x + d, center.y + d)],
-                            st,
-                        );
-                        painter.line_segment(
-                            [pos2(center.x - d, center.y + d), pos2(center.x + d, center.y - d)],
-                            st,
-                        );
-                    }
-                    // Minimize (−)
-                    1 => {
-                        let d = 3.1;
-                        painter.line_segment([pos2(center.x - d, center.y), pos2(center.x + d, center.y)], st);
-                    }
-                    // Zoom / Fullscreen (⤢)
-                    _ => {
-                        let d = 2.6;
-                        painter.line_segment(
-                            [pos2(center.x - d, center.y + d), pos2(center.x + d, center.y - d)],
-                            st,
-                        );
-                        painter.line_segment(
-                            [pos2(center.x + d - 2.2, center.y - d), pos2(center.x + d, center.y - d)],
-                            st,
-                        );
-                        painter.line_segment(
-                            [pos2(center.x + d, center.y - d), pos2(center.x + d, center.y - d + 2.2)],
-                            st,
-                        );
-                        painter.line_segment(
-                            [pos2(center.x - d, center.y + d), pos2(center.x - d + 2.2, center.y + d)],
-                            st,
-                        );
-                        painter.line_segment(
-                            [pos2(center.x - d, center.y + d), pos2(center.x - d, center.y + d - 2.2)],
-                            st,
-                        );
-                    }
-                }
-            }
-        };
+        // Right-aligned global utility cluster:
+        // [Compact] | [Cmd+K] | [Visualizer] [Lyrics] [Settings] [Pin]
+        let mut rx = bar_rect.right() - 10.0;
 
-        paint_dot(close_rect.center(), p.danger, close_resp.hovered(), 0);
-        paint_dot(min_rect.center(), p.hires_gold, min_resp.hovered(), 1);
-        paint_dot(zoom_rect.center(), p.accent, zoom_resp.hovered(), 2);
+        let pin_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
+        rx = pin_r.left() - 3.0;
+        let set_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
+        rx = set_r.left() - 3.0;
+        let lyr_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
+        rx = lyr_r.left() - 3.0;
+        let vis_r = Rect::from_center_size(pos2(rx - 11.0, cy), Vec2::splat(22.0));
+        rx = vis_r.left() - 3.0;
+        let cmd_r = Rect::from_center_size(pos2(rx - 26.0, cy), vec2(52.0, 22.0));
+        rx = cmd_r.left() - 8.0;
 
-        // Compact Mode switch button
-        if compact_resp.hovered() {
-            painter.rect_filled(compact_rect, 4.0, p.hover);
-        }
-        icons::paint_icon(
-            painter,
-            Rect::from_center_size(compact_rect.center(), Vec2::splat(12.0)),
+        // Subtle vertical divider between utility icons and Mode Switch pill
+        ui.painter().line_segment(
+            [pos2(rx, bar_rect.top() + 8.0), pos2(rx, bar_rect.bottom() - 8.0)],
+            Stroke::new(1.0, p.border),
+        );
+        rx -= 8.0;
+
+        let mode_r = Rect::from_center_size(pos2(rx - 39.0, cy), vec2(78.0, 22.0));
+
+        let mode_clicked = paint_mode_switch_pill(
+            ui,
+            mode_r,
+            "cls_to_compact",
+            "Compact",
             Icon::Compact,
-            if compact_resp.hovered() {
-                p.accent
-            } else {
-                p.muted
-            },
+            &format!("Switch to Compact Mode ({MOD_SHORT}Shift+M)"),
+            &p,
         );
 
-        // Subtle Always-on-Top indicator
-        if self.always_on_top || pin_resp.hovered() {
-            let bg = if self.always_on_top {
-                p.accent_subtle
-            } else {
-                p.hover
-            };
-            painter.rect_filled(pin_rect, 4.0, bg);
-        }
-        let pin_c = pin_rect.center();
-        let pin_col = if self.always_on_top {
-            p.accent
-        } else if pin_resp.hovered() {
-            p.text_secondary
-        } else {
-            p.faint
-        };
-        painter.circle_filled(pos2(pin_c.x, pin_c.y - 1.8), 2.5, pin_col);
-        painter.line_segment(
-            [pos2(pin_c.x, pin_c.y + 0.5), pos2(pin_c.x, pin_c.y + 4.8)],
-            Stroke::new(1.3, pin_col),
+        // Command palette quick pill
+        let cmd_resp = ui
+            .interact(cmd_r, ui.scope_id().with("cls_cmd_k"), Sense::click())
+            .on_hover_text(format!("Command Palette ({MOD_SHORT}K)"));
+        ui.painter().rect_filled(
+            cmd_r,
+            5.0,
+            if cmd_resp.hovered() { p.hover } else { p.surface },
+        );
+        ui.painter().rect_stroke(
+            cmd_r,
+            5.0,
+            Stroke::new(1.0, if cmd_resp.hovered() { p.border_strong } else { p.border }),
+            StrokeKind::Inside,
+        );
+        icons::paint_icon(
+            ui.painter(),
+            Rect::from_center_size(pos2(cmd_r.left() + 11.0, cy), Vec2::splat(10.5)),
+            Icon::Search,
+            if cmd_resp.hovered() { p.text } else { p.muted },
+        );
+        ui.painter().text(
+            pos2(cmd_r.left() + 20.0, cy),
+            Align2::LEFT_CENTER,
+            format!("{MOD_SHORT}K"),
+            FontId::monospace(9.5),
+            if cmd_resp.hovered() { p.text } else { p.muted },
         );
 
-        // Dispatch real window commands
+        let vis_clicked = paint_topbar_icon_btn(
+            ui,
+            vis_r,
+            "cls_vis",
+            Icon::Visualizer,
+            self.show_concert_visualizer,
+            "Toggle Visualizer (V)",
+            &p,
+        );
+        let lyr_clicked = paint_topbar_icon_btn(
+            ui,
+            lyr_r,
+            "cls_lyr",
+            Icon::Lyrics,
+            self.show_lyrics,
+            "Toggle Synchronized Lyrics (L)",
+            &p,
+        );
+        let set_clicked = paint_topbar_icon_btn(
+            ui,
+            set_r,
+            "cls_set",
+            Icon::Settings,
+            self.show_settings,
+            &format!("Settings ({MOD_SHORT},)"),
+            &p,
+        );
+        let pin_clicked = paint_topbar_pin_btn(ui, pin_r, "cls_pin", self.always_on_top, &p);
+
         if close_resp.clicked() {
             if self.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -2615,9 +2654,18 @@ impl TxPlayerApp {
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
             }
-        } else if compact_resp.clicked() {
+        } else if mode_clicked {
             self.set_compact_mode(ctx, true);
-        } else if pin_resp.clicked() {
+        } else if cmd_resp.clicked() {
+            self.command_palette.open_fresh();
+        } else if vis_clicked {
+            self.show_concert_visualizer = !self.show_concert_visualizer;
+        } else if lyr_clicked {
+            self.show_lyrics = !self.show_lyrics;
+            self.sync_lyrics_for_current();
+        } else if set_clicked {
+            self.show_settings = !self.show_settings;
+        } else if pin_clicked {
             self.always_on_top = !self.always_on_top;
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
                 egui::WindowLevel::AlwaysOnTop
@@ -2629,9 +2677,9 @@ impl TxPlayerApp {
             } else {
                 "Window unpinned".into()
             });
-        } else if strip_resp.double_clicked() {
+        } else if bar_resp.double_clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
-        } else if strip_resp.drag_started_by(egui::PointerButton::Primary) {
+        } else if bar_resp.drag_started_by(egui::PointerButton::Primary) {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
     }
@@ -2639,32 +2687,7 @@ impl TxPlayerApp {
     fn sidebar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         self.ensure_sidebar_stats();
         let p = self.palette;
-        self.window_controls_strip(ctx, ui);
-        ui.add_space(4.0);
-
-        // Brand Header with Unified AppIcon
-        ui.horizontal(|ui| {
-            ui.add_space(14.0);
-            let (mark_rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
-            self.paint_brand_icon(ui.painter(), mark_rect);
-            ui.add_space(5.0);
-            ui.vertical(|ui| {
-                ui.style_mut().spacing.item_spacing.y = 0.0;
-                ui.horizontal(|ui| {
-                    ui.style_mut().spacing.item_spacing.x = 0.0;
-                    ui.label(RichText::new("Tx").size(16.5).strong().color(p.accent));
-                    ui.label(RichText::new("Player").size(16.5).strong().color(p.text));
-                });
-                ui.label(
-                    RichText::new(format!("v{}", crate::APP_VERSION))
-                        .size(9.5)
-                        .monospace()
-                        .color(p.faint),
-                );
-            });
-        });
-
-        ui.add_space(12.0);
+        ui.add_space(10.0);
         // Library Switcher (System with Multiple Libraries)
         let active_lib_name = self.store.active().name.clone();
         let libraries_list: Vec<(u64, String, usize)> = self
@@ -2729,7 +2752,7 @@ impl TxPlayerApp {
 
         ui.add_space(12.0);
         // Scrollable Sidebar Body: Views + Playlists + Directories
-        let footer_reserve = if self.scanning { 104.0 } else { 70.0 };
+        let footer_reserve = if self.scanning { 76.0 } else { 40.0 };
         ScrollArea::vertical()
             .id_salt("sidebar_scroll")
             .max_height((ui.available_height() - footer_reserve).max(120.0))
@@ -3136,50 +3159,55 @@ impl TxPlayerApp {
                 }
             });
 
-        // Bottom Footer: Theme quick cycle + Settings + Scan indicator
+        // Bottom Footer: Quiet library summary + Theme cycle + Directories
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                if pill_button(ui, "Settings", Some(Icon::Settings), PillStyle::Secondary, &p)
-                    .on_hover_text("Open Settings (Cmd+,)")
+                let total_tracks = self.store.active().tracks.len();
+                let hires = self.cached_hires_count;
+                let summary = if hires > 0 {
+                    format!("{total_tracks} tracks · {hires} Hi-Res")
+                } else {
+                    format!("{total_tracks} tracks")
+                };
+                ui.label(RichText::new(summary).size(10.0).color(p.faint));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(10.0);
+                    if icons::icon_button(
+                        ui,
+                        Vec2::splat(22.0),
+                        Icon::Folder,
+                        13.0,
+                        p.muted,
+                        p.text,
+                        p.hover,
+                        "Manage Directories",
+                    )
                     .clicked()
-                {
-                    self.show_settings = true;
-                }
-                if icons::icon_button(
-                    ui,
-                    Vec2::splat(24.0),
-                    Icon::Palette,
-                    14.0,
-                    p.muted,
-                    p.accent,
-                    p.hover,
-                    &format!("Theme: {} · Click to cycle", self.theme_id.name()),
-                )
-                .clicked()
-                {
-                    let idx = ThemeId::ALL
-                        .iter()
-                        .position(|&t| t == self.theme_id)
-                        .unwrap_or(0);
-                    let next = ThemeId::ALL[(idx + 1) % ThemeId::ALL.len()];
-                    self.set_theme(ctx, next);
-                }
-                if icons::icon_button(
-                    ui,
-                    Vec2::splat(24.0),
-                    Icon::Folder,
-                    14.0,
-                    p.muted,
-                    p.text,
-                    p.hover,
-                    "Manage Directories",
-                )
-                .clicked()
-                {
-                    self.show_folders = true;
-                }
+                    {
+                        self.show_folders = true;
+                    }
+                    if icons::icon_button(
+                        ui,
+                        Vec2::splat(22.0),
+                        Icon::Palette,
+                        13.0,
+                        p.muted,
+                        p.accent,
+                        p.hover,
+                        &format!("Theme: {} · Click to cycle", self.theme_id.name()),
+                    )
+                    .clicked()
+                    {
+                        let idx = ThemeId::ALL
+                            .iter()
+                            .position(|&t| t == self.theme_id)
+                            .unwrap_or(0);
+                        let next = ThemeId::ALL[(idx + 1) % ThemeId::ALL.len()];
+                        self.set_theme(ctx, next);
+                    }
+                });
             });
 
             if self.scanning {
@@ -3213,19 +3241,6 @@ impl TxPlayerApp {
                     });
                 });
             }
-
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(14.0);
-                let total_tracks = self.store.active().tracks.len();
-                let hires = self.cached_hires_count;
-                let summary = if hires > 0 {
-                    format!("{total_tracks} tracks · {hires} Hi-Res")
-                } else {
-                    format!("{total_tracks} tracks")
-                };
-                ui.label(RichText::new(summary).size(10.0).color(p.faint));
-            });
         });
     }
 
@@ -3296,17 +3311,8 @@ impl TxPlayerApp {
         let tracks = self.cached_visible.clone();
         let total_duration = self.cached_total_duration;
 
-        // Seamless themed top window drag strip across the main panel (double-click to zoom)
-        let (_, drag_resp) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click_and_drag());
-        if drag_resp.double_clicked() {
-            let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
-        } else if drag_resp.drag_started_by(egui::PointerButton::Primary) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-        // Header Row
+        ui.add_space(12.0);
+        // Header Row (view-local controls only; global chrome lives in unified classic_top_bar)
         ui.horizontal(|ui| {
             let title = match self.view {
                 View::Library => {
@@ -3330,7 +3336,7 @@ impl TxPlayerApp {
                     .unwrap_or_else(|| "Playlist".to_string()),
                 View::Smart(smart) => smart.label().to_string(),
             };
-            let title_resp = ui.label(RichText::new(title).size(21.0).strong().color(p.text));
+            let title_resp = ui.label(RichText::new(title).size(20.0).strong().color(p.text));
             if let Some(folder) = &self.folder_filter {
                 title_resp.on_hover_text(format!("Directory: {}", folder.display()));
             }
@@ -3357,59 +3363,8 @@ impl TxPlayerApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Lyrics toggle pill
-                if pill_button(
-                    ui,
-                    "Lyrics",
-                    Some(Icon::Lyrics),
-                    if self.show_lyrics {
-                        PillStyle::Active
-                    } else {
-                        PillStyle::Secondary
-                    },
-                    &p,
-                )
-                .on_hover_text("Toggle Synchronized Lyrics (L)")
-                .clicked()
-                {
-                    self.show_lyrics = !self.show_lyrics;
-                    self.sync_lyrics_for_current();
-                }
-
-                // Visualizer toggle pill
-                if pill_button(
-                    ui,
-                    "Visualizer",
-                    Some(Icon::Visualizer),
-                    if self.show_concert_visualizer {
-                        PillStyle::Active
-                    } else {
-                        PillStyle::Secondary
-                    },
-                    &p,
-                )
-                .on_hover_text("Toggle Visualizer (V)")
-                .clicked()
-                {
-                    self.show_concert_visualizer = !self.show_concert_visualizer;
-                }
-
-                // Quick Command Palette pill
-                if pill_button(
-                    ui,
-                    &format!("{MOD_SHORT}K"),
-                    Some(Icon::Search),
-                    PillStyle::Secondary,
-                    &p,
-                )
-                .on_hover_text(format!("Command Palette ({MOD_SHORT}K)"))
-                .clicked()
-                {
-                    self.command_palette.open_fresh();
-                }
-
                 // Strictly aligned 24px Filter Library input (exact match to pill_button height!)
-                let search_w = 196.0;
+                let search_w = 216.0;
                 let (search_rect, _) = ui.allocate_exact_size(vec2(search_w, 24.0), Sense::hover());
                 let search_has_focus = ui.ctx().memory(|m| m.focused()).is_some_and(|id| {
                     id == ui.scope_id().with("library_filter_input")
@@ -5660,6 +5615,7 @@ impl TxPlayerApp {
             &mut self.settings_tab,
             &p,
             self.theme_id,
+            self.compact_mode,
             &mut self.progress_style,
             &mut self.row_density,
             &mut self.close_to_tray,
@@ -5679,6 +5635,9 @@ impl TxPlayerApp {
         );
         if let Some(tid) = settings_actions.theme_changed {
             self.set_theme(context, tid);
+        }
+        if let Some(cm) = settings_actions.compact_mode_changed {
+            self.set_compact_mode(context, cm);
         }
         if let Some(dev) = settings_actions.device_changed {
             self.preferred_device = dev.clone();
@@ -6135,9 +6094,9 @@ impl TxPlayerApp {
         entries.push(PaletteEntry {
             category: "ACTION",
             label: if self.compact_mode {
-                "Switch to Full Library Mode".into()
+                "Switch to Classic Mode".into()
             } else {
-                "Switch to Compact Player Mode".into()
+                "Switch to Compact Mode".into()
             },
             subtitle: format!("Shortcut: {MOD_SHORT}Shift+M"),
             action: PaletteCommand::ToggleCompactMode,
@@ -6328,16 +6287,31 @@ impl TxPlayerApp {
         }
     }
 
+    fn any_modal_open(&self) -> bool {
+        self.show_settings
+            || self.tag_editor.open
+            || self.inspect_track_id.is_some()
+            || self.show_folders
+            || self.show_libraries_modal
+            || self.show_new_playlist_modal
+            || (self.compact_mode && self.show_lyrics)
+            || self.command_palette.open
+    }
+
     fn set_compact_mode(&mut self, ctx: &egui::Context, compact: bool) {
         self.compact_mode = compact;
+        self.compact_modal_expanded = false;
         self.show_device_picker = false;
         self.show_signal_path = false;
         if compact {
-            let h = if self.compact_show_playlist {
+            let h = if self.compact_show_playlist || self.any_modal_open() {
                 COMPACT_EXPANDED_HEIGHT
             } else {
                 COMPACT_COLLAPSED_HEIGHT
             } + if self.show_concert_visualizer { 62.0 } else { 0.0 };
+            if !self.compact_show_playlist && self.any_modal_open() {
+                self.compact_modal_expanded = true;
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(
                 COMPACT_MIN_WIDTH,
@@ -6361,7 +6335,7 @@ impl TxPlayerApp {
             return;
         }
         let cur_w = ctx.content_rect().width().max(COMPACT_MIN_WIDTH);
-        let target_h = if self.compact_show_playlist {
+        let target_h = if self.compact_show_playlist || self.compact_modal_expanded {
             COMPACT_EXPANDED_HEIGHT
         } else {
             COMPACT_COLLAPSED_HEIGHT
@@ -6369,26 +6343,26 @@ impl TxPlayerApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(cur_w, target_h)));
     }
 
-    /// Winamp / AIMP2-inspired Compact Mini-Player with optional collapsible playlist drawer.
+    /// Winamp / AIMP2-inspired Compact Mini-Player with unified 32px chrome, live VBR telemetry bar,
+    /// clear Classic Mode switch, and optional collapsible playlist drawer.
     fn compact_view(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         let p = self.palette;
         let track = self.current_track().cloned();
         let avail_w = ui.available_width();
 
-        // 1) Slim 28px custom draggable top bar
+        // 1) Unified 32px custom draggable top bar (exact height & visual grammar as Classic Mode)
         let (hdr_rect, hdr_resp) =
-            ui.allocate_exact_size(vec2(avail_w, 28.0), Sense::click_and_drag());
+            ui.allocate_exact_size(vec2(avail_w, 32.0), Sense::click_and_drag());
         let is_focused = ctx.input(|i| i.focused);
-        let painter = ui.painter();
-        painter.rect_filled(hdr_rect, 0.0, p.sidebar);
-        painter.line_segment(
+        ui.painter().rect_filled(hdr_rect, 0.0, p.sidebar);
+        ui.painter().line_segment(
             [pos2(hdr_rect.left(), hdr_rect.bottom()), pos2(hdr_rect.right(), hdr_rect.bottom())],
             Stroke::new(1.0, p.border),
         );
 
-        let dot_y = hdr_rect.center().y;
-        let close_r = Rect::from_center_size(pos2(hdr_rect.left() + 14.0, dot_y), Vec2::splat(15.0));
-        let min_r = Rect::from_center_size(pos2(hdr_rect.left() + 32.0, dot_y), Vec2::splat(15.0));
+        let cy = hdr_rect.center().y;
+        let close_r = Rect::from_center_size(pos2(hdr_rect.left() + 15.0, cy), Vec2::splat(16.0));
+        let min_r = Rect::from_center_size(pos2(hdr_rect.left() + 34.0, cy), Vec2::splat(16.0));
         let close_resp = ui
             .interact(close_r, ui.scope_id().with("cmp_close"), Sense::click())
             .on_hover_text("Close");
@@ -6396,116 +6370,101 @@ impl TxPlayerApp {
             .interact(min_r, ui.scope_id().with("cmp_min"), Sense::click())
             .on_hover_text("Minimize");
 
-        let paint_dot = |c: egui::Pos2, col: Color32, hov: bool| {
-            let fill = if !is_focused && !hov {
-                p.surface_elevated
-            } else if hov {
-                lerp_c(col, Color32::WHITE, 0.18)
-            } else {
-                col
-            };
-            ui.painter().circle_filled(c, 5.2, fill);
-        };
-        paint_dot(close_r.center(), p.danger, close_resp.hovered());
-        paint_dot(min_r.center(), p.hires_gold, min_resp.hovered());
+        let cluster_rect = Rect::from_min_max(close_r.min, min_r.max).expand(2.0);
+        let cluster_hovered = ctx
+            .pointer_hover_pos()
+            .is_some_and(|pt| cluster_rect.contains(pt));
 
-        // Brand mini mark + title + version
-        let mark_r = Rect::from_center_size(pos2(hdr_rect.left() + 54.0, dot_y), Vec2::splat(16.0));
+        paint_traffic_dot(
+            ui.painter(),
+            close_r.center(),
+            5.5,
+            p.danger,
+            is_focused,
+            cluster_hovered,
+            close_resp.hovered(),
+            0,
+            &p,
+        );
+        paint_traffic_dot(
+            ui.painter(),
+            min_r.center(),
+            5.5,
+            p.hires_gold,
+            is_focused,
+            cluster_hovered,
+            min_resp.hovered(),
+            1,
+            &p,
+        );
+
+        // Brand mini mark + dual-tone wordmark + version
+        let mark_r = Rect::from_center_size(pos2(min_r.right() + 14.0, cy), Vec2::splat(16.0));
         self.paint_brand_icon(ui.painter(), mark_r);
-        ui.painter().text(
-            pos2(mark_r.right() + 6.0, dot_y),
-            Align2::LEFT_CENTER,
-            "TxPlayer",
-            FontId::proportional(11.5),
+        let tx_g = ui.painter().layout_no_wrap(
+            "Tx".into(),
+            FontId::proportional(12.0),
+            p.accent,
+        );
+        let tx_pos = pos2(mark_r.right() + 6.0, cy - tx_g.size().y * 0.5);
+        let tx_w = tx_g.size().x;
+        ui.painter().galley(tx_pos, tx_g, p.accent);
+        let pl_g = ui.painter().layout_no_wrap(
+            "Player".into(),
+            FontId::proportional(12.0),
             p.text,
         );
+        let pl_pos = pos2(tx_pos.x + tx_w, cy - pl_g.size().y * 0.5);
+        let pl_w = pl_g.size().x;
+        ui.painter().galley(pl_pos, pl_g, p.text);
         ui.painter().text(
-            pos2(mark_r.right() + 58.0, dot_y),
+            pos2(pl_pos.x + pl_w + 5.0, cy),
             Align2::LEFT_CENTER,
             format!("v{}", crate::APP_VERSION),
             FontId::monospace(9.0),
             p.faint,
         );
 
-        // Top-right compact utility icons: Expand | Settings | Playlist Drawer | Visualizer | Lyrics | Pin
-        let right_x = hdr_rect.right() - 14.0;
-        let step = 22.0;
-        let btn_expand_r = Rect::from_center_size(pos2(right_x, dot_y), Vec2::splat(20.0));
-        let btn_set_r = Rect::from_center_size(pos2(right_x - step, dot_y), Vec2::splat(20.0));
-        let btn_list_r = Rect::from_center_size(pos2(right_x - step * 2.0, dot_y), Vec2::splat(20.0));
-        let btn_vis_r = Rect::from_center_size(pos2(right_x - step * 3.0, dot_y), Vec2::splat(20.0));
-        let btn_lyr_r = Rect::from_center_size(pos2(right_x - step * 4.0, dot_y), Vec2::splat(20.0));
-        let btn_pin_r = Rect::from_center_size(pos2(right_x - step * 5.0, dot_y), Vec2::splat(20.0));
-
-        let draw_hdr_btn = |ui: &mut Ui, r: Rect, id: &str, icon: Icon, active: bool, tip: &str| {
-            let resp = ui
-                .interact(r, ui.scope_id().with(id), Sense::click())
-                .on_hover_text(tip);
-            if active {
-                ui.painter().rect_filled(r, 4.0, p.accent_subtle);
-            } else if resp.hovered() {
-                ui.painter().rect_filled(r, 4.0, p.hover);
-            }
-            icons::paint_icon(
-                ui.painter(),
-                Rect::from_center_size(r.center(), Vec2::splat(11.5)),
-                icon,
-                if active {
-                    p.accent
-                } else if resp.hovered() {
-                    p.text
-                } else {
-                    p.muted
-                },
-            );
-            resp.clicked()
-        };
-
-        let pin_resp = ui
-            .interact(btn_pin_r, ui.scope_id().with("cmp_pin"), Sense::click())
-            .on_hover_text(if self.always_on_top {
-                "Always on Top: On"
-            } else {
-                "Pin Always on Top"
-            });
-        if self.always_on_top || pin_resp.hovered() {
-            ui.painter().rect_filled(
-                btn_pin_r,
-                4.0,
-                if self.always_on_top { p.accent_subtle } else { p.hover },
-            );
-        }
-        let pc = btn_pin_r.center();
-        let pin_col = if self.always_on_top {
-            p.accent
-        } else if pin_resp.hovered() {
-            p.text
-        } else {
-            p.faint
-        };
-        ui.painter().circle_filled(pos2(pc.x, pc.y - 1.8), 2.3, pin_col);
+        // Top-right cluster: [Pin] [Lyrics] [Vis] [List] [Settings] | [Classic]
+        let mut rx = hdr_rect.right() - 8.0;
+        let btn_classic_r = Rect::from_center_size(pos2(rx - 36.0, cy), vec2(72.0, 22.0));
+        rx = btn_classic_r.left() - 6.0;
         ui.painter().line_segment(
-            [pos2(pc.x, pc.y + 0.5), pos2(pc.x, pc.y + 4.4)],
-            Stroke::new(1.2, pin_col),
+            [pos2(rx, hdr_rect.top() + 8.0), pos2(rx, hdr_rect.bottom() - 8.0)],
+            Stroke::new(1.0, p.border),
         );
+        rx -= 5.0;
 
-        let lyr_clicked = draw_hdr_btn(
+        let btn_set_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = btn_set_r.left() - 2.0;
+        let btn_list_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = btn_list_r.left() - 2.0;
+        let btn_vis_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = btn_vis_r.left() - 2.0;
+        let btn_lyr_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = btn_lyr_r.left() - 2.0;
+        let btn_pin_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+
+        let pin_clicked = paint_topbar_pin_btn(ui, btn_pin_r, "cmp_pin", self.always_on_top, &p);
+        let lyr_clicked = paint_topbar_icon_btn(
             ui,
             btn_lyr_r,
             "cmp_lyr",
             Icon::Lyrics,
             self.show_lyrics,
             "Toggle Lyrics (L)",
+            &p,
         );
-        let vis_clicked = draw_hdr_btn(
+        let vis_clicked = paint_topbar_icon_btn(
             ui,
             btn_vis_r,
             "cmp_vis",
             Icon::Visualizer,
             self.show_concert_visualizer,
             "Toggle Visualizer (V)",
+            &p,
         );
-        let list_clicked = draw_hdr_btn(
+        let list_clicked = paint_topbar_icon_btn(
             ui,
             btn_list_r,
             "cmp_list",
@@ -6516,22 +6475,25 @@ impl TxPlayerApp {
             } else {
                 "Show Playlist Drawer"
             },
+            &p,
         );
-        let set_clicked = draw_hdr_btn(
+        let set_clicked = paint_topbar_icon_btn(
             ui,
             btn_set_r,
             "cmp_set",
             Icon::Settings,
             self.show_settings,
             &format!("Settings ({MOD_SHORT},)"),
+            &p,
         );
-        let expand_clicked = draw_hdr_btn(
+        let classic_clicked = paint_mode_switch_pill(
             ui,
-            btn_expand_r,
-            "cmp_expand",
+            btn_classic_r,
+            "cmp_to_classic",
+            "Classic",
             Icon::Expand,
-            false,
-            &format!("Expand to Full Library ({MOD_SHORT}Shift+M)"),
+            &format!("Switch to Classic Mode ({MOD_SHORT}Shift+M)"),
+            &p,
         );
 
         if close_resp.clicked() {
@@ -6542,7 +6504,7 @@ impl TxPlayerApp {
             }
         } else if min_resp.clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        } else if pin_resp.clicked() {
+        } else if pin_clicked {
             self.always_on_top = !self.always_on_top;
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
                 egui::WindowLevel::AlwaysOnTop
@@ -6560,7 +6522,7 @@ impl TxPlayerApp {
             self.sync_compact_height(ctx);
         } else if set_clicked {
             self.show_settings = !self.show_settings;
-        } else if expand_clicked || hdr_resp.double_clicked() {
+        } else if classic_clicked || hdr_resp.double_clicked() {
             self.set_compact_mode(ctx, false);
             return;
         } else if hdr_resp.drag_started_by(egui::PointerButton::Primary) {
@@ -6570,9 +6532,9 @@ impl TxPlayerApp {
         // 2) Main Compact Player Deck
         Frame::new()
             .fill(p.panel)
-            .inner_margin(Margin::symmetric(12, 10))
+            .inner_margin(Margin::symmetric(12, 9))
             .show(ui, |ui| {
-                // Row A: Cover + Title / Artist / Playing Folder + Quality + Heart
+                // Row A: Crisp Cover + 2-Line Title / Artist·Album + Favorite Heart
                 ui.horizontal(|ui| {
                     if let Some(ref t) = track {
                         let parent_dir = t
@@ -6580,15 +6542,9 @@ impl TxPlayerApp {
                             .parent()
                             .map(|d| d.display().to_string())
                             .unwrap_or_else(|| t.path.display().to_string());
-                        let folder_name = t
-                            .path
-                            .parent()
-                            .and_then(|d| d.file_name())
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("Folder");
 
                         if self
-                            .cover_clickable(ui, t, 46.0)
+                            .cover_clickable(ui, t, 42.0)
                             .on_hover_text(format!("{}\nFolder: {parent_dir}\nClick for Track Info", t.title))
                             .clicked()
                         {
@@ -6597,14 +6553,15 @@ impl TxPlayerApp {
                         ui.add_space(6.0);
                         let meta_w = (ui.available_width() - 32.0).max(120.0);
                         ui.allocate_ui_with_layout(
-                            vec2(meta_w, 46.0),
+                            vec2(meta_w, 42.0),
                             Layout::top_down(Align::LEFT),
                             |ui| {
-                                ui.style_mut().spacing.item_spacing.y = 1.5;
+                                ui.add_space(3.0);
+                                ui.style_mut().spacing.item_spacing.y = 2.0;
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(&t.title)
-                                            .size(13.0)
+                                            .size(13.5)
                                             .strong()
                                             .color(p.text),
                                     )
@@ -6624,32 +6581,6 @@ impl TxPlayerApp {
                                     .selectable(false)
                                     .truncate(),
                                 );
-                                ui.horizontal(|ui| {
-                                    ui.style_mut().spacing.item_spacing.x = 4.0;
-                                    let (fr, _) =
-                                        ui.allocate_exact_size(Vec2::splat(10.5), Sense::hover());
-                                    icons::paint_icon(ui.painter(), fr, Icon::Folder, p.faint);
-                                    let dr = ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(folder_name).size(9.5).color(p.muted),
-                                            )
-                                            .sense(Sense::click())
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(format!(
-                                            "Playing from:\n{parent_dir}\nClick to reveal in {FILE_MANAGER_NAME}"
-                                        ));
-                                    if dr.clicked() {
-                                        reveal_in_file_manager(&t.path);
-                                    }
-                                    ui.label(
-                                        RichText::new(format!("·  {}", t.quality_full()))
-                                            .size(9.0)
-                                            .monospace()
-                                            .color(if t.is_hires() { p.hires_gold } else { p.faint }),
-                                    );
-                                });
                             },
                         );
 
@@ -6677,14 +6608,14 @@ impl TxPlayerApp {
                             }
                         });
                     } else {
-                        let (art_r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                        let (art_r, _) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
                         self.paint_brand_icon(ui.painter(), art_r);
                         ui.add_space(6.0);
                         ui.vertical(|ui| {
-                            ui.add_space(5.0);
+                            ui.add_space(4.0);
                             ui.label(
                                 RichText::new("TxPlayer Ready")
-                                    .size(12.5)
+                                    .size(13.0)
                                     .strong()
                                     .color(p.text_secondary),
                             );
@@ -6696,6 +6627,175 @@ impl TxPlayerApp {
                         });
                     }
                 });
+
+                ui.add_space(6.0);
+                // Row A2: Recessed Audiophile Live Telemetry Bar (live VBR/CBR kbps + codec + rate + folder)
+                let (bar_rect, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+                ui.painter().rect_filled(bar_rect, 5.0, p.background);
+                ui.painter().rect_stroke(
+                    bar_rect,
+                    5.0,
+                    Stroke::new(1.0, p.border),
+                    StrokeKind::Inside,
+                );
+
+                // Split bar cleanly: left = live stream/VBR telemetry, right = playing folder chip
+                let folder_w = if track.is_some() { 112.0 } else { 0.0 };
+                let tele_rect = Rect::from_min_max(
+                    pos2(bar_rect.left() + 6.0, bar_rect.top()),
+                    pos2((bar_rect.right() - folder_w - 6.0).max(bar_rect.left() + 80.0), bar_rect.bottom()),
+                );
+                let tele_resp = ui
+                    .interact(tele_rect, ui.scope_id().with("cmp_live_tele"), Sense::click())
+                    .on_hover_text(if let Some(info) = &self.stream_info {
+                        format!(
+                            "{} · {} ch · {} → {}\nClick for Signal Path & Live DSP",
+                            info.device_name,
+                            info.channels,
+                            format_sample_rate(info.source_rate),
+                            format_sample_rate(info.output_rate)
+                        )
+                    } else {
+                        "Click to open Signal Path & Live DSP".to_string()
+                    });
+                self.signal_btn_rect = Some(tele_rect);
+                if tele_resp.clicked() {
+                    self.show_signal_path = !self.show_signal_path;
+                    self.show_device_picker = false;
+                }
+
+                let (dot_col, tele_text, tele_fg) = if let Some(info) = &self.stream_info {
+                    let native = info.source_rate == info.output_rate;
+                    let dsp_on = self.plugins.dsp.is_actively_processing();
+                    let dot = if dsp_on {
+                        p.accent_secondary
+                    } else if native {
+                        p.accent
+                    } else {
+                        p.hires_gold
+                    };
+                    let codec = track
+                        .as_ref()
+                        .map(|t| format!("{} · ", t.codec))
+                        .unwrap_or_default();
+                    let bitrate_str = self
+                        .bitrate
+                        .map(|kbps| {
+                            let kind = if self.variable_bitrate { "VBR" } else { "CBR" };
+                            format!("{kind} {kbps} kbps · ")
+                        })
+                        .unwrap_or_default();
+                    let bits = info
+                        .bit_depth
+                        .map(|b| format!("{b}b/"))
+                        .unwrap_or_default();
+                    let rate_str = if native {
+                        format!("{bits}{}", format_sample_rate(info.source_rate))
+                    } else {
+                        format!(
+                            "{bits}{}→{}",
+                            format_sample_rate(info.source_rate),
+                            format_sample_rate(info.output_rate)
+                        )
+                    };
+                    let tag = if info.bit_perfect {
+                        " · BIT-PERFECT"
+                    } else if dsp_on {
+                        " · DSP"
+                    } else {
+                        ""
+                    };
+                    let spd = if (self.playback_speed - 1.0).abs() > 0.01 {
+                        format!(" · {:.2}x", self.playback_speed)
+                    } else {
+                        String::new()
+                    };
+                    let ab = if self.loop_a.is_some() && self.loop_b.is_some() {
+                        " · A-B"
+                    } else {
+                        ""
+                    };
+                    let fg = if self.show_signal_path || tele_resp.hovered() {
+                        p.accent
+                    } else {
+                        p.text_secondary
+                    };
+                    (dot, format!("{codec}{bitrate_str}{rate_str}{tag}{spd}{ab}"), fg)
+                } else if let Some(ref t) = track {
+                    let dot = if t.is_hires() { p.hires_gold } else { p.faint };
+                    (dot, t.quality_full(), if t.is_hires() { p.hires_gold } else { p.muted })
+                } else {
+                    let dsp_on = self.plugins.dsp.enabled;
+                    (
+                        if dsp_on { p.accent_secondary } else { p.faint },
+                        if dsp_on {
+                            "DSP ACTIVE · SIGNAL PATH".to_string()
+                        } else {
+                            "BIT-DIRECT ENGINE · READY".to_string()
+                        },
+                        p.faint,
+                    )
+                };
+
+                ui.painter()
+                    .circle_filled(pos2(tele_rect.left() + 4.0, tele_rect.center().y), 2.8, dot_col);
+                let tele_text_r = Rect::from_min_max(
+                    pos2(tele_rect.left() + 12.0, tele_rect.top()),
+                    tele_rect.max,
+                );
+                ui.painter().with_clip_rect(tele_text_r).text(
+                    pos2(tele_text_r.left(), tele_text_r.center().y),
+                    Align2::LEFT_CENTER,
+                    tele_text,
+                    FontId::monospace(9.5),
+                    tele_fg,
+                );
+
+                if let Some(ref t) = track {
+                    let parent_dir = t
+                        .path
+                        .parent()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_else(|| t.path.display().to_string());
+                    let folder_name = t
+                        .path
+                        .parent()
+                        .and_then(|d| d.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Folder");
+                    let div_x = bar_rect.right() - folder_w - 2.0;
+                    ui.painter().line_segment(
+                        [pos2(div_x, bar_rect.top() + 4.0), pos2(div_x, bar_rect.bottom() - 4.0)],
+                        Stroke::new(1.0, p.border),
+                    );
+                    let f_rect = Rect::from_min_max(
+                        pos2(div_x + 4.0, bar_rect.top()),
+                        pos2(bar_rect.right() - 5.0, bar_rect.bottom()),
+                    );
+                    let f_resp = ui
+                        .interact(f_rect, ui.scope_id().with("cmp_folder_chip"), Sense::click())
+                        .on_hover_text(format!(
+                            "Playing from:\n{parent_dir}\nClick to reveal in {FILE_MANAGER_NAME}"
+                        ));
+                    icons::paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(pos2(f_rect.left() + 6.0, f_rect.center().y), Vec2::splat(10.0)),
+                        Icon::Folder,
+                        if f_resp.hovered() { p.accent } else { p.faint },
+                    );
+                    let f_txt = Rect::from_min_max(pos2(f_rect.left() + 14.0, f_rect.top()), f_rect.max);
+                    ui.painter().with_clip_rect(f_txt).text(
+                        pos2(f_txt.left(), f_txt.center().y),
+                        Align2::LEFT_CENTER,
+                        folder_name,
+                        FontId::proportional(9.5),
+                        if f_resp.hovered() { p.text } else { p.muted },
+                    );
+                    if f_resp.clicked() {
+                        reveal_in_file_manager(&t.path);
+                    }
+                }
 
                 ui.add_space(6.0);
                 // Row B: Hi-Def Uniform Progress Scrubber
@@ -7373,11 +7473,26 @@ impl eframe::App for TxPlayerApp {
 
         let p = self.palette;
 
+        // Auto-expand collapsed Compact window while a modal is open so Settings/Tag Editor never feel cramped
         if self.compact_mode {
+            let need_expand = !self.compact_show_playlist && self.any_modal_open();
+            if need_expand && !self.compact_modal_expanded {
+                self.compact_modal_expanded = true;
+                self.sync_compact_height(&context);
+            } else if !need_expand && self.compact_modal_expanded {
+                self.compact_modal_expanded = false;
+                self.sync_compact_height(&context);
+            }
+
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(p.background).inner_margin(Margin::ZERO))
                 .show(root, |ui| self.compact_view(&context, ui));
         } else {
+            egui::Panel::top("classic_top_bar")
+                .exact_size(32.0)
+                .frame(Frame::new().fill(p.sidebar).inner_margin(Margin::ZERO))
+                .show(root, |ui| self.classic_top_bar(&context, ui));
+
             egui::Panel::bottom("player")
                 .exact_size(TRANSPORT_HEIGHT)
                 .frame(
@@ -7543,6 +7658,200 @@ impl Drop for TxPlayerApp {
         }
         .save();
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_traffic_dot(
+    painter: &egui::Painter,
+    center: Pos2,
+    dot_r: f32,
+    base_col: Color32,
+    is_focused: bool,
+    cluster_hovered: bool,
+    hovered: bool,
+    kind: u8,
+    p: &Palette,
+) {
+    let glyph_col = if p.is_light {
+        Color32::from_rgb(24, 34, 38)
+    } else {
+        Color32::from_rgb(12, 16, 18)
+    };
+    let fill = if !is_focused && !cluster_hovered {
+        p.surface_elevated
+    } else if hovered {
+        lerp_c(base_col, Color32::WHITE, 0.18)
+    } else {
+        base_col
+    };
+    let border = if !is_focused && !cluster_hovered {
+        p.border_strong
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, if p.is_light { 45 } else { 90 })
+    };
+    painter.circle_filled(center, dot_r, fill);
+    painter.circle_stroke(center, dot_r, Stroke::new(0.8, border));
+
+    if cluster_hovered {
+        let st = Stroke::new(1.25, glyph_col);
+        match kind {
+            // Close (×)
+            0 => {
+                let d = 2.4;
+                painter.line_segment(
+                    [pos2(center.x - d, center.y - d), pos2(center.x + d, center.y + d)],
+                    st,
+                );
+                painter.line_segment(
+                    [pos2(center.x - d, center.y + d), pos2(center.x + d, center.y - d)],
+                    st,
+                );
+            }
+            // Minimize (−)
+            1 => {
+                let d = 2.9;
+                painter.line_segment([pos2(center.x - d, center.y), pos2(center.x + d, center.y)], st);
+            }
+            // Zoom / Fullscreen (⤢)
+            _ => {
+                let d = 2.4;
+                painter.line_segment(
+                    [pos2(center.x - d, center.y + d), pos2(center.x + d, center.y - d)],
+                    st,
+                );
+                painter.line_segment(
+                    [pos2(center.x + d - 2.0, center.y - d), pos2(center.x + d, center.y - d)],
+                    st,
+                );
+                painter.line_segment(
+                    [pos2(center.x + d, center.y - d), pos2(center.x + d, center.y - d + 2.0)],
+                    st,
+                );
+                painter.line_segment(
+                    [pos2(center.x - d, center.y + d), pos2(center.x - d + 2.0, center.y + d)],
+                    st,
+                );
+                painter.line_segment(
+                    [pos2(center.x - d, center.y + d), pos2(center.x - d, center.y + d - 2.0)],
+                    st,
+                );
+            }
+        }
+    }
+}
+
+fn paint_topbar_icon_btn(
+    ui: &mut Ui,
+    rect: Rect,
+    id: &str,
+    icon: Icon,
+    active: bool,
+    tip: &str,
+    p: &Palette,
+) -> bool {
+    let resp = ui
+        .interact(rect, ui.scope_id().with(id), Sense::click())
+        .on_hover_text(tip);
+    if active {
+        ui.painter().rect_filled(rect, 4.0, p.accent_subtle);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, p.hover);
+    }
+    icons::paint_icon(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(12.0)),
+        icon,
+        if active {
+            p.accent
+        } else if resp.hovered() {
+            p.text
+        } else {
+            p.muted
+        },
+    );
+    resp.clicked()
+}
+
+fn paint_topbar_pin_btn(
+    ui: &mut Ui,
+    rect: Rect,
+    id: &str,
+    always_on_top: bool,
+    p: &Palette,
+) -> bool {
+    let resp = ui
+        .interact(rect, ui.scope_id().with(id), Sense::click())
+        .on_hover_text(if always_on_top {
+            "Always on Top: On (Click to unpin)"
+        } else {
+            "Pin Window Always on Top"
+        });
+    if always_on_top || resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            4.0,
+            if always_on_top { p.accent_subtle } else { p.hover },
+        );
+    }
+    let c = rect.center();
+    let col = if always_on_top {
+        p.accent
+    } else if resp.hovered() {
+        p.text
+    } else {
+        p.faint
+    };
+    ui.painter().circle_filled(pos2(c.x, c.y - 1.8), 2.3, col);
+    ui.painter().line_segment(
+        [pos2(c.x, c.y + 0.5), pos2(c.x, c.y + 4.4)],
+        Stroke::new(1.2, col),
+    );
+    resp.clicked()
+}
+
+fn paint_mode_switch_pill(
+    ui: &mut Ui,
+    rect: Rect,
+    id: &str,
+    label: &str,
+    icon: Icon,
+    tip: &str,
+    p: &Palette,
+) -> bool {
+    let resp = ui
+        .interact(rect, ui.scope_id().with(id), Sense::click())
+        .on_hover_text(tip);
+    let hovered = resp.hovered();
+    ui.painter().rect_filled(
+        rect,
+        5.0,
+        if hovered { p.accent_subtle } else { p.surface },
+    );
+    ui.painter().rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(1.0, if hovered { p.accent } else { p.border }),
+        StrokeKind::Inside,
+    );
+    let fg = if hovered { p.accent } else { p.text_secondary };
+    let font = FontId::proportional(10.5);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, fg);
+    let icon_sz = 11.0;
+    let gap = 5.0;
+    let content_w = icon_sz + gap + galley.size().x;
+    let start_x = rect.center().x - content_w * 0.5;
+    icons::paint_icon(
+        ui.painter(),
+        Rect::from_center_size(pos2(start_x + icon_sz * 0.5, rect.center().y), Vec2::splat(icon_sz)),
+        icon,
+        fg,
+    );
+    ui.painter().galley(
+        pos2(start_x + icon_sz + gap, rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+    resp.clicked()
 }
 
 fn paint_clipped_cell_text(

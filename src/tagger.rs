@@ -227,24 +227,38 @@ pub fn detect_tool_health() -> ToolHealth {
     }
 }
 
-fn find_in_path(name: &str) -> Option<PathBuf> {
+/// Creates a `Command` configured to NEVER flash a console window on Windows GUI builds.
+fn hidden_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
-    let lookup_cmd = "where";
-    #[cfg(not(target_os = "windows"))]
-    let lookup_cmd = "which";
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
-    Command::new(lookup_cmd)
-        .arg(name)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .map(|line| PathBuf::from(line.trim()))
-        })
-        .filter(|p| p.is_file())
+/// Pure-Rust PATH executable search (zero subprocesses spawned, zero flashing console windows!).
+fn find_in_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let direct = dir.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            for ext in ["exe", "cmd", "bat"] {
+                let with_ext = dir.join(format!("{name}.{ext}"));
+                if with_ext.is_file() {
+                    return Some(with_ext);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_curl() -> Option<PathBuf> {
@@ -273,7 +287,7 @@ fn find_fpcalc() -> Option<PathBuf> {
 
 fn run_fpcalc(path: &Path) -> Option<(u32, String)> {
     let bin = find_fpcalc()?;
-    let out = Command::new(bin)
+    let out = hidden_command(bin)
         .arg("-json")
         .arg(path)
         .output()
@@ -451,7 +465,7 @@ pub fn lookup_online(
 
 fn curl_get_json(url: &str) -> Result<Value> {
     let curl = find_curl().ok_or_else(|| anyhow!("curl not found on system"))?;
-    let output = Command::new(curl)
+    let output = hidden_command(curl)
         .args([
             "-sS",
             "-L",
@@ -687,7 +701,7 @@ pub fn download_cover_artwork(url: &str, track_id: u64, cover_dir: &Path) -> Res
     std::fs::create_dir_all(cover_dir)?;
     let out_path = cover_dir.join(format!("{track_id:016x}_fetched.jpg"));
     let curl = find_curl().ok_or_else(|| anyhow!("curl not found on system"))?;
-    let output = Command::new(curl)
+    let output = hidden_command(curl)
         .args(["-sS", "-L", "--max-time", "12", "-o"])
         .arg(&out_path)
         .arg(url)
@@ -762,7 +776,7 @@ pub fn write_tags_to_file(track: &Track, clear_empty_optionals: bool) -> Result<
         .unwrap_or("track");
     let tmp_path = parent.join(format!(".{stem}.txplayer_tag_tmp.{ext}"));
 
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = hidden_command(ffmpeg);
     cmd.args(["-y", "-v", "error", "-i"])
         .arg(&track.path)
         .args(["-map", "0", "-c", "copy"]);
