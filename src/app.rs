@@ -42,13 +42,13 @@ const SIDEBAR_WIDTH: f32 = 224.0;
 const TRANSPORT_HEIGHT: f32 = 96.0;
 const WAVEFORM_BINS: usize = 160;
 
-pub const COMPACT_WIDTH: f32 = 468.0;
-pub const COMPACT_COLLAPSED_HEIGHT: f32 = 200.0;
-pub const COMPACT_EXPANDED_HEIGHT: f32 = 476.0;
+pub const COMPACT_WIDTH: f32 = 520.0;
+pub const COMPACT_COLLAPSED_HEIGHT: f32 = 210.0;
+pub const COMPACT_EXPANDED_HEIGHT: f32 = 560.0;
 pub const COMPACT_MIN_WIDTH: f32 = 380.0;
 pub const COMPACT_MIN_HEIGHT: f32 = 186.0;
-pub const FULL_WIDTH: f32 = 1240.0;
-pub const FULL_HEIGHT: f32 = 790.0;
+pub const FULL_WIDTH: f32 = 1360.0;
+pub const FULL_HEIGHT: f32 = 860.0;
 pub const FULL_MIN_WIDTH: f32 = 900.0;
 pub const FULL_MIN_HEIGHT: f32 = 540.0;
 
