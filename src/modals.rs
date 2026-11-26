@@ -2153,6 +2153,12 @@ pub fn show_settings_window(
                         );
                         aligned_checkbox_row(
                             ui,
+                            &mut plugins.visualizers.enable_grand_staff,
+                            "Grand Staff Sheet Music (live Treble & Bass clef + ASCII/ABC)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
                             &mut plugins.visualizers.enable_concert_spectrum,
                             "64-Band Concert Spectrum (27.5 Hz – 18 kHz)",
                             palette,

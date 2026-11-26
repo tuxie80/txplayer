@@ -2,17 +2,21 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VER="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
 BUILD="$ROOT/target/macos"
 APP="$BUILD/TxPlayer.app"
 ICON_SOURCE="$ROOT/assets/AppIcon.png"
 
 cd "$ROOT"
-cargo build --release
+if [[ "${1:-}" != "--skip-build" ]]; then
+    cargo build --release
+fi
 
 rm -rf "$APP" "$BUILD/dmg" "$BUILD/AppIcon.iconset"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$BUILD/dmg"
 cp "$ROOT/target/release/txplayer" "$APP/Contents/MacOS/TxPlayer"
-cp "$ROOT/packaging/Info.plist" "$APP/Contents/Info.plist"
+sed "s|<string>[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*</string>|<string>${VER}</string>|" \
+    "$ROOT/packaging/Info.plist" > "$APP/Contents/Info.plist"
 
 if [[ -f "$ICON_SOURCE" ]]; then
     ICONSET="$BUILD/AppIcon.iconset"

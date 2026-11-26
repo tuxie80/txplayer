@@ -994,6 +994,8 @@ pub struct VisualizerPluginConfig {
     #[serde(default = "default_true")]
     pub enable_piano_roll: bool,
     #[serde(default = "default_true")]
+    pub enable_grand_staff: bool,
+    #[serde(default = "default_true")]
     pub enable_concert_spectrum: bool,
     #[serde(default = "default_true")]
     pub enable_spectrogram: bool,
@@ -1014,6 +1016,7 @@ impl Default for VisualizerPluginConfig {
         Self {
             enable_piano_harmonic: true,
             enable_piano_roll: true,
+            enable_grand_staff: true,
             enable_concert_spectrum: true,
             enable_spectrogram: true,
             enable_stereo_scope: true,
@@ -1030,6 +1033,7 @@ impl VisualizerPluginConfig {
         match mode {
             VisualizerMode::PianoHarmonic => self.enable_piano_harmonic,
             VisualizerMode::PianoRoll => self.enable_piano_roll,
+            VisualizerMode::GrandStaff => self.enable_grand_staff,
             VisualizerMode::ConcertSpectrum => self.enable_concert_spectrum,
             VisualizerMode::Spectrogram => self.enable_spectrogram,
             VisualizerMode::StereoScope => self.enable_stereo_scope,
@@ -1189,6 +1193,7 @@ mod tests {
     fn visualizer_next_enabled_mode_skips_disabled() {
         let vis = VisualizerPluginConfig {
             enable_piano_roll: false,
+            enable_grand_staff: false,
             enable_concert_spectrum: false,
             enable_spectrogram: false,
             ..Default::default()

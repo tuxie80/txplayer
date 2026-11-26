@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=TxPlayer
+GenericName=Audiophile Music Player
+Comment=Native Rust audiophile music player, 88-key piano visualizer & master library
+Exec=txplayer %F
+Icon=txplayer
+Terminal=false
+Categories=AudioVideo;Audio;Player;Music;
+MimeType=audio/flac;audio/mpeg;audio/mp4;audio/x-wav;audio/wav;audio/ogg;audio/opus;audio/aiff;audio/x-aiff;audio/x-wavpack;audio/x-ape;audio/x-dsf;audio/x-dff;application/x-cue;
+StartupWMClass=txplayer
+Keywords=music;audio;player;flac;dsd;hi-res;audiophile;piano;
