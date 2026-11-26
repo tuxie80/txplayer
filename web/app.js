@@ -138,7 +138,7 @@
     });
   });
 
-  // ---- ambient dot-particle field: drifting acoustic waveform & concentric sound-wave glyphs ----
+  // ---- ambient dot-particle field: drifting musical Treble/Bass clefs, beamed notes & piano keys ----
   (function () {
     var canvas = document.getElementById('bgDots');
     if (!canvas || !canvas.getContext) return;
@@ -150,49 +150,127 @@
     var mouse = { x: -1e4, y: -1e4 };
 
     var GLYPH_DEFS = [
-      { kind: 'wave', fx: 0.82, fy: 0.22, size: 390, tint: '45, 212, 191',  alpha: 0.28, amp: 24, period: 62000, phase: 0.0 },
-      { kind: 'ring', fx: 0.11, fy: 0.58, size: 260, tint: '45, 212, 191',  alpha: 0.14, amp: 30, period: 82000, phase: 2.1 },
-      { kind: 'wave', fx: 0.68, fy: 0.84, size: 310, tint: '94, 234, 212',  alpha: 0.12, amp: 28, period: 74000, phase: 4.0 },
-      { kind: 'ring', fx: 0.34, fy: 0.38, size: 175, tint: '45, 212, 191',  alpha: 0.10, amp: 20, period: 92000, phase: 1.4 }
+      { kind: 'treble', fx: 0.84, fy: 0.26, size: 420, tint: '45, 212, 191', alpha: 0.34, amp: 24, period: 62000, phase: 0.0 },
+      { kind: 'notes',  fx: 0.10, fy: 0.55, size: 285, tint: '94, 234, 212', alpha: 0.22, amp: 28, period: 78000, phase: 2.1 },
+      { kind: 'piano',  fx: 0.72, fy: 0.84, size: 340, tint: '45, 212, 191', alpha: 0.18, amp: 26, period: 74000, phase: 4.0 },
+      { kind: 'bass',   fx: 0.30, fy: 0.35, size: 220, tint: '94, 234, 212', alpha: 0.16, amp: 20, period: 88000, phase: 1.4 }
     ];
     var GLYPH_DEFS_SM = [
-      { kind: 'wave', fx: 0.85, fy: 0.18, size: 230, tint: '45, 212, 191', alpha: 0.22, amp: 16, period: 62000, phase: 0.0 },
-      { kind: 'ring', fx: 0.12, fy: 0.76, size: 170, tint: '94, 234, 212', alpha: 0.11, amp: 18, period: 82000, phase: 2.1 }
+      { kind: 'treble', fx: 0.84, fy: 0.20, size: 250, tint: '45, 212, 191', alpha: 0.28, amp: 16, period: 62000, phase: 0.0 },
+      { kind: 'notes',  fx: 0.14, fy: 0.74, size: 195, tint: '94, 234, 212', alpha: 0.18, amp: 18, period: 78000, phase: 2.1 }
     ];
 
-    function sampleAcousticGlyph(kind, size) {
+    function sampleMusicalGlyph(kind, size) {
       var s = 2;
       var off = document.createElement('canvas');
       off.width = off.height = Math.round(size * s);
       var c = off.getContext('2d');
       c.scale(s, s);
       c.strokeStyle = '#fff';
+      c.fillStyle = '#fff';
       c.lineCap = 'round';
+      c.lineJoin = 'round';
       var cx = size / 2, cy = size / 2;
 
-      if (kind === 'wave') {
-        // Vertical studio acoustic waveform bars (symmetric hi-res silhouette)
-        var bars = 13;
-        var span = size * 0.72;
-        var x0 = cx - span * 0.5;
-        var stepX = span / (bars - 1);
-        c.lineWidth = Math.max(7, size * 0.036);
-        var heights = [0.16, 0.34, 0.56, 0.38, 0.76, 0.92, 0.64, 0.86, 0.52, 0.68, 0.40, 0.28, 0.14];
-        for (var b = 0; b < bars; b++) {
-          var bx = x0 + b * stepX;
-          var bh = size * 0.36 * heights[b];
+      if (kind === 'treble') {
+        // Classic engraved Treble (G) Clef — bold vector Bezier silhouette
+        var u = size * 0.0085;
+        c.lineWidth = Math.max(9, size * 0.044);
+        // Main spine & top tear-drop loop
+        c.beginPath();
+        c.moveTo(cx + 3 * u, cy - 42 * u);
+        c.bezierCurveTo(cx + 22 * u, cy - 30 * u, cx + 12 * u, cy - 8 * u, cx - 12 * u, cy + 4 * u);
+        c.bezierCurveTo(cx - 32 * u, cy + 14 * u, cx - 28 * u, cy + 34 * u, cx - 2 * u, cy + 34 * u);
+        c.bezierCurveTo(cx + 24 * u, cy + 34 * u, cx + 28 * u, cy + 10 * u, cx + 8 * u, cy + 4 * u);
+        c.bezierCurveTo(cx - 8 * u, cy - 1 * u, cx - 14 * u, cy + 14 * u, cx - 2 * u, cy + 20 * u);
+        c.stroke();
+
+        // Upright spine sweeping down to the bottom scroll dot
+        c.lineWidth = Math.max(8, size * 0.036);
+        c.beginPath();
+        c.moveTo(cx + 3 * u, cy - 42 * u);
+        c.bezierCurveTo(cx - 10 * u, cy - 32 * u, cx - 6 * u, cy - 10 * u, cx + 2 * u, cy + 42 * u);
+        c.bezierCurveTo(cx + 4 * u, cy + 50 * u, cx - 10 * u, cy + 52 * u, cx - 14 * u, cy + 44 * u);
+        c.stroke();
+        c.beginPath();
+        c.arc(cx - 14 * u, cy + 43 * u, 6.5 * u, 0, Math.PI * 2);
+        c.fill();
+      } else if (kind === 'notes') {
+        // Beamed eighth-note pair (♫) with tilted oval noteheads, stems & thick top beam
+        var u = size * 0.009;
+        // Left & right tilted noteheads
+        [
+          { x: cx - 22 * u, y: cy + 22 * u },
+          { x: cx + 20 * u, y: cy + 12 * u }
+        ].forEach(function (n) {
+          c.save();
+          c.translate(n.x, n.y);
+          c.rotate(-0.34);
           c.beginPath();
-          c.moveTo(bx, cy - bh);
-          c.lineTo(bx, cy + bh);
+          c.ellipse(0, 0, 14 * u, 10 * u, 0, 0, Math.PI * 2);
+          c.fill();
+          c.restore();
+        });
+        // Upright stems
+        c.lineWidth = Math.max(7, size * 0.036);
+        c.beginPath();
+        c.moveTo(cx - 11 * u, cy + 19 * u);
+        c.lineTo(cx - 11 * u, cy - 26 * u);
+        c.moveTo(cx + 31 * u, cy + 9 * u);
+        c.lineTo(cx + 31 * u, cy - 36 * u);
+        c.stroke();
+        // Double angled musical beams
+        c.lineWidth = Math.max(10, size * 0.056);
+        c.beginPath();
+        c.moveTo(cx - 11 * u, cy - 26 * u);
+        c.lineTo(cx + 31 * u, cy - 36 * u);
+        c.stroke();
+        c.lineWidth = Math.max(7, size * 0.036);
+        c.beginPath();
+        c.moveTo(cx - 11 * u, cy - 13 * u);
+        c.lineTo(cx + 31 * u, cy - 23 * u);
+        c.stroke();
+      } else if (kind === 'bass') {
+        // Classic Bass (F) Clef with twin F-line dots
+        var u = size * 0.009;
+        c.beginPath();
+        c.arc(cx - 22 * u, cy - 10 * u, 8.5 * u, 0, Math.PI * 2);
+        c.fill();
+        c.lineWidth = Math.max(9, size * 0.048);
+        c.beginPath();
+        c.moveTo(cx - 22 * u, cy - 10 * u);
+        c.bezierCurveTo(cx - 22 * u, cy - 36 * u, cx + 22 * u, cy - 36 * u, cx + 18 * u, cy - 4 * u);
+        c.bezierCurveTo(cx + 14 * u, cy + 18 * u, cx - 6 * u, cy + 32 * u, cx - 26 * u, cy + 38 * u);
+        c.stroke();
+        c.beginPath();
+        c.arc(cx + 30 * u, cy - 16 * u, 5.5 * u, 0, Math.PI * 2);
+        c.arc(cx + 30 * u, cy + 2 * u, 5.5 * u, 0, Math.PI * 2);
+        c.fill();
+      } else {
+        // 1-octave Piano Keybed silhouette + 3 subtle staff lines above
+        var u = size * 0.009;
+        var kw = 11 * u, kh = 34 * u;
+        var startX = cx - 3.5 * kw;
+        var topY = cy - 4 * u;
+        c.lineWidth = Math.max(4, size * 0.018);
+        // Staff lines floating above the keyboard
+        [-28, -18, -8].forEach(function (dy) {
+          c.beginPath();
+          c.moveTo(startX - 4 * u, topY + dy * u);
+          c.lineTo(startX + 7 * kw + 4 * u, topY + dy * u);
+          c.stroke();
+        });
+        // White key outline + dividers
+        c.strokeRect(startX, topY, 7 * kw, kh);
+        for (var k = 1; k < 7; k++) {
+          c.beginPath();
+          c.moveTo(startX + k * kw, topY);
+          c.lineTo(startX + k * kw, topY + kh);
           c.stroke();
         }
-      } else {
-        // Concentric audiophile vinyl / acoustic transducer rings
-        c.lineWidth = Math.max(7, size * 0.042);
-        [0.14, 0.27, 0.40].forEach(function (rf) {
-          c.beginPath();
-          c.arc(cx, cy, size * rf, 0, Math.PI * 2);
-          c.stroke();
+        // Black keys (C#, D#, F#, G#, A#)
+        [1, 2, 4, 5, 6].forEach(function (pos) {
+          c.fillRect(startX + pos * kw - kw * 0.34, topY, kw * 0.68, kh * 0.60);
         });
       }
 
@@ -207,7 +285,7 @@
             }
           }
         }
-        if (pts.length <= 680) break;
+        if (pts.length <= 720) break;
         step++;
       }
       return pts;
@@ -224,7 +302,7 @@
       var old = glyphs;
       glyphs = defs.map(function (d, gi) {
         var size = d.size * scale;
-        var pts = sampleAcousticGlyph(d.kind, size);
+        var pts = sampleMusicalGlyph(d.kind, size);
         var prevGlyph = old[gi];
         return {
           def: d, size: size,
