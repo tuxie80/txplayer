@@ -114,13 +114,15 @@ enum RepeatMode {
     One,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 enum SortMode {
+    #[default]
     Artist,
     Album,
     Title,
     Quality,
     Duration,
+    Custom,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,6 +162,10 @@ struct Preferences {
     close_to_tray: bool,
     #[serde(default = "default_true")]
     auto_watch_folders: bool,
+    #[serde(default)]
+    sort_mode: SortMode,
+    #[serde(default = "default_true")]
+    sort_ascending: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -217,6 +223,8 @@ impl Default for Preferences {
             compact_show_playlist: true,
             close_to_tray: false,
             auto_watch_folders: true,
+            sort_mode: SortMode::Artist,
+            sort_ascending: true,
         }
     }
 }
@@ -353,6 +361,12 @@ enum PlaylistUndoEntry {
     Playlist {
         playlist_id: u64,
         track_ids: Vec<u64>,
+        label: String,
+    },
+    Library {
+        track_ids: Vec<u64>,
+        prev_sort: SortMode,
+        prev_ascending: bool,
         label: String,
     },
 }
@@ -557,7 +571,9 @@ impl TxPlayerApp {
             .expect("artwork worker thread should start");
 
         let mut store = LibraryStore::load();
-        store.active_mut().sort_default();
+        if preferences.sort_mode != SortMode::Custom {
+            store.active_mut().sort_default();
+        }
 
         let visualizer = VisualizerState::new(
             preferences.visualizer_mode,
@@ -617,8 +633,8 @@ impl TxPlayerApp {
             folder_filter: None,
             album_filter: None,
             artist_filter: None,
-            sort: SortMode::Artist,
-            sort_ascending: true,
+            sort: preferences.sort_mode,
+            sort_ascending: preferences.sort_ascending,
             search: String::new(),
             focus_search: false,
             playback_speed: 1.0,
@@ -1037,7 +1053,8 @@ impl TxPlayerApp {
         if matches!(
             self.view,
             View::Library | View::Favorites | View::Smart(SmartView::HiRes)
-        ) {
+        ) && self.sort != SortMode::Custom
+        {
             tracks.sort_by(|a, b| {
                 let ord = match self.sort {
                     SortMode::Artist => a
@@ -1073,6 +1090,7 @@ impl TxPlayerApp {
                         .duration
                         .partial_cmp(&b.duration)
                         .unwrap_or(std::cmp::Ordering::Equal),
+                    SortMode::Custom => std::cmp::Ordering::Equal,
                 };
                 if self.sort_ascending {
                     ord
@@ -1472,6 +1490,63 @@ impl TxPlayerApp {
         });
     }
 
+    fn is_current_view_reorderable(&self) -> bool {
+        if !self.search.trim().is_empty() {
+            return false;
+        }
+        match self.view {
+            View::Queue | View::Playlist(_) => true,
+            View::Library => {
+                self.folder_filter.is_none()
+                    && self.album_filter.is_none()
+                    && self.artist_filter.is_none()
+            }
+            View::Favorites | View::Smart(_) => false,
+        }
+    }
+
+    fn reorder_library_indices(&mut self, moving_indices: &[usize], insert_before: usize) -> bool {
+        self.ensure_visible_cache();
+        let visible_ids: Vec<u64> = self.cached_visible.iter().map(|t| t.id).collect();
+        if visible_ids.len() < 2 {
+            return false;
+        }
+        let prev_ids: Vec<u64> = self.store.active().tracks.iter().map(|t| t.id).collect();
+        let prev_sort = self.sort;
+        let prev_ascending = self.sort_ascending;
+
+        if self.sort != SortMode::Custom {
+            self.store.active_mut().set_tracks_order_by_ids(&visible_ids);
+        }
+        let Some((new_start, _len)) = self
+            .store
+            .active_mut()
+            .reorder_tracks_indices(moving_indices, insert_before)
+        else {
+            // No-op drag: restore prior storage order if we temporarily materialized it
+            if prev_sort != SortMode::Custom {
+                self.store.active_mut().set_tracks_order_by_ids(&prev_ids);
+            }
+            return false;
+        };
+
+        self.redo_stack.clear();
+        if self.undo_stack.len() >= 40 {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(PlaylistUndoEntry::Library {
+            track_ids: prev_ids,
+            prev_sort,
+            prev_ascending,
+            label: "custom track order".to_string(),
+        });
+        self.sort = SortMode::Custom;
+        self.selection_anchor = Some(new_start);
+        self.mark_library_dirty();
+        self.store.save();
+        true
+    }
+
     fn apply_undo(&mut self) {
         let Some(entry) = self.undo_stack.pop() else {
             self.set_status("Nothing to undo".into());
@@ -1516,6 +1591,26 @@ impl TxPlayerApp {
                     self.store.save();
                     self.set_status(format!("Undid {label}"));
                 }
+            }
+            PlaylistUndoEntry::Library {
+                track_ids,
+                prev_sort,
+                prev_ascending,
+                label,
+            } => {
+                let cur_ids: Vec<u64> = self.store.active().tracks.iter().map(|t| t.id).collect();
+                self.redo_stack.push(PlaylistUndoEntry::Library {
+                    track_ids: cur_ids,
+                    prev_sort: self.sort,
+                    prev_ascending: self.sort_ascending,
+                    label: label.clone(),
+                });
+                self.store.active_mut().set_tracks_order_by_ids(&track_ids);
+                self.sort = prev_sort;
+                self.sort_ascending = prev_ascending;
+                self.mark_library_dirty();
+                self.store.save();
+                self.set_status(format!("Undid {label}"));
             }
         }
     }
@@ -1564,6 +1659,26 @@ impl TxPlayerApp {
                     self.store.save();
                     self.set_status(format!("Redid {label}"));
                 }
+            }
+            PlaylistUndoEntry::Library {
+                track_ids,
+                prev_sort,
+                prev_ascending,
+                label,
+            } => {
+                let cur_ids: Vec<u64> = self.store.active().tracks.iter().map(|t| t.id).collect();
+                self.undo_stack.push(PlaylistUndoEntry::Library {
+                    track_ids: cur_ids,
+                    prev_sort: self.sort,
+                    prev_ascending: self.sort_ascending,
+                    label: label.clone(),
+                });
+                self.store.active_mut().set_tracks_order_by_ids(&track_ids);
+                self.sort = prev_sort;
+                self.sort_ascending = prev_ascending;
+                self.mark_library_dirty();
+                self.store.save();
+                self.set_status(format!("Redid {label}"));
             }
         }
     }
@@ -1711,6 +1826,7 @@ impl TxPlayerApp {
                     .duration
                     .partial_cmp(&b.duration)
                     .unwrap_or(std::cmp::Ordering::Equal),
+                SortMode::Custom => std::cmp::Ordering::Equal,
             }
         });
         self.store
@@ -2506,7 +2622,9 @@ impl TxPlayerApp {
                     ScanEvent::Finished { found, failed } => {
                         finished = true;
                         self.scanning = false;
-                        self.store.active_mut().sort_default();
+                        if self.sort != SortMode::Custom {
+                            self.store.active_mut().sort_default();
+                        }
                         scan_dirty = true;
                         self.store.save();
                         message = Some(if found == 0 && failed == 0 {
@@ -2601,7 +2719,9 @@ impl TxPlayerApp {
                     for track in updated_tracks {
                         self.store.active_mut().upsert(track);
                     }
-                    self.store.active_mut().sort_default();
+                    if self.sort != SortMode::Custom {
+                        self.store.active_mut().sort_default();
+                    }
                     self.mark_library_dirty();
                     self.store.save();
                     if disk_errors.is_empty() {
@@ -3366,9 +3486,7 @@ impl TxPlayerApp {
                                 vec2(SIDEBAR_WIDTH - 20.0, 26.0),
                                 Sense::click(),
                             );
-                            let pointer_over = ui
-                                .ctx()
-                                .pointer_hover_pos()
+                            let pointer_over = drag_pointer_pos(ui.ctx())
                                 .is_some_and(|pt| rect.contains(pt));
                             let drop_hover = drag_active && pointer_over;
                             if drop_hover && let Some(ref mut d) = self.drag_tracks {
@@ -3885,9 +4003,7 @@ impl TxPlayerApp {
             ui.add_space(10.0);
             let (rect, resp) =
                 ui.allocate_exact_size(vec2(SIDEBAR_WIDTH - 20.0, 28.0), Sense::click());
-            let pointer_over = ui
-                .ctx()
-                .pointer_hover_pos()
+            let pointer_over = drag_pointer_pos(ui.ctx())
                 .is_some_and(|pt| rect.contains(pt));
             let queue_drop = target == View::Queue && self.drag_tracks.is_some() && pointer_over;
             if queue_drop && let Some(ref mut d) = self.drag_tracks {
@@ -4253,15 +4369,29 @@ impl TxPlayerApp {
             }
             ui.label(RichText::new(summary).color(p.muted).size(11.0));
 
-            if matches!(self.view, View::Queue | View::Playlist(_))
-                && tracks.len() > 1
-                && self.search.trim().is_empty()
-            {
+            if self.is_current_view_reorderable() && tracks.len() > 1 {
                 ui.label(
                     RichText::new("·  Drag rows to reorder")
                         .color(p.faint)
                         .size(10.0),
                 );
+            }
+
+            if self.view == View::Library && self.sort == SortMode::Custom {
+                Frame::new()
+                    .fill(p.accent_subtle)
+                    .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.5)))
+                    .corner_radius(4.0)
+                    .inner_margin(Margin::symmetric(6, 1))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("CUSTOM ORDER")
+                                .size(9.0)
+                                .monospace()
+                                .color(p.accent),
+                        )
+                        .on_hover_text("Manual track order (click any column header to sort again)");
+                    });
             }
 
             if self.stop_after_current {
@@ -4387,6 +4517,10 @@ impl TxPlayerApp {
                 .id_salt("aligned_track_table")
                 .max_height((list_h - 28.0).max(90.0))
                 .auto_shrink([false, false])
+                .scroll_source(
+                    egui::scroll_area::ScrollSource::SCROLL_BAR
+                        | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
+                )
                 .show(ui, |ui| {
                     ui.style_mut().spacing.item_spacing.y = 2.0;
                     if tracks.is_empty() {
@@ -4955,8 +5089,17 @@ impl TxPlayerApp {
             .map(|pl| (pl.id, pl.name.clone()))
             .collect();
         let current_view = self.view;
+        let reorderable = self.is_current_view_reorderable();
+        let drag_pt = if self.drag_tracks.is_some() {
+            drag_pointer_pos(ui.ctx())
+        } else {
+            None
+        };
         let (rms_l, rms_r, _, _, _) = self.visual_tap.levels();
         let live_rms = ((rms_l + rms_r) * 1.6).clamp(0.0, 1.0);
+        let mut drop_line_info: Option<(f32, f32, f32)> = None;
+        let mut first_vis_row: Option<(usize, Rect)> = None;
+        let mut last_vis_row: Option<(usize, Rect)> = None;
 
         for (row_idx, track) in tracks.iter().enumerate() {
             let is_current = if self.view == View::Queue {
@@ -4975,6 +5118,10 @@ impl TxPlayerApp {
             if !ui.is_rect_visible(row_rect) {
                 continue;
             }
+            if first_vis_row.is_none() {
+                first_vis_row = Some((row_idx, row_rect));
+            }
+            last_vis_row = Some((row_idx, row_rect));
             let cols = TrackColumns::compute(row_rect);
 
             let play_id = ui.scope_id().with(("row_play", row_idx, track.id));
@@ -4982,10 +5129,8 @@ impl TxPlayerApp {
             let body_id = ui.scope_id().with(("row_body", row_idx, track.id));
 
             // Determine row hover via pointer position so inline hover actions appear cleanly
-            let row_pointer_over = ui
-                .ctx()
-                .pointer_hover_pos()
-                .is_some_and(|pt| row_rect.contains(pt));
+            let hover_pt = ui.ctx().pointer_hover_pos();
+            let row_pointer_over = hover_pt.is_some_and(|pt| row_rect.contains(pt));
 
             // Inline hover quick-action buttons positioned cleanly inside the FORMAT column while hovered
             let mut hover_next_resp: Option<egui::Response> = None;
@@ -5006,10 +5151,23 @@ impl TxPlayerApp {
                 pos2(q_queue_rect.left() - quick_gap - quick_btn_w * 0.5, row_rect.center().y),
                 vec2(quick_btn_w, 22.0),
             );
+            let quick_zone = Rect::from_min_max(
+                pos2(
+                    if current_view != View::Queue {
+                        q_next_rect.left()
+                    } else {
+                        q_tag_rect.left()
+                    },
+                    q_tag_rect.top(),
+                ),
+                pos2(q_tag_rect.right(), q_tag_rect.bottom()),
+            );
+            let pointer_over_quick = self.drag_tracks.is_none()
+                && hover_pt.is_some_and(|pt| quick_zone.contains(pt));
 
-            // Non-overlapping hit regions: 1-click play | body | (inline quick actions when hovered) | favorite heart
-            let body_right = if row_pointer_over {
-                q_next_rect.left() - 4.0
+            // Non-overlapping hit regions: 1-click play | full draggable row body | inline quick actions | favorite heart
+            let body_right = if pointer_over_quick {
+                quick_zone.left() - 2.0
             } else {
                 cols.favorite.left() - 2.0
             };
@@ -5065,22 +5223,19 @@ impl TxPlayerApp {
                 });
             }
 
-            // Live drop insertion indicator line while dragging inside Queue or Custom Playlist
-            let reorderable = matches!(self.view, View::Queue | View::Playlist(_))
-                && self.search.trim().is_empty();
-            let mut drop_line_y: Option<f32> = None;
+            // Live drop insertion indicator while dragging inside All Tracks, Queue, or Playlist
             if reorderable
                 && let Some(ref mut drag) = self.drag_tracks
                 && drag.source_view == self.view
-                && let Some(pt) = ui.ctx().pointer_hover_pos()
+                && let Some(pt) = drag_pt
                 && row_rect.contains(pt)
             {
                 if pt.y < row_rect.center().y {
                     drag.insert_before = Some(row_idx);
-                    drop_line_y = Some(row_rect.top());
+                    drop_line_info = Some((row_rect.left() + 6.0, row_rect.right() - 6.0, row_rect.top()));
                 } else {
                     drag.insert_before = Some(row_idx + 1);
-                    drop_line_y = Some(row_rect.bottom());
+                    drop_line_info = Some((row_rect.left() + 6.0, row_rect.right() - 6.0, row_rect.bottom()));
                 }
             }
 
@@ -5146,15 +5301,6 @@ impl TxPlayerApp {
                 Color32::TRANSPARENT
             };
             ui.painter().rect_filled(row_rect, 5.0, bg);
-
-            if let Some(ly) = drop_line_y {
-                let x0 = row_rect.left() + 6.0;
-                let x1 = row_rect.right() - 6.0;
-                ui.painter()
-                    .line_segment([pos2(x0, ly), pos2(x1, ly)], Stroke::new(2.0, p.accent));
-                ui.painter().circle_filled(pos2(x0, ly), 3.0, p.accent);
-                ui.painter().circle_filled(pos2(x1, ly), 3.0, p.accent);
-            }
 
             if is_current {
                 ui.painter().rect_stroke(
@@ -5476,6 +5622,36 @@ impl TxPlayerApp {
                     ui.close();
                 }
             });
+        }
+
+        // Handle pointer in empty space above first visible row or below last visible row inside the scroll viewport
+        if drop_line_info.is_none()
+            && reorderable
+            && let Some(ref mut drag) = self.drag_tracks
+            && drag.source_view == self.view
+            && let Some(pt) = drag_pt
+        {
+            let clip = ui.clip_rect();
+            if clip.contains(pt) {
+                if let Some((fidx, frect)) = first_vis_row
+                    && pt.y < frect.top()
+                {
+                    drag.insert_before = Some(fidx);
+                    drop_line_info = Some((frect.left() + 6.0, frect.right() - 6.0, frect.top()));
+                } else if let Some((lidx, lrect)) = last_vis_row
+                    && pt.y >= lrect.bottom()
+                {
+                    drag.insert_before = Some((lidx + 1).min(tracks.len()));
+                    drop_line_info = Some((lrect.left() + 6.0, lrect.right() - 6.0, lrect.bottom()));
+                }
+            }
+        }
+
+        // Paint high-contrast insertion line ON TOP of all rows so it is never obscured or clipped
+        if let Some((x0, x1, raw_y)) = drop_line_info {
+            let clip = ui.clip_rect();
+            let ly = raw_y.clamp(clip.top() + 2.5, clip.bottom() - 2.5);
+            paint_drop_insertion_line(ui.painter(), x0, x1, ly, &p);
         }
 
         if let Some(tid) = fav_toggle {
@@ -8067,7 +8243,7 @@ impl TxPlayerApp {
                                 let q_hl = self.drag_tracks.as_ref().is_some_and(|d| d.hover_queue);
                                 let (q_rect, r_q) = tab_pill(ui, &queue_lbl, self.view == View::Queue, q_hl);
                                 if drag_active
-                                    && ui.ctx().pointer_hover_pos().is_some_and(|pt| q_rect.contains(pt))
+                                    && drag_pointer_pos(ui.ctx()).is_some_and(|pt| q_rect.contains(pt))
                                     && let Some(ref mut d) = self.drag_tracks
                                 {
                                     d.hover_queue = true;
@@ -8091,7 +8267,7 @@ impl TxPlayerApp {
                                     let (pr, r_pl) =
                                         tab_pill(ui, pl_name, self.view == View::Playlist(*pl_id), pl_hl);
                                     if drag_active
-                                        && ui.ctx().pointer_hover_pos().is_some_and(|pt| pr.contains(pt))
+                                        && drag_pointer_pos(ui.ctx()).is_some_and(|pt| pr.contains(pt))
                                         && let Some(ref mut d) = self.drag_tracks
                                     {
                                         d.hover_playlist_id = Some(*pl_id);
@@ -8282,12 +8458,20 @@ impl TxPlayerApp {
                         .iter()
                         .map(|pl| (pl.id, pl.name.clone()))
                         .collect();
-                    let reorderable = matches!(self.view, View::Queue | View::Playlist(_))
-                        && self.search.trim().is_empty();
+                    let reorderable = self.is_current_view_reorderable();
+                    let drag_pt = if self.drag_tracks.is_some() {
+                        drag_pointer_pos(ui.ctx())
+                    } else {
+                        None
+                    };
 
                     ScrollArea::vertical()
                         .id_salt("compact_playlist_scroll")
                         .auto_shrink([false, false])
+                        .scroll_source(
+                            egui::scroll_area::ScrollSource::SCROLL_BAR
+                                | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
+                        )
                         .show(ui, |ui| {
                             ui.style_mut().spacing.item_spacing.y = 1.5;
                             if tracks.is_empty() {
@@ -8301,6 +8485,9 @@ impl TxPlayerApp {
                                 });
                             } else {
                                 let row_w = ui.available_width();
+                                let mut drop_line_info: Option<(f32, f32, f32)> = None;
+                                let mut first_vis_row: Option<(usize, Rect)> = None;
+                                let mut last_vis_row: Option<(usize, Rect)> = None;
                                 for (row_idx, tr) in tracks.iter().enumerate() {
                                     let is_current = if self.view == View::Queue {
                                         self.current_index == Some(row_idx)
@@ -8319,6 +8506,10 @@ impl TxPlayerApp {
                                     if !ui.is_rect_visible(row_rect) {
                                         continue;
                                     }
+                                    if first_vis_row.is_none() {
+                                        first_vis_row = Some((row_idx, row_rect));
+                                    }
+                                    last_vis_row = Some((row_idx, row_rect));
                                     if self.scroll_to_playing && is_current {
                                         ui.scroll_to_rect(row_rect, Some(Align::Center));
                                         self.scroll_to_playing = false;
@@ -8362,19 +8553,18 @@ impl TxPlayerApp {
                                         });
                                     }
 
-                                    let mut drop_line_y: Option<f32> = None;
                                     if reorderable
                                         && let Some(ref mut drag) = self.drag_tracks
                                         && drag.source_view == self.view
-                                        && let Some(pt) = ui.ctx().pointer_hover_pos()
+                                        && let Some(pt) = drag_pt
                                         && row_rect.contains(pt)
                                     {
                                         if pt.y < row_rect.center().y {
                                             drag.insert_before = Some(row_idx);
-                                            drop_line_y = Some(row_rect.top());
+                                            drop_line_info = Some((row_rect.left() + 4.0, row_rect.right() - 4.0, row_rect.top()));
                                         } else {
                                             drag.insert_before = Some(row_idx + 1);
-                                            drop_line_y = Some(row_rect.bottom());
+                                            drop_line_info = Some((row_rect.left() + 4.0, row_rect.right() - 4.0, row_rect.bottom()));
                                         }
                                     }
 
@@ -8397,16 +8587,6 @@ impl TxPlayerApp {
                                         Color32::TRANSPARENT
                                     };
                                     ui.painter().rect_filled(row_rect, 4.0, bg);
-                                    if let Some(ly) = drop_line_y {
-                                        let x0 = row_rect.left() + 4.0;
-                                        let x1 = row_rect.right() - 4.0;
-                                        ui.painter().line_segment(
-                                            [pos2(x0, ly), pos2(x1, ly)],
-                                            Stroke::new(2.0, p.accent),
-                                        );
-                                        ui.painter().circle_filled(pos2(x0, ly), 2.8, p.accent);
-                                        ui.painter().circle_filled(pos2(x1, ly), 2.8, p.accent);
-                                    }
                                     if is_current {
                                         let bar = Rect::from_min_max(
                                             pos2(row_rect.left() + 1.5, row_rect.top() + 5.0),
@@ -8553,6 +8733,34 @@ impl TxPlayerApp {
                                         }
                                     });
                                 }
+
+                                // Snap to top/bottom when dragging into empty space inside the compact list viewport
+                                if drop_line_info.is_none()
+                                    && reorderable
+                                    && let Some(ref mut drag) = self.drag_tracks
+                                    && drag.source_view == self.view
+                                    && let Some(pt) = drag_pt
+                                {
+                                    let clip = ui.clip_rect();
+                                    if clip.contains(pt) {
+                                        if let Some((fidx, frect)) = first_vis_row
+                                            && pt.y < frect.top()
+                                        {
+                                            drag.insert_before = Some(fidx);
+                                            drop_line_info = Some((frect.left() + 4.0, frect.right() - 4.0, frect.top()));
+                                        } else if let Some((lidx, lrect)) = last_vis_row
+                                            && pt.y >= lrect.bottom()
+                                        {
+                                            drag.insert_before = Some((lidx + 1).min(tracks.len()));
+                                            drop_line_info = Some((lrect.left() + 4.0, lrect.right() - 4.0, lrect.bottom()));
+                                        }
+                                    }
+                                }
+                                if let Some((x0, x1, raw_y)) = drop_line_info {
+                                    let clip = ui.clip_rect();
+                                    let ly = raw_y.clamp(clip.top() + 2.5, clip.bottom() - 2.5);
+                                    paint_drop_insertion_line(ui.painter(), x0, x1, ly, &p);
+                                }
                             }
                         });
 
@@ -8582,7 +8790,9 @@ impl TxPlayerApp {
         let primary_down = ctx.input(|i| i.pointer.primary_down());
 
         if primary_down {
-            if let Some(pt) = ctx.pointer_hover_pos() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            ctx.request_repaint();
+            if let Some(pt) = drag_pointer_pos(ctx) {
                 let hint = if let Some(pl_id) = drag.hover_playlist_id {
                     let pl_name = self
                         .store
@@ -8595,7 +8805,7 @@ impl TxPlayerApp {
                     "Add to Play Queue".to_string()
                 } else if drag.insert_before.is_some() {
                     "Drop to reorder".to_string()
-                } else if matches!(self.view, View::Queue | View::Playlist(_)) {
+                } else if self.is_current_view_reorderable() {
                     "Drag between rows or onto a playlist".to_string()
                 } else {
                     "Drop onto a playlist or Play Queue".to_string()
@@ -8639,12 +8849,6 @@ impl TxPlayerApp {
                             });
                     });
             }
-            // Reset per-frame drop targets before next frame's hit tests
-            if let Some(ref mut d) = self.drag_tracks {
-                d.insert_before = None;
-                d.hover_playlist_id = None;
-                d.hover_queue = false;
-            }
         } else {
             // Pointer released: commit drop action!
             self.drag_tracks = None;
@@ -8676,7 +8880,7 @@ impl TxPlayerApp {
                 }
             } else if let Some(dest) = drag.insert_before
                 && drag.source_view == self.view
-                && self.search.trim().is_empty()
+                && self.is_current_view_reorderable()
             {
                 match self.view {
                     View::Queue => {
@@ -8696,6 +8900,9 @@ impl TxPlayerApp {
                         } else {
                             self.undo_stack.pop();
                         }
+                    }
+                    View::Library => {
+                        self.reorder_library_indices(&drag.moving_indices, dest);
                     }
                     _ => {}
                 }
@@ -9111,6 +9318,16 @@ impl eframe::App for TxPlayerApp {
 
         self.process_background_events(&context);
         self.process_input(&context);
+
+        // Reset per-frame drop targets ONLY while the primary button is held down;
+        // on the release frame we keep the last valid target so the drop commits cleanly!
+        if context.input(|i| i.pointer.primary_down())
+            && let Some(ref mut d) = self.drag_tracks
+        {
+            d.insert_before = None;
+            d.hover_playlist_id = None;
+            d.hover_queue = false;
+        }
         let paused = self.demo_piano_lock || (self.current_id().is_some() && !self.playing);
         if self.show_concert_visualizer {
             self.visualizer
@@ -9302,9 +9519,38 @@ impl Drop for TxPlayerApp {
             compact_show_playlist: self.compact_show_playlist,
             close_to_tray: self.close_to_tray,
             auto_watch_folders: self.auto_watch_folders,
+            sort_mode: self.sort,
+            sort_ascending: self.sort_ascending,
         }
         .save();
     }
+}
+
+/// Reliable pointer position during active drags (`pointer_hover_pos()` returns `None` while dragging in egui 0.37).
+fn drag_pointer_pos(ctx: &egui::Context) -> Option<Pos2> {
+    ctx.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+}
+
+/// High-contrast drop insertion line with subtle accent glow and crisp circular end-caps.
+fn paint_drop_insertion_line(painter: &egui::Painter, x0: f32, x1: f32, y: f32, p: &Palette) {
+    if x1 <= x0 + 4.0 {
+        return;
+    }
+    // Soft glow strip behind the insertion line
+    painter.line_segment(
+        [pos2(x0, y), pos2(x1, y)],
+        Stroke::new(6.0, p.accent.gamma_multiply(0.28)),
+    );
+    // Razor-sharp bright primary line
+    painter.line_segment(
+        [pos2(x0, y), pos2(x1, y)],
+        Stroke::new(2.5, p.accent_bright),
+    );
+    // End-cap dots with bright centers
+    painter.circle_filled(pos2(x0, y), 4.0, p.accent_bright);
+    painter.circle_filled(pos2(x0, y), 1.6, p.panel);
+    painter.circle_filled(pos2(x1, y), 4.0, p.accent_bright);
+    painter.circle_filled(pos2(x1, y), 1.6, p.panel);
 }
 
 /// Platform-accurate window drag trigger:

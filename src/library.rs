@@ -147,6 +147,43 @@ impl Library {
         self.rebuild_index();
     }
 
+    /// Reorders `self.tracks` to match `ordered_ids` (any unlisted tracks stay at the end).
+    pub fn set_tracks_order_by_ids(&mut self, ordered_ids: &[u64]) {
+        if ordered_ids.is_empty() || self.tracks.len() < 2 {
+            return;
+        }
+        let mut by_id: HashMap<u64, Track> = self
+            .tracks
+            .drain(..)
+            .map(|t| (t.id, t))
+            .collect();
+        let mut reordered = Vec::with_capacity(by_id.len());
+        for &id in ordered_ids {
+            if let Some(t) = by_id.remove(&id) {
+                reordered.push(t);
+            }
+        }
+        if !by_id.is_empty() {
+            let mut rest: Vec<Track> = by_id.into_values().collect();
+            rest.sort_by_key(|t| t.id);
+            reordered.extend(rest);
+        }
+        self.tracks = reordered;
+        self.rebuild_index();
+    }
+
+    /// Reorders a single track or multi-selected block of indices inside `self.tracks`.
+    /// Returns the new contiguous range `(start, len)` if order actually changed.
+    pub fn reorder_tracks_indices(
+        &mut self,
+        moving_indices: &[usize],
+        insert_before: usize,
+    ) -> Option<(usize, usize)> {
+        let res = reorder_vec_indices(&mut self.tracks, moving_indices, insert_before)?;
+        self.rebuild_index();
+        Some(res)
+    }
+
     pub fn remove_tracks(&mut self, ids: &[u64]) -> Vec<Track> {
         if ids.is_empty() {
             return Vec::new();
@@ -846,5 +883,30 @@ mod tests {
         // Reverse
         assert!(lib.reverse_playlist(dup_id));
         assert_eq!(lib.playlist(dup_id).unwrap().track_ids, vec![5, 1, 2, 4, 3]);
+    }
+
+    #[test]
+    fn library_drag_reorder_keeps_index_consistent() {
+        let mut store = LibraryStore::default();
+        let lib = store.active_mut();
+        for id in 1..=5u64 {
+            lib.upsert(sample_track(id, &format!("/m/{id}.flac"), &format!("Song {id}")));
+        }
+
+        // Materialize an explicit order first
+        lib.set_tracks_order_by_ids(&[5, 4, 3, 2, 1]);
+        let ids: Vec<u64> = lib.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![5, 4, 3, 2, 1]);
+        assert_eq!(lib.get_by_id(5).unwrap().title, "Song 5");
+        assert_eq!(lib.get_by_id(1).unwrap().title, "Song 1");
+
+        // Drag index 0 (Song 5) before index 4 -> [4, 3, 2, 5, 1]
+        assert_eq!(lib.reorder_tracks_indices(&[0], 4), Some((3, 1)));
+        let ids: Vec<u64> = lib.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![4, 3, 2, 5, 1]);
+        // O(1) index stays accurate after reorder
+        for id in 1..=5u64 {
+            assert_eq!(lib.get_by_id(id).unwrap().id, id);
+        }
     }
 }
