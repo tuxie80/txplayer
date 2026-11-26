@@ -6,13 +6,7 @@
 
 **Fast, 100% free native Rust music player, 88-key Piano &amp; Grand Staff visualizer, and offline master music library.**
 
-[![Release](https://img.shields.io/badge/release-v1.12.0-2dd4bf?style=for-the-badge&logo=github)](https://github.com/tuxie80/txplayer/releases/latest)
-[![Website](https://img.shields.io/badge/website-tuxie.eu%2Ftxplayer-2dd4bf?style=for-the-badge)](https://tuxie.eu/txplayer)
-[![Made with Gemini 4 Neon](https://img.shields.io/badge/Made%20with-Gemini%204%20Neon-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://deepmind.google)
-[![Rust](https://img.shields.io/badge/Rust-Edition%202024-dea584?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
-[![Platforms](https://img.shields.io/badge/macOS%20.dmg%20%7C%20Windows%20.exe%20%7C%20Linux%20.deb-1a2731?style=for-the-badge)](#download)
-[![Audio](https://img.shields.io/badge/Bit--Perfect%20%7C%20DoP%20v1.1%20%7C%2064--bit%20DSP-2aa198?style=for-the-badge)](docs/USER_GUIDE.md)
-[![License](https://img.shields.io/badge/license-MIT-0f8c7d?style=for-the-badge)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.12.0-2dd4bf)](https://github.com/tuxie80/txplayer/releases/latest) [![License](https://img.shields.io/badge/license-MIT-0f8c7d)](LICENSE) [![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey)](#download) [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white)](Cargo.toml) [![Audio](https://img.shields.io/badge/audio-Bit--Perfect%20%C2%B7%20DoP%20%C2%B7%2064--bit%20DSP-2aa198)](docs/USER_GUIDE.md) [![Built with Gemini 4 Neon](https://img.shields.io/badge/Built%20with-Gemini%204%20Neon-4285F4?logo=googlegemini&logoColor=white)](https://gemini.google.com/)
 
 **[Website &amp; Tour (tuxie.eu/txplayer)](https://tuxie.eu/txplayer)** · **[Download Installers](https://github.com/tuxie80/txplayer/releases/latest)** · **[5-Min Quick Start](docs/QUICK_START.md)** · **[Full User Guide](docs/USER_GUIDE.md)**
 
