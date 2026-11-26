@@ -2,6 +2,7 @@
 
 mod analyzer;
 mod app;
+mod archive;
 mod audio;
 mod cue;
 mod dsd;

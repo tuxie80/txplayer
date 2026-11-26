@@ -25,7 +25,7 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
   - **Embedded FLAC CUESHEETs** (both Vorbis `CUESHEET` tag & binary FLAC `METADATA_BLOCK_CUESHEET`) — auto-expands single-file FLAC CD rips with no external `.cue`.
   - **Raw CD `.bin + .cue`** 44.1 kHz / 16-bit PCM image playback (`BINARY` little-endian & `MOTOROLA` big-endian).
   - `REM DISCNUMBER`, `REM COMPOSER`, case-insensitive filename fallback, and **Play-from-RAM for CUE tracks**.
-- [ ] **Additional Archive Codecs:** WavPack (`.wv`), Monkey's Audio (`.ape`), Opus (`.opus`), and SACD `.iso` container inspection.
+- [x] **Additional Archive Codecs:** WavPack (`.wv`), Monkey's Audio (`.ape`), Opus (`.opus`) pure-Rust container/APEv2/OpusTags probers + transparent lossless PCM playback & DR/LUFS analysis, and Scarlet Book SACD `.iso` container inspector.
 
 ---
 
@@ -83,3 +83,11 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
 - [x] **Classical `Works / Opus` & `Years` Database Browsers:** Dedicated browse modes (`Tracks | Albums | Artists | Composers | Works | Genres | Labels | Years | Folders`) for deep classical & archival exploration.
 - [x] **Audiophile Power-Search Query Syntax & Inline `#Tag` Entry:** Instant live search tokens (`composer:beethoven`, `dr>=12`, `rate>=96`, `bits>=24`, `codec:dsd`, `label:dg`, `work:27`, `rating>=4`, `#reference`) + inline `+ #tag` entry right inside Track Info.
 - [x] **Pure-Rust SACD `.iso` Master TOC Prober:** Parses Scarlet Book `SACDMTOC` (sector 510) disc metadata & Stereo/Multichannel area flags with unit test coverage.
+
+---
+
+## Wave 8 — Archive Codecs, Album Liner Notes & Command Palette Mastery (`v1.7.0` Completed)
+- [x] **Extended Archive Codecs (`.wv` WavPack, `.ape` Monkey's Audio, `.opus` Opus):** Pure-Rust container headers (`wvpk`, `MAC `, `OpusHead`/`OpusTags`), full APEv2 & VorbisComment classical tag/cover/ReplayGain extraction, plus seamless lossless streaming playback, seeking, Play-from-RAM, and DR/LUFS/TrueHz analysis.
+- [x] **Persistent Album Collector Liner Notes & DB Average DR Badge:** Write & save permanent pressing/edition/listening notes on any album right inside the Album Hero header, paired with an instant persisted **`DR`** badge.
+- [x] **SACD `.iso` Disc Inspector UI:** 1-click `Inspect SACD .iso…` inside Library Database & Insights probing Scarlet Book Master TOC metadata.
+- [x] **Supercharged `Cmd/Ctrl+K` Command Palette:** Instant keyboard jump to any Collection, Smart View, Library Insights, Duplicate Auditor, Sleep Timer, Bookmark drop, or Current Album TrueHz/ReplayGain scan.

@@ -4756,6 +4756,7 @@ pub enum LibraryInsightsAction {
     BackupJson,
     RestoreJson,
     OpenDbHealth,
+    InspectSacdIso,
     OpenDbFolder,
 }
 
@@ -5038,6 +5039,18 @@ pub fn show_library_insights_modal(
                 .clicked()
                 {
                     action = Some(LibraryInsightsAction::OpenDbHealth);
+                }
+                if pill_button(
+                    ui,
+                    "Inspect SACD .iso…",
+                    Some(Icon::Info),
+                    PillStyle::Secondary,
+                    palette,
+                )
+                .on_hover_text("Inspect Scarlet Book Master TOC metadata inside a SACD .iso disc image")
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::InspectSacdIso);
                 }
                 if pill_button(
                     ui,
@@ -5855,6 +5868,8 @@ pub fn show_signal_path_popover(
 pub enum PaletteCommand {
     PlayTrack(u64),
     OpenPlaylist(u64),
+    OpenCollection(u64),
+    OpenSavedView(u64),
     SwitchLibrary(u64),
     SetTheme(ThemeId),
     SetVisualizer(VisualizerMode),
@@ -5872,6 +5887,14 @@ pub enum PaletteCommand {
     EditCurrentTags,
     OpenSettings(SettingsTab),
     AddFolder,
+    OpenLibraryInsights,
+    OpenDbHealth,
+    NewSmartView,
+    NewCollection,
+    DropBookmark,
+    SetSleepTimer(SleepTimerPreset),
+    VerifyCurrentAlbumAudit,
+    ScanCurrentAlbumReplayGain,
 }
 
 pub struct PaletteEntry {

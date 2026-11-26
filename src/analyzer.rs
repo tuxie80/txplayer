@@ -57,6 +57,35 @@ pub fn analyze_file(
     cue_start: Option<f64>,
     cue_end: Option<f64>,
 ) -> Result<AudioAnalysis> {
+    if crate::archive::is_archive_codec_path(path) {
+        let mut dec = crate::archive::ArchivePcmDecoder::open(path)?;
+        let sr = dec.info.sample_rate;
+        let ch = dec.info.channels.max(1) as usize;
+        let bit_depth = dec.info.bit_depth;
+        let start_secs = cue_start.unwrap_or(0.0).max(0.0);
+        if start_secs > 0.05 {
+            let _ = dec.seek(start_secs);
+        }
+        let max_frames = cue_end
+            .map(|e| ((e - start_secs).max(0.0) * sr as f64).round() as u64)
+            .unwrap_or(u64::MAX);
+        let mut acc = StreamAnalyzer::new(sr, ch);
+        let mut pcm = Vec::with_capacity(4096 * ch);
+        let mut total_frames = 0u64;
+        while total_frames < max_frames {
+            let want = 4096.min((max_frames - total_frames) as usize);
+            let n = dec.read_pcm_frames(want, &mut pcm)?;
+            if n == 0 {
+                break;
+            }
+            acc.push_interleaved(&pcm, ch);
+            total_frames += n as u64;
+        }
+        if total_frames == 0 {
+            return Err(anyhow!("Archive track contained no decodable audio frames"));
+        }
+        return Ok(acc.finish(bit_depth));
+    }
     if crate::dsd::is_dsd_path(path) {
         let mut dec = crate::dsd::DsdPcmDecoder::open(path)?;
         let sr = dec.info.pcm_sample_rate;

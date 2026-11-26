@@ -23,6 +23,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
+use crate::archive::{ArchivePcmDecoder, is_archive_codec_path};
 use crate::dsd::{DsdDopReader, DsdPcmDecoder, RawCdBinDecoder, is_dsd_path, is_raw_cd_bin};
 use crate::dsp::{RealtimeDsp, SharedDspParams};
 use crate::exclusive::ExclusiveDeviceGuard;
@@ -484,7 +485,7 @@ pub fn default_output_device_name() -> Option<String> {
 /// Fast background acoustic envelope extraction (normalised 0.0..1.0 bins) for waveform seekbar.
 pub fn compute_waveform(path: &Path, bins: usize) -> Option<Vec<f32>> {
     let bins = bins.max(32);
-    if is_dsd_path(path) || is_raw_cd_bin(path) {
+    if is_dsd_path(path) || is_raw_cd_bin(path) || is_archive_codec_path(path) {
         let mut dec = DecoderState::open(path).ok()?;
         let mut raw_peaks: Vec<f32> = Vec::with_capacity(bins * 4);
         let mut decode_buf = None;
@@ -823,6 +824,7 @@ enum DecoderBackend {
     },
     Dsd(DsdPcmDecoder),
     RawCdBin(RawCdBinDecoder),
+    Archive(ArchivePcmDecoder),
 }
 
 enum DecodeChunk {
@@ -848,6 +850,24 @@ struct DecoderState {
 
 impl DecoderState {
     fn open(path: &Path) -> Result<Self> {
+        if is_archive_codec_path(path) {
+            let dec = ArchivePcmDecoder::open(path)?;
+            let sr = dec.info.sample_rate;
+            let ch = dec.info.channels.max(1) as usize;
+            let bd = dec.info.bit_depth;
+            let dur = dec.info.duration_secs;
+            let kbps = dec.info.nominal_bitrate;
+            return Ok(Self {
+                backend: DecoderBackend::Archive(dec),
+                source_sample_rate: sr,
+                source_channels: ch,
+                bit_depth: bd,
+                duration: dur,
+                time_base: Some(TimeBase::new(1, sr)),
+                is_variable_bitrate: true,
+                nominal_kbps: kbps,
+            });
+        }
         if is_dsd_path(path) {
             let dec = DsdPcmDecoder::open(path)?;
             let sr = dec.info.pcm_sample_rate;
@@ -971,6 +991,7 @@ impl DecoderState {
             }
             DecoderBackend::Dsd(dec) => dec.seek(clamped),
             DecoderBackend::RawCdBin(dec) => dec.seek(clamped),
+            DecoderBackend::Archive(dec) => dec.seek(clamped),
         }
     }
 
@@ -1004,6 +1025,19 @@ impl DecoderState {
                     Ok(DecodeChunk::Frames {
                         channels: 2,
                         packet_bytes: frames * 4,
+                        packet_dur: frames as u64,
+                    })
+                }
+            }
+            DecoderBackend::Archive(dec) => {
+                let frames = dec.read_pcm_frames(2048, pcm_out)?;
+                if frames == 0 {
+                    Ok(DecodeChunk::Eof)
+                } else {
+                    let ch = dec.info.channels.max(1) as usize;
+                    Ok(DecodeChunk::Frames {
+                        channels: ch,
+                        packet_bytes: frames * ch * 2,
                         packet_dur: frames as u64,
                     })
                 }

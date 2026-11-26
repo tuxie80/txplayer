@@ -326,6 +326,8 @@ pub struct Library {
     pub saved_views: Vec<SavedView>,
     #[serde(default)]
     pub play_history: Vec<PlayHistoryEntry>,
+    #[serde(default)]
+    pub album_notes: HashMap<String, String>,
     /// O(1) lookup index (`track.id -> index in tracks`); rebuilt automatically on load/mutate.
     #[serde(skip)]
     id_index: HashMap<u64, usize>,
@@ -351,6 +353,7 @@ impl Default for Library {
             collections: Vec::new(),
             saved_views: Vec::new(),
             play_history: Vec::new(),
+            album_notes: HashMap::new(),
             id_index: HashMap::new(),
         }
     }
@@ -878,6 +881,25 @@ impl Library {
         let before = t.custom_tags.len();
         t.custom_tags.retain(|x| !x.eq_ignore_ascii_case(tag));
         t.custom_tags.len() != before
+    }
+
+    pub fn album_note_key(album: &str, artist: &str) -> String {
+        format!("{}||{}", album.trim().to_lowercase(), artist.trim().to_lowercase())
+    }
+
+    pub fn album_note(&self, album: &str, artist: &str) -> Option<&str> {
+        let k = Self::album_note_key(album, artist);
+        self.album_notes.get(&k).map(|s| s.as_str())
+    }
+
+    pub fn set_album_note(&mut self, album: &str, artist: &str, note: String) {
+        let k = Self::album_note_key(album, artist);
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            self.album_notes.remove(&k);
+        } else {
+            self.album_notes.insert(k, trimmed.to_string());
+        }
     }
 
     /// Detects duplicate tracks by normalized `(title, artist, album)` and ranks copies by audio fidelity

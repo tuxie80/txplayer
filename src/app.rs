@@ -404,6 +404,7 @@ enum DialogEvent {
     ExportCsv(Option<PathBuf>),
     BackupDatabaseJson(Option<PathBuf>),
     RestoreDatabaseJson(Option<PathBuf>),
+    InspectSacdIso(Option<PathBuf>),
 }
 
 #[derive(Clone)]
@@ -704,6 +705,7 @@ pub struct TxPlayerApp {
     smart_view_draft: Option<SmartViewDraft>,
     show_library_insights: bool,
     show_db_health: bool,
+    editing_album_note: Option<(String, String, String)>,
     rename_playlist_modal: Option<(u64, String)>,
     inspect_track_id: Option<u64>,
     inspect_file_size: Option<(u64, Option<u64>)>,
@@ -959,6 +961,7 @@ impl TxPlayerApp {
             smart_view_draft: None,
             show_library_insights: false,
             show_db_health: false,
+            editing_album_note: None,
             rename_playlist_modal: None,
             inspect_track_id: None,
             inspect_file_size: None,
@@ -3250,6 +3253,47 @@ impl TxPlayerApp {
                                 ));
                             }
                             Err(err) => self.set_status(format!("Restore failed: {err}")),
+                        }
+                    }
+                }
+                DialogEvent::InspectSacdIso(maybe_path) => {
+                    if let Some(src) = maybe_path {
+                        match crate::dsd::probe_sacd_iso(&src) {
+                            Ok(info) => {
+                                let areas = match (info.has_stereo_area, info.has_multichannel_area) {
+                                    (true, true) => "Stereo + Multichannel",
+                                    (true, false) => "Stereo",
+                                    (false, true) => "Multichannel",
+                                    (false, false) => "Unknown",
+                                };
+                                let title = if info.album_title.is_empty() {
+                                    src.file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("SACD ISO")
+                                        .to_string()
+                                } else {
+                                    info.album_title
+                                };
+                                let artist = if info.album_artist.is_empty() {
+                                    "Unknown Artist".into()
+                                } else {
+                                    info.album_artist
+                                };
+                                let yr = if info.disc_year > 0 {
+                                    format!(" ({})", info.disc_year)
+                                } else {
+                                    String::new()
+                                };
+                                let pub_s = if info.publisher.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {}", info.publisher)
+                                };
+                                self.set_status(format!(
+                                    "SACD ISO: \"{title}\" — {artist}{yr}{pub_s} [{areas}]"
+                                ));
+                            }
+                            Err(err) => self.set_status(format!("SACD ISO probe failed: {err}")),
                         }
                     }
                 }
@@ -7472,6 +7516,22 @@ impl TxPlayerApp {
             set.len()
         };
         let album_rg = tracks.iter().find_map(|t| t.rg_album_gain_db);
+        let album_dr: Option<f32> = {
+            let mut sum = 0.0_f32;
+            let mut cnt = 0usize;
+            for t in tracks {
+                if let Some(d) = t.dr_score {
+                    sum += d as f32;
+                    cnt += 1;
+                }
+            }
+            (cnt > 0).then(|| sum / cnt as f32)
+        };
+        let existing_note = self
+            .store
+            .active()
+            .album_note(&first.album, &first.artist)
+            .map(str::to_string);
         let year = tracks.iter().find_map(|t| t.year.as_deref()).unwrap_or("");
         let genre = tracks.iter().find_map(|t| t.genre.as_deref()).unwrap_or("");
         let (pdfs, images) = first
@@ -7485,6 +7545,8 @@ impl TxPlayerApp {
         let mut act_rg = false;
         let mut act_gallery = false;
         let mut act_back = false;
+        let mut act_toggle_note = false;
+        let mut save_note: Option<String> = None;
 
         Frame::new()
             .fill(p.surface)
@@ -7531,6 +7593,29 @@ impl TxPlayerApp {
                                                 .size(9.0)
                                                 .monospace()
                                                 .color(p.muted),
+                                        );
+                                    });
+                            }
+                            if let Some(dr) = album_dr {
+                                let dr_col = if dr >= 11.0 {
+                                    p.hires_gold
+                                } else if dr >= 8.0 {
+                                    p.accent_bright
+                                } else {
+                                    p.danger
+                                };
+                                Frame::new()
+                                    .fill(p.hires_bg)
+                                    .stroke(Stroke::new(0.8, dr_col.gamma_multiply(0.55)))
+                                    .corner_radius(4.0)
+                                    .inner_margin(Margin::symmetric(6, 1))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(format!("DR{:.0}", dr.round()))
+                                                .size(9.0)
+                                                .monospace()
+                                                .strong()
+                                                .color(dr_col),
                                         );
                                     });
                             }
@@ -7604,15 +7689,84 @@ impl TxPlayerApp {
                             {
                                 act_gallery = true;
                             }
+                            if pill_button(
+                                ui,
+                                if existing_note.is_some() {
+                                    "Edit Notes"
+                                } else {
+                                    "+ Liner Notes"
+                                },
+                                None,
+                                PillStyle::Secondary,
+                                &p,
+                            )
+                            .clicked()
+                            {
+                                act_toggle_note = true;
+                            }
                             if pill_button(ui, "← All Albums", None, PillStyle::Secondary, &p)
                                 .clicked()
                             {
                                 act_back = true;
                             }
                         });
+                        // Album Collector Liner Notes (read-only display or inline editor)
+                        let editing_this = self
+                            .editing_album_note
+                            .as_ref()
+                            .is_some_and(|(a, ar, _)| a == &first.album && ar == &first.artist);
+                        if editing_this
+                            && let Some((_, _, ref mut draft)) = self.editing_album_note
+                        {
+                            ui.add_space(5.0);
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(draft)
+                                        .hint_text("Collector liner notes, pressing, edition, listening impressions…")
+                                        .desired_width((ui.available_width() - 120.0).max(180.0)),
+                                );
+                                if pill_button(ui, "Save", None, PillStyle::Accent, &p).clicked() {
+                                    save_note = Some(draft.clone());
+                                }
+                                if pill_button(ui, "Cancel", None, PillStyle::Secondary, &p).clicked() {
+                                    act_toggle_note = true;
+                                }
+                            });
+                        } else if let Some(ref note) = existing_note {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("Notes: {note}"))
+                                    .size(10.5)
+                                    .italics()
+                                    .color(p.text_secondary),
+                            );
+                        }
                     });
                 });
             });
+
+        if let Some(note) = save_note {
+            self.store
+                .active_mut()
+                .set_album_note(&first.album, &first.artist, note);
+            self.editing_album_note = None;
+            self.store.save();
+            self.set_status("Saved album liner notes to database".into());
+        } else if act_toggle_note {
+            let same = self
+                .editing_album_note
+                .as_ref()
+                .is_some_and(|(a, ar, _)| a == &first.album && ar == &first.artist);
+            if same {
+                self.editing_album_note = None;
+            } else {
+                self.editing_album_note = Some((
+                    first.album.clone(),
+                    first.artist.clone(),
+                    existing_note.unwrap_or_default(),
+                ));
+            }
+        }
 
         let alb_title = format!("{} — {}", first.album, first.artist);
         let ids: Vec<u64> = tracks.iter().map(|t| t.id).collect();
@@ -9181,6 +9335,19 @@ impl TxPlayerApp {
                         self.show_library_insights = false;
                         self.show_db_health = true;
                     }
+                    LibraryInsightsAction::InspectSacdIso => {
+                        if !self.dialog_open {
+                            self.dialog_open = true;
+                            let tx = self.dialog_sender.clone();
+                            thread::spawn(move || {
+                                let path = rfd::FileDialog::new()
+                                    .set_title("Inspect SACD Disc Image (.iso)")
+                                    .add_filter("SACD ISO Image", &["iso"])
+                                    .pick_file();
+                                let _ = tx.send(DialogEvent::InspectSacdIso(path));
+                            });
+                        }
+                    }
                     LibraryInsightsAction::OpenDbFolder => {
                         reveal_in_file_manager(&data_directory());
                     }
@@ -9750,6 +9917,79 @@ impl TxPlayerApp {
             action: PaletteCommand::OpenSettings(SettingsTab::Audio),
         });
         entries.push(PaletteEntry {
+            category: "DATABASE",
+            label: "Open Library Database & Insights Dashboard".into(),
+            subtitle: "Codec/rate breakdown, listening history, CSV export & JSON backup".into(),
+            action: PaletteCommand::OpenLibraryInsights,
+        });
+        entries.push(PaletteEntry {
+            category: "DATABASE",
+            label: "Audit Duplicate Tracks & Missing Files".into(),
+            subtitle: "Keep highest-res masters and clean orphaned entries".into(),
+            action: PaletteCommand::OpenDbHealth,
+        });
+        entries.push(PaletteEntry {
+            category: "DATABASE",
+            label: "New Custom Smart Database View…".into(),
+            subtitle: "Visual rule-based query builder (Composer, DR, Sample Rate, Tags)".into(),
+            action: PaletteCommand::NewSmartView,
+        });
+        entries.push(PaletteEntry {
+            category: "DATABASE",
+            label: "New Curated Collection…".into(),
+            subtitle: "Organize box sets, themes & reference recordings".into(),
+            action: PaletteCommand::NewCollection,
+        });
+        if self.current_id().is_some() {
+            entries.push(PaletteEntry {
+                category: "ACTION",
+                label: "Drop Timestamp Bookmark at Current Position".into(),
+                subtitle: format!("Shortcut: {MOD_SHORT}B"),
+                action: PaletteCommand::DropBookmark,
+            });
+            entries.push(PaletteEntry {
+                category: "AUDIO",
+                label: "Verify Current Album TrueHz / DR Authenticity".into(),
+                subtitle: "Batch ultrasonic & Dynamic Range audit".into(),
+                action: PaletteCommand::VerifyCurrentAlbumAudit,
+            });
+            entries.push(PaletteEntry {
+                category: "AUDIO",
+                label: "Scan Current Album ReplayGain (EBU R128)".into(),
+                subtitle: "Parallel pure-Rust Track + Album loudness scan".into(),
+                action: PaletteCommand::ScanCurrentAlbumReplayGain,
+            });
+        }
+        for (lbl, preset) in [
+            ("Sleep Timer: 15 Minutes (Fade-Out)", SleepTimerPreset::Minutes(15)),
+            ("Sleep Timer: 30 Minutes (Fade-Out)", SleepTimerPreset::Minutes(30)),
+            ("Sleep Timer: 60 Minutes (Fade-Out)", SleepTimerPreset::Minutes(60)),
+            ("Sleep Timer: Cancel / Off", SleepTimerPreset::Off),
+        ] {
+            entries.push(PaletteEntry {
+                category: "SLEEP",
+                label: lbl.into(),
+                subtitle: "Gentle 5-second volume fade-out".into(),
+                action: PaletteCommand::SetSleepTimer(preset),
+            });
+        }
+        for col in &self.store.active().collections {
+            entries.push(PaletteEntry {
+                category: "COLLECT",
+                label: col.name.clone(),
+                subtitle: format!("{} tracks", col.track_ids.len()),
+                action: PaletteCommand::OpenCollection(col.id),
+            });
+        }
+        for sv in &self.store.active().saved_views {
+            entries.push(PaletteEntry {
+                category: "SMART",
+                label: sv.name.clone(),
+                subtitle: format!("{} rule(s)", sv.rules.len()),
+                action: PaletteCommand::OpenSavedView(sv.id),
+            });
+        }
+        entries.push(PaletteEntry {
             category: "ACTION",
             label: "Add Music Directory…".into(),
             subtitle: "Scan a folder into active library".into(),
@@ -9814,6 +10054,16 @@ impl TxPlayerApp {
             }
             PaletteCommand::OpenPlaylist(pl_id) => {
                 self.view = View::Playlist(pl_id);
+                self.folder_filter = None;
+                self.clear_selection();
+            }
+            PaletteCommand::OpenCollection(col_id) => {
+                self.view = View::Collection(col_id);
+                self.folder_filter = None;
+                self.clear_selection();
+            }
+            PaletteCommand::OpenSavedView(sv_id) => {
+                self.view = View::SavedView(sv_id);
                 self.folder_filter = None;
                 self.clear_selection();
             }
@@ -9898,6 +10148,52 @@ impl TxPlayerApp {
                 self.show_settings = true;
             }
             PaletteCommand::AddFolder => self.add_folder(),
+            PaletteCommand::OpenLibraryInsights => self.show_library_insights = true,
+            PaletteCommand::OpenDbHealth => self.show_db_health = true,
+            PaletteCommand::NewSmartView => {
+                self.smart_view_draft = Some(SmartViewDraft::default());
+            }
+            PaletteCommand::NewCollection => {
+                self.new_collection_name.clear();
+                self.new_collection_desc.clear();
+                self.pending_collection_tracks.clear();
+                self.show_new_collection_modal = true;
+            }
+            PaletteCommand::DropBookmark => self.add_bookmark_at_current(),
+            PaletteCommand::SetSleepTimer(preset) => self.set_sleep_timer(preset),
+            PaletteCommand::VerifyCurrentAlbumAudit => {
+                if let Some(cur) = self.current_track().cloned() {
+                    let ids: Vec<u64> = self
+                        .store
+                        .active()
+                        .tracks
+                        .iter()
+                        .filter(|t| t.album == cur.album && t.artist == cur.artist)
+                        .map(|t| t.id)
+                        .collect();
+                    let title = format!("{} — {}", cur.album, cur.artist);
+                    self.start_album_audit(title, if ids.is_empty() { vec![cur.id] } else { ids });
+                }
+            }
+            PaletteCommand::ScanCurrentAlbumReplayGain => {
+                if let Some(cur) = self.current_track().cloned() {
+                    let ids: Vec<u64> = self
+                        .store
+                        .active()
+                        .tracks
+                        .iter()
+                        .filter(|t| t.album == cur.album && t.artist == cur.artist)
+                        .map(|t| t.id)
+                        .collect();
+                    let title = format!("{} — {}", cur.album, cur.artist);
+                    let is_alb = ids.len() > 1;
+                    self.start_replaygain_scan(
+                        title,
+                        if ids.is_empty() { vec![cur.id] } else { ids },
+                        is_alb,
+                    );
+                }
+            }
         }
     }
 
@@ -9905,9 +10201,15 @@ impl TxPlayerApp {
         self.show_settings
             || self.tag_editor.open
             || self.inspect_track_id.is_some()
+            || self.album_audit.is_some()
+            || self.artwork_gallery.is_some()
             || self.show_folders
             || self.show_libraries_modal
             || self.show_new_playlist_modal
+            || self.show_new_collection_modal
+            || self.smart_view_draft.is_some()
+            || self.show_library_insights
+            || self.show_db_health
             || self.rename_playlist_modal.is_some()
             || (self.compact_mode && self.show_lyrics)
             || self.command_palette.open

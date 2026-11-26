@@ -97,7 +97,16 @@ impl Track {
     pub fn is_lossless(&self) -> bool {
         matches!(
             self.codec.as_str(),
-            "FLAC" | "ALAC" | "PCM" | "CD-BE" | "DSD64" | "DSD128" | "DSD256" | "DSD512"
+            "FLAC"
+                | "ALAC"
+                | "PCM"
+                | "CD-BE"
+                | "WavPack"
+                | "APE"
+                | "DSD64"
+                | "DSD128"
+                | "DSD256"
+                | "DSD512"
         )
     }
 
@@ -321,8 +330,8 @@ struct Tags {
 }
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "flac", "dsf", "dff", "m4a", "mp4", "aac", "mp3", "mp2", "mp1", "wav", "wave", "aif", "aiff",
-    "aifc", "caf", "ogg", "oga", "webm", "mka", "mkv",
+    "flac", "dsf", "dff", "wv", "ape", "opus", "m4a", "mp4", "aac", "mp3", "mp2", "mp1", "wav",
+    "wave", "aif", "aiff", "aifc", "caf", "ogg", "oga", "webm", "mka", "mkv",
 ];
 
 pub fn is_supported(path: &Path) -> bool {
@@ -342,6 +351,67 @@ pub fn is_cue_file(path: &Path) -> bool {
 }
 
 pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
+    if crate::archive::is_archive_codec_path(path) {
+        let (info, tags) = crate::archive::probe_archive(path)?;
+        let id = track_id(path);
+        let title = tags.title.unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Unknown title")
+                .replace('_', " ")
+        });
+        let cover_path = tags
+            .artwork
+            .and_then(|(data, media_type)| save_cover(cover_directory, id, &data, &media_type).ok())
+            .or_else(|| find_sidecar_cover(path));
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        return Ok(Track {
+            id,
+            path: path.to_path_buf(),
+            title,
+            artist: tags.artist.unwrap_or_else(|| "Unknown Artist".into()),
+            album: tags.album.unwrap_or_else(|| "Unknown Album".into()),
+            album_artist: tags.album_artist,
+            track_number: tags.track_number,
+            disc_number: tags.disc_number,
+            year: tags.year,
+            genre: tags.genre,
+            duration: info.duration_secs,
+            sample_rate: Some(info.sample_rate),
+            bit_depth: info.bit_depth,
+            channels: Some(info.channels),
+            codec: info.codec.into(),
+            nominal_bitrate: info.nominal_bitrate,
+            cover_path,
+            cue_start: None,
+            cue_end: None,
+            rg_track_gain_db: tags.rg_track_gain_db,
+            rg_track_peak: tags.rg_track_peak,
+            rg_album_gain_db: tags.rg_album_gain_db,
+            rg_album_peak: tags.rg_album_peak,
+            lyrics: None,
+            composer: tags.composer,
+            conductor: tags.conductor,
+            orchestra: tags.orchestra,
+            work: tags.work,
+            label: tags.label,
+            catalog_number: tags.catalog_number,
+            comment: tags.comment,
+            custom_tags: Vec::new(),
+            dr_score: None,
+            integrated_lufs: None,
+            true_peak_dbtp: None,
+            effective_bandwidth_hz: None,
+            authenticity: None,
+            play_count: 0,
+            last_played_at: None,
+            rating: 0,
+            added_at: now_unix,
+        });
+    }
     if crate::dsd::is_dsd_path(path) {
         let (info, tags) = crate::dsd::probe_dsd(path)?;
         let id = track_id(path);
