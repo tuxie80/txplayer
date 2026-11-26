@@ -11,6 +11,7 @@ use eframe::egui::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::analyzer::{AudioAnalysis, analyze_file};
 use crate::audio::{
     AudioEvent, AudioHandle, PlaybackSpec, VisualTap, compute_waveform, list_output_devices,
 };
@@ -28,7 +29,10 @@ use crate::modals::{
 };
 use crate::platform::{FILE_MANAGER_NAME, MOD_SHORT, reveal_in_file_manager};
 use crate::playlist_io::{export_playlist, import_playlist_paths};
-use crate::plugins::{EqPreset, PianoEngineId, PluginConfig, ReplayGainMode, ToolHealth};
+use crate::plugins::{
+    EqPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
+    ToolHealth,
+};
 use crate::theme::{self, Palette, ThemeId};
 use crate::tray::{SystemTrayBridge, TrayCommand};
 use crate::visualizer::{VisualizerMode, VisualizerState};
@@ -261,11 +265,15 @@ enum DialogEvent {
 struct StreamInfo {
     source_rate: u32,
     output_rate: u32,
+    output_format: String,
     channels: u16,
     bit_depth: Option<u32>,
     device_name: String,
     bit_perfect: bool,
     rg_gain_db: Option<f32>,
+    ram_bytes: Option<usize>,
+    oversampling: OversamplingMode,
+    resampler_quality: ResamplerQuality,
 }
 
 /// Deterministic column layout shared identically by table header AND every track row (no checkboxes).
@@ -484,6 +492,13 @@ pub struct TxPlayerApp {
     waveform_rx: crossbeam_channel::Receiver<(u64, Vec<f32>)>,
     waveform_inflight: Option<u64>,
 
+    // On-demand Audio Quality & Hi-Res Authenticity Analyzer cache + worker
+    analysis_cache: HashMap<u64, AudioAnalysis>,
+    analysis_errors: HashMap<u64, String>,
+    analysis_inflight: HashSet<u64>,
+    analyzer_req_tx: crossbeam_channel::Sender<(u64, PathBuf, Option<f64>, Option<f64>)>,
+    analyzer_res_rx: crossbeam_channel::Receiver<(u64, Result<AudioAnalysis, String>)>,
+
     // Async album-keyed cover thumbnail cache (128x128 thumbnails, never blocks UI thread!)
     brand_icon: Option<TextureHandle>,
     artwork_by_path: HashMap<PathBuf, Option<TextureHandle>>,
@@ -543,6 +558,23 @@ impl TxPlayerApp {
         thread::spawn(move || {
             let _ = tool_health_tx.send(crate::tagger::detect_tool_health());
         });
+
+        // Dedicated background Audio Quality & Hi-Res Authenticity Analyzer worker
+        let (analyzer_req_tx, analyzer_req_rx) =
+            crossbeam_channel::unbounded::<(u64, PathBuf, Option<f64>, Option<f64>)>();
+        let (analyzer_res_tx, analyzer_res_rx) =
+            crossbeam_channel::unbounded::<(u64, Result<AudioAnalysis, String>)>();
+        thread::Builder::new()
+            .name("txplayer-analyzer".into())
+            .spawn(move || {
+                while let Ok((tid, path, cue_start, cue_end)) = analyzer_req_rx.recv() {
+                    let res = analyze_file(&path, cue_start, cue_end).map_err(|e| format!("{e:#}"));
+                    if analyzer_res_tx.send((tid, res)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("analyzer worker thread should start");
 
         // Dedicated background artwork thumbnail decoder (128x128 fast resize, zero UI-thread stall)
         let (artwork_req_tx, artwork_req_rx) = crossbeam_channel::unbounded::<PathBuf>();
@@ -690,6 +722,11 @@ impl TxPlayerApp {
             waveform_tx,
             waveform_rx,
             waveform_inflight: None,
+            analysis_cache: HashMap::new(),
+            analysis_errors: HashMap::new(),
+            analysis_inflight: HashSet::new(),
+            analyzer_req_tx,
+            analyzer_res_rx,
             brand_icon,
             artwork_by_path: HashMap::new(),
             artwork_inflight: HashSet::new(),
@@ -2375,27 +2412,49 @@ impl TxPlayerApp {
             context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
+        // Audio Quality & Hi-Res Authenticity analyzer responses
+        while let Ok((tid, res)) = self.analyzer_res_rx.try_recv() {
+            self.analysis_inflight.remove(&tid);
+            match res {
+                Ok(a) => {
+                    self.analysis_errors.remove(&tid);
+                    self.analysis_cache.insert(tid, a);
+                }
+                Err(err) => {
+                    self.analysis_errors.insert(tid, err);
+                }
+            }
+        }
+
         // Audio events
         while let Some(event) = self.audio.try_event() {
             match event {
                 AudioEvent::Started {
                     source_sample_rate,
                     output_sample_rate,
+                    output_format,
                     channels,
                     bit_depth,
                     duration,
                     device_name,
                     bit_perfect,
                     rg_gain_db,
+                    ram_bytes,
+                    oversampling,
+                    resampler_quality,
                 } => {
                     self.stream_info = Some(StreamInfo {
                         source_rate: source_sample_rate,
                         output_rate: output_sample_rate,
+                        output_format,
                         channels,
                         bit_depth,
                         device_name,
                         bit_perfect,
                         rg_gain_db,
+                        ram_bytes,
+                        oversampling,
+                        resampler_quality,
                     });
                     if let Some(duration) = duration {
                         self.duration = duration;
@@ -2421,12 +2480,16 @@ impl TxPlayerApp {
                 AudioEvent::GaplessTransitioned {
                     source_sample_rate,
                     output_sample_rate,
+                    output_format,
                     channels,
                     bit_depth,
                     duration,
                     device_name,
                     bit_perfect,
                     rg_gain_db,
+                    ram_bytes,
+                    oversampling,
+                    resampler_quality,
                 } => {
                     if let Some(next_idx) = self.peek_next_index() {
                         self.current_index = Some(next_idx);
@@ -2437,11 +2500,15 @@ impl TxPlayerApp {
                     self.stream_info = Some(StreamInfo {
                         source_rate: source_sample_rate,
                         output_rate: output_sample_rate,
+                        output_format,
                         channels,
                         bit_depth,
                         device_name,
                         bit_perfect,
                         rg_gain_db,
+                        ram_bytes,
+                        oversampling,
+                        resampler_quality,
                     });
                     if let Some(d) = duration {
                         self.duration = d;
@@ -6486,6 +6553,11 @@ impl TxPlayerApp {
                                 } else {
                                     ""
                                 };
+                                let ram_tag = if info.ram_bytes.is_some() {
+                                    " · RAM"
+                                } else {
+                                    ""
+                                };
                                 let spd_tag = if (self.playback_speed - 1.0).abs() > 0.01 {
                                     format!(" · {:.2}x", self.playback_speed)
                                 } else {
@@ -6500,7 +6572,7 @@ impl TxPlayerApp {
                                     .add(
                                         egui::Label::new(
                                             RichText::new(format!(
-                                                "{bitrate_str}{rate_str}{dsp_tag}{spd_tag}{ab_tag}"
+                                                "{bitrate_str}{rate_str}{ram_tag}{dsp_tag}{spd_tag}{ab_tag}"
                                             ))
                                                 .size(9.5)
                                                 .monospace()
@@ -6582,33 +6654,62 @@ impl TxPlayerApp {
 
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if let Some(new_vol) = custom_volume_bar(ui, 92.0, self.volume, &p) {
-                                self.set_volume(new_vol);
-                            }
-                            let vol_icon = if self.volume <= 0.001 {
-                                Icon::VolumeMuted
-                            } else if self.volume < 0.5 {
-                                Icon::VolumeLow
+                            if self.plugins.dsp.direct_volume_lock {
+                                let (lr, lresp) =
+                                    ui.allocate_exact_size(vec2(114.0, 22.0), Sense::click());
+                                ui.painter().rect_filled(lr, 5.0, p.hires_bg);
+                                ui.painter().rect_stroke(
+                                    lr,
+                                    5.0,
+                                    Stroke::new(1.0, p.hires_border),
+                                    StrokeKind::Inside,
+                                );
+                                ui.painter().text(
+                                    lr.center(),
+                                    Align2::CENTER_CENTER,
+                                    "DAC VOL · 0.0 dB",
+                                    FontId::monospace(9.5),
+                                    p.hires_gold,
+                                );
+                                if lresp
+                                    .on_hover_text(
+                                        "Direct DAC Volume Lock active (0.0 dBFS fixed digital output)\nClick to restore software volume control",
+                                    )
+                                    .clicked()
+                                {
+                                    self.plugins.dsp.direct_volume_lock = false;
+                                    self.audio.update_dsp(&self.plugins.dsp);
+                                    self.set_status("Software volume restored".into());
+                                }
                             } else {
-                                Icon::VolumeHigh
-                            };
-                            if icons::icon_button(
-                                ui,
-                                Vec2::splat(22.0),
-                                vol_icon,
-                                14.0,
-                                if self.volume <= 0.001 {
-                                    p.danger
+                                if let Some(new_vol) = custom_volume_bar(ui, 92.0, self.volume, &p) {
+                                    self.set_volume(new_vol);
+                                }
+                                let vol_icon = if self.volume <= 0.001 {
+                                    Icon::VolumeMuted
+                                } else if self.volume < 0.5 {
+                                    Icon::VolumeLow
                                 } else {
-                                    p.text_secondary
-                                },
-                                p.text,
-                                p.hover,
-                                "Mute / Unmute (M)",
-                            )
-                            .clicked()
-                            {
-                                self.toggle_mute();
+                                    Icon::VolumeHigh
+                                };
+                                if icons::icon_button(
+                                    ui,
+                                    Vec2::splat(22.0),
+                                    vol_icon,
+                                    14.0,
+                                    if self.volume <= 0.001 {
+                                        p.danger
+                                    } else {
+                                        p.text_secondary
+                                    },
+                                    p.text,
+                                    p.hover,
+                                    "Mute / Unmute (M)",
+                                )
+                                .clicked()
+                                {
+                                    self.toggle_mute();
+                                }
                             }
 
                             ui.add_space(2.0);
@@ -6753,10 +6854,16 @@ impl TxPlayerApp {
                         sz
                     }
                 };
+                let analysis = self.analysis_cache.get(&tid).cloned();
+                let analyzing = self.analysis_inflight.contains(&tid);
+                let analysis_error = self.analysis_errors.get(&tid).cloned();
                 let (open_stay, action) = modals::show_track_info_window(
                     context,
                     &track,
                     file_size,
+                    analysis.as_ref(),
+                    analyzing,
+                    analysis_error.as_deref(),
                     &p,
                     |ui, size| self.cover(ui, &track, size),
                     |ui| {
@@ -6794,6 +6901,17 @@ impl TxPlayerApp {
                             self.store.active_mut().set_rating(tid, stars);
                             self.mark_library_dirty();
                             self.store.save();
+                        }
+                        TrackInfoAction::AnalyzeQuality => {
+                            if self.analysis_inflight.insert(tid) {
+                                self.analysis_errors.remove(&tid);
+                                let _ = self.analyzer_req_tx.send((
+                                    tid,
+                                    track.path.clone(),
+                                    track.cue_start,
+                                    track.cue_end,
+                                ));
+                            }
                         }
                     }
                 }
@@ -7114,6 +7232,7 @@ impl TxPlayerApp {
                 codec: cur_codec.as_str(),
                 source_rate: info.source_rate,
                 output_rate: info.output_rate,
+                output_format: info.output_format.as_str(),
                 channels: info.channels,
                 bit_depth: info.bit_depth,
                 bitrate_kbps: self.bitrate,
@@ -7121,6 +7240,11 @@ impl TxPlayerApp {
                 device_name: info.device_name.as_str(),
                 bit_perfect: info.bit_perfect,
                 rg_gain_db: info.rg_gain_db,
+                ram_bytes: info.ram_bytes,
+                oversampling: info.oversampling,
+                resampler_quality: info.resampler_quality,
+                direct_volume_lock: self.plugins.dsp.direct_volume_lock,
+                volume: self.volume,
             });
             let sig_actions = modals::show_signal_path_popover(
                 context,
@@ -7856,6 +7980,11 @@ impl TxPlayerApp {
                     } else {
                         ""
                     };
+                    let ram_tag = if info.ram_bytes.is_some() {
+                        " · RAM"
+                    } else {
+                        ""
+                    };
                     let spd = if (self.playback_speed - 1.0).abs() > 0.01 {
                         format!(" · {:.2}x", self.playback_speed)
                     } else {
@@ -7871,7 +8000,11 @@ impl TxPlayerApp {
                     } else {
                         p.text_secondary
                     };
-                    (dot, format!("{codec}{bitrate_str}{rate_str}{tag}{spd}{ab}"), fg)
+                    (
+                        dot,
+                        format!("{codec}{bitrate_str}{rate_str}{ram_tag}{tag}{spd}{ab}"),
+                        fg,
+                    )
                 } else if let Some(ref t) = track {
                     let dot = if t.is_hires() { p.hires_gold } else { p.faint };
                     (dot, t.quality_full(), if t.is_hires() { p.hires_gold } else { p.muted })
@@ -8082,33 +8215,62 @@ impl TxPlayerApp {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.style_mut().spacing.item_spacing.x = 4.0;
-                        if let Some(new_vol) = custom_volume_bar(ui, 86.0, self.volume, &p) {
-                            self.set_volume(new_vol);
-                        }
-                        let vol_icon = if self.volume <= 0.001 {
-                            Icon::VolumeMuted
-                        } else if self.volume < 0.5 {
-                            Icon::VolumeLow
+                        if self.plugins.dsp.direct_volume_lock {
+                            let (lr, lresp) =
+                                ui.allocate_exact_size(vec2(104.0, 20.0), Sense::click());
+                            ui.painter().rect_filled(lr, 4.0, p.hires_bg);
+                            ui.painter().rect_stroke(
+                                lr,
+                                4.0,
+                                Stroke::new(1.0, p.hires_border),
+                                StrokeKind::Inside,
+                            );
+                            ui.painter().text(
+                                lr.center(),
+                                Align2::CENTER_CENTER,
+                                "DAC 0.0 dB",
+                                FontId::monospace(9.5),
+                                p.hires_gold,
+                            );
+                            if lresp
+                                .on_hover_text(
+                                    "Direct DAC Volume Lock active (0.0 dBFS)\nClick to restore software volume",
+                                )
+                                .clicked()
+                            {
+                                self.plugins.dsp.direct_volume_lock = false;
+                                self.audio.update_dsp(&self.plugins.dsp);
+                                self.set_status("Software volume restored".into());
+                            }
                         } else {
-                            Icon::VolumeHigh
-                        };
-                        if icons::icon_button(
-                            ui,
-                            Vec2::splat(22.0),
-                            vol_icon,
-                            13.5,
-                            if self.volume <= 0.001 {
-                                p.danger
+                            if let Some(new_vol) = custom_volume_bar(ui, 86.0, self.volume, &p) {
+                                self.set_volume(new_vol);
+                            }
+                            let vol_icon = if self.volume <= 0.001 {
+                                Icon::VolumeMuted
+                            } else if self.volume < 0.5 {
+                                Icon::VolumeLow
                             } else {
-                                p.text_secondary
-                            },
-                            p.text,
-                            p.hover,
-                            "Mute (M)",
-                        )
-                        .clicked()
-                        {
-                            self.toggle_mute();
+                                Icon::VolumeHigh
+                            };
+                            if icons::icon_button(
+                                ui,
+                                Vec2::splat(22.0),
+                                vol_icon,
+                                13.5,
+                                if self.volume <= 0.001 {
+                                    p.danger
+                                } else {
+                                    p.text_secondary
+                                },
+                                p.text,
+                                p.hover,
+                                "Mute (M)",
+                            )
+                            .clicked()
+                            {
+                                self.toggle_mute();
+                            }
                         }
 
                         // Compact Output Device icon (matches Classic transport bar; Signal Path lives on telemetry bar above)
@@ -9416,6 +9578,7 @@ impl eframe::App for TxPlayerApp {
             || self.tag_editor.saving
             || self.waveform_inflight.is_some()
             || !self.artwork_inflight.is_empty()
+            || !self.analysis_inflight.is_empty()
         {
             context.request_repaint_after(Duration::from_millis(60));
         }

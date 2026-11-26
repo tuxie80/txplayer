@@ -7,14 +7,15 @@ use eframe::egui::{
     Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
+use crate::analyzer::{AudioAnalysis, HiResVerdict};
 use crate::audio::{default_output_device_name, list_output_devices};
 use crate::icons::{self, Icon};
 use crate::library::cover_directory;
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, reveal_in_file_manager};
 use crate::plugins::{
-    DspConfig, EQ_FREQ_LABELS, EqPreset, PianoEngineId, PluginConfig, ReplayGainMode,
-    TagProviderConfig, ToolHealth,
+    DspConfig, EQ_FREQ_LABELS, EqPreset, OversamplingMode, PianoEngineId, PluginConfig,
+    ReplayGainMode, ResamplerQuality, TagProviderConfig, ToolHealth,
 };
 use crate::tagger::{
     EditableTags, LookupStrategy, TagCandidate, TrackHashes, compute_fast_audio_hash,
@@ -1247,9 +1248,56 @@ pub fn show_settings_window(
                     aligned_checkbox_row(
                         ui,
                         &mut plugins.dsp.bit_perfect_mode,
-                        "Bit-Perfect Direct Output (bypass DSP & ReplayGain, auto-switch native DAC sample rate)",
+                        "Bit-Perfect Direct Output (bypass DSP & ReplayGain, native 1:1 DAC sample rate)",
                         palette,
                     );
+                    let prev_dvl = plugins.dsp.direct_volume_lock;
+                    aligned_checkbox_row(
+                        ui,
+                        &mut plugins.dsp.direct_volume_lock,
+                        "Direct DAC Volume Lock (0.0 dBFS fixed digital output for external hardware amp/DAC)",
+                        palette,
+                    );
+                    let prev_ram = plugins.dsp.ram_playback;
+                    aligned_checkbox_row(
+                        ui,
+                        &mut plugins.dsp.ram_playback,
+                        "Play from RAM (pre-decode full track to memory · zero disk I/O & instant seeking)",
+                        palette,
+                    );
+                    if plugins.dsp.ram_playback {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(22.0);
+                            ui.label(
+                                RichText::new("RAM Buffer Limit:")
+                                    .size(10.5)
+                                    .color(palette.muted),
+                            );
+                            for &(mb, lbl) in &[
+                                (256_u32, "256 MB"),
+                                (512, "512 MB"),
+                                (1024, "1 GB"),
+                                (2048, "2 GB"),
+                            ] {
+                                if pill_button(
+                                    ui,
+                                    lbl,
+                                    None,
+                                    if plugins.dsp.ram_buffer_mb == mb {
+                                        PillStyle::Active
+                                    } else {
+                                        PillStyle::Secondary
+                                    },
+                                    palette,
+                                )
+                                .clicked()
+                                {
+                                    plugins.dsp.ram_buffer_mb = mb;
+                                    actions.dsp_changed = true;
+                                }
+                            }
+                        });
+                    }
                     let prev_gap = plugins.dsp.gapless_enabled;
                     aligned_checkbox_row(
                         ui,
@@ -1257,6 +1305,81 @@ pub fn show_settings_window(
                         "True Gapless Playback (zero-silence transition between tracks & CUE sheets)",
                         palette,
                     );
+                    if plugins.dsp.bit_perfect_mode != prev_bp
+                        || plugins.dsp.direct_volume_lock != prev_dvl
+                        || plugins.dsp.ram_playback != prev_ram
+                        || plugins.dsp.gapless_enabled != prev_gap
+                    {
+                        actions.dsp_changed = true;
+                        actions.rg_changed = true;
+                    }
+
+                    ui.add_space(5.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("Oversampling:")
+                                .size(11.0)
+                                .color(palette.text_secondary),
+                        );
+                        for &mode in OversamplingMode::ALL {
+                            let active = if plugins.dsp.bit_perfect_mode {
+                                mode == OversamplingMode::Native
+                            } else {
+                                plugins.dsp.oversampling == mode
+                            };
+                            if pill_button(
+                                ui,
+                                mode.name(),
+                                None,
+                                if active {
+                                    PillStyle::Active
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                palette,
+                            )
+                            .on_hover_text(mode.description())
+                            .clicked()
+                            {
+                                plugins.dsp.oversampling = mode;
+                                if mode != OversamplingMode::Native {
+                                    plugins.dsp.bit_perfect_mode = false;
+                                }
+                                actions.dsp_changed = true;
+                            }
+                        }
+                    });
+                    if !plugins.dsp.bit_perfect_mode && plugins.dsp.oversampling != OversamplingMode::Native {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new("Sinc Filter:")
+                                    .size(10.5)
+                                    .color(palette.muted),
+                            );
+                            for &q in ResamplerQuality::ALL {
+                                if pill_button(
+                                    ui,
+                                    q.name(),
+                                    None,
+                                    if plugins.dsp.resampler_quality == q {
+                                        PillStyle::Active
+                                    } else {
+                                        PillStyle::Secondary
+                                    },
+                                    palette,
+                                )
+                                .on_hover_text(q.detail())
+                                .clicked()
+                                {
+                                    plugins.dsp.resampler_quality = q;
+                                    actions.dsp_changed = true;
+                                }
+                            }
+                        });
+                    }
+
+                    ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new(format!("Crossfade: {:.1}s", plugins.dsp.crossfade_secs))
@@ -1283,12 +1406,6 @@ pub fn show_settings_window(
                             .color(palette.faint),
                         );
                     });
-                    if plugins.dsp.bit_perfect_mode != prev_bp
-                        || plugins.dsp.gapless_enabled != prev_gap
-                    {
-                        actions.dsp_changed = true;
-                        actions.rg_changed = true;
-                    }
 
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
@@ -2084,10 +2201,14 @@ pub fn show_tag_editor_window(
     save_targets
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show_track_info_window(
     context: &egui::Context,
     track: &Track,
     file_size_bytes: Option<u64>,
+    analysis: Option<&AudioAnalysis>,
+    analyzing: bool,
+    analysis_error: Option<&str>,
     palette: &Palette,
     cover_paint: impl FnOnce(&mut Ui, f32),
     quality_paint: impl FnOnce(&mut Ui),
@@ -2098,10 +2219,10 @@ pub fn show_track_info_window(
     themed_modal_window(
         context,
         "track_inspector_modal",
-        "Track Info",
+        "Track Info & Audio Analysis",
         Icon::Info,
         None,
-        [480.0, 390.0],
+        [516.0, 495.0],
         None,
         false,
         &mut open,
@@ -2245,7 +2366,197 @@ pub fn show_track_info_window(
                     ui.end_row();
                 });
 
-            ui.add_space(12.0);
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            // Audirvāna-style Audio Quality & Hi-Res Authenticity Analyzer Card
+            Frame::new()
+                .fill(palette.background)
+                .stroke(Stroke::new(1.0, palette.border))
+                .corner_radius(7.0)
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("AUDIO QUALITY & HI-RES AUTHENTICITY")
+                                .size(9.5)
+                                .strong()
+                                .color(palette.faint),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if analyzing {
+                                ui.spinner();
+                                ui.label(
+                                    RichText::new("Analyzing…")
+                                        .size(10.0)
+                                        .color(palette.accent),
+                                );
+                            } else if analysis.is_none()
+                                && pill_button(
+                                    ui,
+                                    "Analyze Track",
+                                    Some(Icon::Visualizer),
+                                    PillStyle::Active,
+                                    palette,
+                                )
+                                .on_hover_text(
+                                    "Measure Dynamic Range (DR), EBU R128 LUFS, 4x True Peak, and ultrasonic Hi-Res spectrum",
+                                )
+                                .clicked()
+                            {
+                                action = Some(TrackInfoAction::AnalyzeQuality);
+                            }
+                        });
+                    });
+
+                    if let Some(err) = analysis_error {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!("Analysis error: {err}"))
+                                .size(10.5)
+                                .color(palette.danger),
+                        );
+                    } else if let Some(a) = analysis {
+                        ui.add_space(6.0);
+                        // Primary Audiophile Metrics Strip: DR Score | LUFS | True Peak | Clips | Authenticity
+                        ui.horizontal_wrapped(|ui| {
+                            let (dr_col, dr_bg) = if a.dr_score >= 12 {
+                                (palette.accent_bright, palette.accent_subtle)
+                            } else if a.dr_score >= 8 {
+                                (palette.hires_gold, palette.hires_bg)
+                            } else {
+                                (palette.danger, palette.danger_bg)
+                            };
+                            Frame::new()
+                                .fill(dr_bg)
+                                .stroke(Stroke::new(1.0, dr_col.gamma_multiply(0.6)))
+                                .corner_radius(5.0)
+                                .inner_margin(Margin::symmetric(8, 3))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!("DR{}", a.dr_score))
+                                            .size(12.0)
+                                            .strong()
+                                            .monospace()
+                                            .color(dr_col),
+                                    )
+                                    .on_hover_text(format!(
+                                        "Dynamic Range: {:.1} dB (TT/Pleasurize top-20% RMS crest factor)",
+                                        a.dr_precise
+                                    ));
+                                });
+
+                            let mut metric_chip = |label: &str, val: String, col: Color32| {
+                                Frame::new()
+                                    .fill(palette.surface)
+                                    .stroke(Stroke::new(1.0, palette.border))
+                                    .corner_radius(5.0)
+                                    .inner_margin(Margin::symmetric(7, 3))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.style_mut().spacing.item_spacing.x = 4.0;
+                                            ui.label(
+                                                RichText::new(label).size(9.5).color(palette.faint),
+                                            );
+                                            ui.label(
+                                                RichText::new(val)
+                                                    .size(10.5)
+                                                    .monospace()
+                                                    .strong()
+                                                    .color(col),
+                                            );
+                                        });
+                                    });
+                            };
+
+                            metric_chip(
+                                "LUFS",
+                                format!("{:+.1}", a.integrated_lufs),
+                                palette.text,
+                            );
+                            metric_chip(
+                                "Peak",
+                                format!("{:+.2} dB", a.sample_peak_db),
+                                palette.text_secondary,
+                            );
+                            metric_chip(
+                                "True Peak",
+                                format!("{:+.2} dBTP", a.true_peak_dbtp),
+                                if a.true_peak_dbtp > -0.1 {
+                                    palette.danger
+                                } else {
+                                    palette.text_secondary
+                                },
+                            );
+                            metric_chip(
+                                "BW",
+                                format!("{:.1} kHz", a.effective_bandwidth_hz / 1000.0),
+                                palette.accent_bright,
+                            );
+                            metric_chip(
+                                "Clips",
+                                format!("{}", a.clipped_samples),
+                                if a.clipped_samples > 0 {
+                                    palette.danger
+                                } else {
+                                    palette.accent
+                                },
+                            );
+
+                            let (v_col, v_bg) = match a.verdict {
+                                HiResVerdict::AuthenticHiRes => {
+                                    (palette.hires_gold, palette.hires_bg)
+                                }
+                                HiResVerdict::LosslessCdQuality => {
+                                    (palette.accent, palette.accent_subtle)
+                                }
+                                HiResVerdict::SuspectedUpsample => {
+                                    (palette.hires_gold, palette.surface)
+                                }
+                                HiResVerdict::LossyTranscode => {
+                                    (palette.danger, palette.danger_bg)
+                                }
+                            };
+                            Frame::new()
+                                .fill(v_bg)
+                                .stroke(Stroke::new(1.0, v_col.gamma_multiply(0.55)))
+                                .corner_radius(5.0)
+                                .inner_margin(Margin::symmetric(7, 3))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(a.verdict.badge())
+                                            .size(9.5)
+                                            .strong()
+                                            .monospace()
+                                            .color(v_col),
+                                    );
+                                });
+                        });
+
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(&a.verdict_detail)
+                                .size(10.5)
+                                .color(palette.text_secondary),
+                        );
+
+                        // Average Spectral Distribution Plot (0 Hz .. Nyquist) with 22 kHz CD marker
+                        ui.add_space(6.0);
+                        paint_analysis_spectrum(ui, a, palette);
+                    } else if !analyzing {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                "Inspect Dynamic Range (DR), EBU R128 loudness, inter-sample True Peak, and check whether Hi-Res tracks contain genuine ultrasonic spectrum above 22 kHz.",
+                            )
+                            .size(10.5)
+                            .color(palette.muted),
+                        );
+                    }
+                });
+
+            ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
                 if pill_button(ui, "Play", Some(Icon::Play), PillStyle::Accent, palette).clicked() {
                     action = Some(TrackInfoAction::Play);
@@ -2277,12 +2588,104 @@ pub fn show_track_info_window(
     (open, action)
 }
 
+fn paint_analysis_spectrum(ui: &mut Ui, analysis: &AudioAnalysis, palette: &Palette) {
+    let w = ui.available_width().max(180.0);
+    let h = 72.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 5.0, palette.panel);
+    painter.rect_stroke(rect, 5.0, Stroke::new(1.0, palette.border), StrokeKind::Inside);
+
+    let plot = Rect::from_min_max(
+        pos2(rect.left() + 6.0, rect.top() + 8.0),
+        pos2(rect.right() - 6.0, rect.bottom() - 16.0),
+    );
+    let nyquist_khz = (analysis.sample_rate as f32 * 0.5) / 1000.0;
+
+    // Horizontal dB reference guides (-30 dB, -60 dB)
+    for db in [-30.0_f32, -60.0] {
+        let frac = ((db + 96.0) / 96.0).clamp(0.0, 1.0);
+        let y = plot.bottom() - frac * plot.height();
+        painter.line_segment(
+            [pos2(plot.left(), y), pos2(plot.right(), y)],
+            Stroke::new(0.7, palette.border),
+        );
+    }
+
+    // Spectrum filled bars + smooth crest polyline
+    let bins = analysis.spectrum_db.len();
+    if bins >= 2 {
+        let bar_w = plot.width() / bins as f32;
+        let mut pts = Vec::with_capacity(bins);
+        for (i, &db) in analysis.spectrum_db.iter().enumerate() {
+            let norm = ((db + 96.0) / 96.0).clamp(0.0, 1.0);
+            let x0 = plot.left() + i as f32 * bar_w;
+            let x1 = (x0 + bar_w - 1.0).max(x0 + 1.0);
+            let y = plot.bottom() - norm * plot.height();
+            let freq_khz = ((i as f32 + 0.5) / bins as f32) * nyquist_khz;
+            let bar_col = if freq_khz > 22.05 {
+                palette.hires_gold.gamma_multiply(0.38)
+            } else {
+                palette.accent.gamma_multiply(0.32)
+            };
+            painter.rect_filled(
+                Rect::from_min_max(pos2(x0, y), pos2(x1, plot.bottom())),
+                1.0,
+                bar_col,
+            );
+            pts.push(pos2((x0 + x1) * 0.5, y));
+        }
+        painter.add(egui::Shape::line(pts, Stroke::new(1.4, palette.accent_bright)));
+    }
+
+    // Vertical 22.05 kHz CD-Nyquist reference line for Hi-Res tracks
+    if nyquist_khz > 24.5 {
+        let x22 = plot.left() + (22.05 / nyquist_khz).clamp(0.0, 1.0) * plot.width();
+        painter.line_segment(
+            [pos2(x22, plot.top()), pos2(x22, plot.bottom())],
+            Stroke::new(1.2, palette.hires_gold),
+        );
+        painter.text(
+            pos2(x22 + 3.0, plot.top() + 5.0),
+            Align2::LEFT_CENTER,
+            "22 kHz",
+            FontId::monospace(8.5),
+            palette.hires_gold,
+        );
+    }
+
+    // Frequency axis labels
+    let axis_y = rect.bottom() - 7.5;
+    painter.text(
+        pos2(plot.left(), axis_y),
+        Align2::LEFT_CENTER,
+        "0 kHz",
+        FontId::monospace(8.5),
+        palette.faint,
+    );
+    painter.text(
+        pos2(plot.center().x, axis_y),
+        Align2::CENTER_CENTER,
+        format!("{:.1} kHz", nyquist_khz * 0.5),
+        FontId::monospace(8.5),
+        palette.faint,
+    );
+    painter.text(
+        pos2(plot.right(), axis_y),
+        Align2::RIGHT_CENTER,
+        format!("{:.1} kHz", nyquist_khz),
+        FontId::monospace(8.5),
+        palette.faint,
+    );
+}
+
 pub enum TrackInfoAction {
     Play,
     EditTags,
     RevealInFinder,
     Remove,
     SetRating(u8),
+    AnalyzeQuality,
 }
 
 pub enum FolderModalAction {
@@ -2632,6 +3035,7 @@ pub struct SignalPathDisplay<'a> {
     pub codec: &'a str,
     pub source_rate: u32,
     pub output_rate: u32,
+    pub output_format: &'a str,
     pub channels: u16,
     pub bit_depth: Option<u32>,
     pub bitrate_kbps: Option<u32>,
@@ -2639,6 +3043,11 @@ pub struct SignalPathDisplay<'a> {
     pub device_name: &'a str,
     pub bit_perfect: bool,
     pub rg_gain_db: Option<f32>,
+    pub ram_bytes: Option<usize>,
+    pub oversampling: OversamplingMode,
+    pub resampler_quality: ResamplerQuality,
+    pub direct_volume_lock: bool,
+    pub volume: f32,
 }
 
 pub struct SignalPathActions {
@@ -2985,27 +3394,39 @@ pub fn show_signal_path_popover(
         open,
         palette,
         |ui| {
-            let stage_row = |ui: &mut Ui, step: &str, title: &str, detail: String, accent: Color32| {
-                ui.horizontal(|ui| {
-                    let (dot_r, _) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::hover());
-                    ui.painter().circle_filled(dot_r.center(), 4.0, accent);
-                    ui.vertical(|ui| {
-                        ui.style_mut().spacing.item_spacing.y = 0.0;
-                        ui.label(
-                            RichText::new(format!("{step}  ·  {title}"))
-                                .size(10.5)
-                                .strong()
-                                .color(palette.text),
-                        );
-                        ui.label(
-                            RichText::new(detail)
-                                .size(10.0)
-                                .monospace()
-                                .color(palette.muted),
-                        );
+            let stage_row =
+                |ui: &mut Ui, step: &str, title: &str, detail: String, accent: Color32, is_last: bool| {
+                    ui.horizontal(|ui| {
+                        let (dot_r, _) = ui.allocate_exact_size(vec2(16.0, 24.0), Sense::hover());
+                        if !is_last {
+                            ui.painter().line_segment(
+                                [
+                                    pos2(dot_r.center().x, dot_r.center().y + 5.0),
+                                    pos2(dot_r.center().x, dot_r.bottom() + 6.0),
+                                ],
+                                Stroke::new(1.2, palette.border_strong),
+                            );
+                        }
+                        ui.painter()
+                            .circle_filled(dot_r.center(), 6.0, accent.gamma_multiply(0.22));
+                        ui.painter().circle_filled(dot_r.center(), 3.6, accent);
+                        ui.vertical(|ui| {
+                            ui.style_mut().spacing.item_spacing.y = 0.0;
+                            ui.label(
+                                RichText::new(format!("{step}  ·  {title}"))
+                                    .size(10.5)
+                                    .strong()
+                                    .color(palette.text),
+                            );
+                            ui.label(
+                                RichText::new(detail)
+                                    .size(9.8)
+                                    .monospace()
+                                    .color(palette.muted),
+                            );
+                        });
                     });
-                });
-            };
+                };
 
             if let Some(s) = signal {
                 let bits = s.bit_depth.map(|b| format!("{b}-bit · ")).unwrap_or_default();
@@ -3026,17 +3447,42 @@ pub fn show_signal_path_popover(
                         br
                     ),
                     palette.accent,
+                    false,
                 );
-                ui.add_space(4.0);
+                ui.add_space(2.0);
+                let (mem_detail, mem_col) = if let Some(bytes) = s.ram_bytes {
+                    (
+                        format!(
+                            "Play from RAM ({} · Zero Disk I/O)",
+                            format_file_size(bytes as u64)
+                        ),
+                        palette.hires_gold,
+                    )
+                } else {
+                    (
+                        "Streaming Lock-Free RingBuffer (3.0s)".to_string(),
+                        palette.accent,
+                    )
+                };
+                stage_row(ui, "2", "Memory Engine", mem_detail, mem_col, false);
+                ui.add_space(2.0);
                 let native = s.source_rate == s.output_rate && (playback_speed - 1.0).abs() < 0.001;
                 stage_row(
                     ui,
-                    "2",
-                    "Sample-Rate & Tempo",
+                    "3",
+                    "Oversampling & Tempo",
                     if s.bit_perfect {
-                        format!("BIT-PERFECT DIRECT ({})", format_sample_rate(s.output_rate))
+                        format!("BIT-PERFECT 1:1 ({})", format_sample_rate(s.output_rate))
                     } else if native {
                         format!("Native Bit-Matched ({})", format_sample_rate(s.output_rate))
+                    } else if s.oversampling != OversamplingMode::Native && (playback_speed - 1.0).abs() < 0.001 {
+                        format!(
+                            "{} · {} ({} → {})",
+                            s.oversampling.name(),
+                            s.resampler_quality.name(),
+                            format_sample_rate(s.source_rate),
+                            format_sample_rate(s.output_rate),
+                        )
                     } else {
                         format!(
                             "Rubato Sinc ({} → {}, {:.2}x)",
@@ -3045,21 +3491,24 @@ pub fn show_signal_path_popover(
                             playback_speed
                         )
                     },
-                    if s.bit_perfect || native {
+                    if s.bit_perfect {
+                        palette.hires_gold
+                    } else if native {
                         palette.accent
                     } else {
-                        palette.hires_gold
+                        palette.accent_bright
                     },
+                    false,
                 );
-                ui.add_space(4.0);
+                ui.add_space(2.0);
                 let rg_note = match s.rg_gain_db {
                     Some(db) => format!(" · RG {:+.1} dB", db),
                     None => String::new(),
                 };
                 stage_row(
                     ui,
-                    "3",
-                    "DSP & ReplayGain",
+                    "4",
+                    "DSP & ReplayGain (64-bit f64)",
                     if plugins.dsp.bit_perfect_mode {
                         "Bypassed (Bit-Perfect Direct)".into()
                     } else {
@@ -3070,14 +3519,33 @@ pub fn show_signal_path_popover(
                     } else {
                         palette.accent
                     },
+                    false,
                 );
-                ui.add_space(4.0);
+                ui.add_space(2.0);
+                let vol_stage = if s.direct_volume_lock {
+                    "0.0 dBFS Direct Lock".to_string()
+                } else if s.volume >= 0.999 {
+                    "Software Vol 100%".to_string()
+                } else {
+                    format!("Software Vol {:.0}%", s.volume * 100.0)
+                };
                 stage_row(
                     ui,
-                    "4",
+                    "5",
                     &format!("{AUDIO_BACKEND_NAME} Hardware Output"),
-                    format!("{} ({})", s.device_name, format_sample_rate(s.output_rate)),
-                    palette.accent_bright,
+                    format!(
+                        "{} · {} · {} · {}",
+                        s.device_name,
+                        s.output_format,
+                        format_sample_rate(s.output_rate),
+                        vol_stage
+                    ),
+                    if s.direct_volume_lock && s.bit_perfect {
+                        palette.hires_gold
+                    } else {
+                        palette.accent_bright
+                    },
+                    true,
                 );
             } else {
                 ui.label(
@@ -3215,8 +3683,29 @@ pub fn show_signal_path_popover(
                     }
                     out.dsp_changed = true;
                 }
+                if pill_button(
+                    ui,
+                    if plugins.dsp.direct_volume_lock {
+                        "0 dB Lock"
+                    } else {
+                        "DAC 0 dB"
+                    },
+                    None,
+                    if plugins.dsp.direct_volume_lock {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    palette,
+                )
+                .on_hover_text("Bypass software volume attenuation (fixed 0.0 dBFS pass-through for external DAC/amp)")
+                .clicked()
+                {
+                    plugins.dsp.direct_volume_lock = !plugins.dsp.direct_volume_lock;
+                    out.dsp_changed = true;
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if pill_button(ui, "EQ & DSP…", None, PillStyle::Secondary, palette).clicked() {
+                    if pill_button(ui, "Audio…", None, PillStyle::Secondary, palette).clicked() {
                         out.open_settings_dsp = true;
                     }
                 });

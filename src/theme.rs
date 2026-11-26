@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum ThemeId {
     #[default]
     ObsidianStudio,
+    StudioReference,
     TokyoNight,
     TokyoNightStorm,
     SolarizedDark,
@@ -17,6 +18,7 @@ pub enum ThemeId {
 impl ThemeId {
     pub const ALL: &'static [ThemeId] = &[
         ThemeId::ObsidianStudio,
+        ThemeId::StudioReference,
         ThemeId::TokyoNight,
         ThemeId::TokyoNightStorm,
         ThemeId::SolarizedDark,
@@ -29,6 +31,7 @@ impl ThemeId {
     pub fn name(self) -> &'static str {
         match self {
             ThemeId::ObsidianStudio => "Obsidian Studio",
+            ThemeId::StudioReference => "Studio Reference",
             ThemeId::TokyoNight => "Tokyo Night",
             ThemeId::TokyoNightStorm => "Tokyo Night Storm",
             ThemeId::SolarizedDark => "Solarized Dark",
@@ -42,6 +45,7 @@ impl ThemeId {
     pub fn subtitle(self) -> &'static str {
         match self {
             ThemeId::ObsidianStudio => "Velvet charcoal · Emerald & gold",
+            ThemeId::StudioReference => "Audirvāna-inspired carbon · Cobalt & gold",
             ThemeId::TokyoNight => "Deep midnight indigo · Sapphire & violet",
             ThemeId::TokyoNightStorm => "Twilight slate · Electric cyan",
             ThemeId::SolarizedDark => "Precision cyan · Warm amber",
@@ -83,6 +87,36 @@ impl ThemeId {
                 danger: Color32::from_rgb(235, 108, 108),
                 danger_bg: Color32::from_rgb(58, 28, 30),
                 danger_border: Color32::from_rgb(122, 54, 58),
+            },
+            ThemeId::StudioReference => Palette {
+                is_light: false,
+                background: Color32::from_rgb(13, 15, 19),
+                sidebar: Color32::from_rgb(18, 21, 27),
+                panel: Color32::from_rgb(22, 26, 34),
+                surface: Color32::from_rgb(29, 34, 44),
+                surface_elevated: Color32::from_rgb(37, 44, 56),
+                hover: Color32::from_rgb(34, 40, 52),
+                clicked_row: Color32::from_rgb(42, 51, 66),
+                playing_row: Color32::from_rgb(21, 40, 58),
+                selected: Color32::from_rgb(25, 47, 69),
+                selected_border: Color32::from_rgb(60, 162, 232),
+                border: Color32::from_rgb(37, 43, 54),
+                border_strong: Color32::from_rgb(57, 67, 84),
+                text: Color32::from_rgb(239, 243, 248),
+                text_secondary: Color32::from_rgb(184, 194, 209),
+                muted: Color32::from_rgb(130, 143, 163),
+                faint: Color32::from_rgb(86, 97, 115),
+                accent: Color32::from_rgb(56, 165, 232),
+                accent_bright: Color32::from_rgb(110, 200, 255),
+                accent_secondary: Color32::from_rgb(102, 217, 184),
+                accent_dark: Color32::from_rgb(26, 70, 102),
+                accent_subtle: Color32::from_rgb(21, 41, 59),
+                hires_gold: Color32::from_rgb(232, 186, 86),
+                hires_bg: Color32::from_rgb(54, 43, 21),
+                hires_border: Color32::from_rgb(125, 99, 44),
+                danger: Color32::from_rgb(235, 108, 116),
+                danger_bg: Color32::from_rgb(58, 28, 32),
+                danger_border: Color32::from_rgb(122, 54, 62),
             },
             ThemeId::TokyoNight => Palette {
                 is_light: false,

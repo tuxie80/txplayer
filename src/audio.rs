@@ -24,7 +24,7 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
 use crate::dsp::{RealtimeDsp, SharedDspParams};
-use crate::plugins::DspConfig;
+use crate::plugins::{DspConfig, OversamplingMode, ResamplerQuality};
 
 const BUFFER_SECONDS: usize = 3;
 const STATS_WINDOW_SECONDS: f64 = 0.5;
@@ -213,6 +213,14 @@ pub enum AudioCommand {
     SetGapless(bool),
     SetCrossfade(f32),
     SetReplayGainLinear(f32),
+    SetRamPlayback {
+        enabled: bool,
+        max_mb: u32,
+    },
+    SetOversampling {
+        mode: OversamplingMode,
+        quality: ResamplerQuality,
+    },
     Shutdown,
 }
 
@@ -221,22 +229,30 @@ pub enum AudioEvent {
     Started {
         source_sample_rate: u32,
         output_sample_rate: u32,
+        output_format: String,
         channels: u16,
         bit_depth: Option<u32>,
         duration: Option<f64>,
         device_name: String,
         bit_perfect: bool,
         rg_gain_db: Option<f32>,
+        ram_bytes: Option<usize>,
+        oversampling: OversamplingMode,
+        resampler_quality: ResamplerQuality,
     },
     GaplessTransitioned {
         source_sample_rate: u32,
         output_sample_rate: u32,
+        output_format: String,
         channels: u16,
         bit_depth: Option<u32>,
         duration: Option<f64>,
         device_name: String,
         bit_perfect: bool,
         rg_gain_db: Option<f32>,
+        ram_bytes: Option<usize>,
+        oversampling: OversamplingMode,
+        resampler_quality: ResamplerQuality,
     },
     DeviceRouted(String),
     Playing(bool),
@@ -257,6 +273,7 @@ pub struct AudioHandle {
     rg_gain: Arc<AtomicU32>,
     linear_volume: Arc<AtomicBool>,
     bit_perfect: Arc<AtomicBool>,
+    direct_volume_lock: Arc<AtomicBool>,
     visual_tap: Arc<VisualTap>,
     dsp: Arc<SharedDspParams>,
     _join: JoinHandle<()>,
@@ -270,12 +287,14 @@ impl AudioHandle {
         let rg_gain = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
         let linear_volume = Arc::new(AtomicBool::new(false));
         let bit_perfect = Arc::new(AtomicBool::new(false));
+        let direct_volume_lock = Arc::new(AtomicBool::new(false));
         let visual_tap = Arc::new(VisualTap::new());
         let dsp = Arc::new(SharedDspParams::new(&DspConfig::default()));
         let thread_volume = Arc::clone(&volume);
         let thread_rg = Arc::clone(&rg_gain);
         let thread_linear = Arc::clone(&linear_volume);
         let thread_bp = Arc::clone(&bit_perfect);
+        let thread_vol_lock = Arc::clone(&direct_volume_lock);
         let thread_tap = Arc::clone(&visual_tap);
         let thread_dsp = Arc::clone(&dsp);
         let join = thread::Builder::new()
@@ -288,6 +307,7 @@ impl AudioHandle {
                     thread_rg,
                     thread_linear,
                     thread_bp,
+                    thread_vol_lock,
                     thread_tap,
                     thread_dsp,
                 ) {
@@ -302,6 +322,7 @@ impl AudioHandle {
             rg_gain,
             linear_volume,
             bit_perfect,
+            direct_volume_lock,
             visual_tap,
             dsp,
             _join: join,
@@ -366,6 +387,8 @@ impl AudioHandle {
     pub fn update_dsp(&self, cfg: &DspConfig) {
         self.bit_perfect
             .store(cfg.bit_perfect_mode, Ordering::Relaxed);
+        self.direct_volume_lock
+            .store(cfg.direct_volume_lock, Ordering::Relaxed);
         self.dsp.update(cfg);
         let _ = self
             .commands
@@ -373,6 +396,14 @@ impl AudioHandle {
         let _ = self
             .commands
             .send(AudioCommand::SetCrossfade(cfg.crossfade_secs.clamp(0.0, 6.0)));
+        let _ = self.commands.send(AudioCommand::SetRamPlayback {
+            enabled: cfg.ram_playback,
+            max_mb: cfg.ram_buffer_mb.clamp(64, 4096),
+        });
+        let _ = self.commands.send(AudioCommand::SetOversampling {
+            mode: cfg.oversampling,
+            quality: cfg.resampler_quality,
+        });
     }
 
     pub fn visual_tap(&self) -> Arc<VisualTap> {
@@ -562,6 +593,10 @@ struct AudioEnginePrefs {
     speed: f32,
     ab_loop: Option<(f64, f64)>,
     next_spec: Option<PlaybackSpec>,
+    ram_playback: bool,
+    ram_max_bytes: usize,
+    oversampling: OversamplingMode,
+    resampler_quality: ResamplerQuality,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -572,6 +607,7 @@ fn run_audio_thread(
     rg_gain: Arc<AtomicU32>,
     linear_volume: Arc<AtomicBool>,
     bit_perfect: Arc<AtomicBool>,
+    direct_volume_lock: Arc<AtomicBool>,
     visual_tap: Arc<VisualTap>,
     dsp: Arc<SharedDspParams>,
 ) -> Result<()> {
@@ -582,6 +618,10 @@ fn run_audio_thread(
         speed: 1.0,
         ab_loop: None,
         next_spec: None,
+        ram_playback: true,
+        ram_max_bytes: 512 * 1024 * 1024,
+        oversampling: OversamplingMode::Native,
+        resampler_quality: ResamplerQuality::LinearPhaseStudio,
     };
     let mut next = commands.recv();
     while let Ok(command) = next {
@@ -608,6 +648,7 @@ fn run_audio_thread(
                     &rg_gain,
                     &linear_volume,
                     &bit_perfect,
+                    &direct_volume_lock,
                     &visual_tap,
                     &dsp,
                     &mut prefs,
@@ -652,6 +693,16 @@ fn run_audio_thread(
             }
             AudioCommand::SetReplayGainLinear(g) => {
                 rg_gain.store(g.clamp(0.1, 4.0).to_bits(), Ordering::Relaxed);
+                next = commands.recv();
+            }
+            AudioCommand::SetRamPlayback { enabled, max_mb } => {
+                prefs.ram_playback = enabled;
+                prefs.ram_max_bytes = (max_mb.clamp(64, 4096) as usize) * 1024 * 1024;
+                next = commands.recv();
+            }
+            AudioCommand::SetOversampling { mode, quality } => {
+                prefs.oversampling = mode;
+                prefs.resampler_quality = quality;
                 next = commands.recv();
             }
             AudioCommand::Stop => {
@@ -768,9 +819,163 @@ struct OutputStream {
     stream: Stream,
     sample_rate: u32,
     channels: usize,
+    format_label: String,
     played_frames: Arc<AtomicU64>,
     seek_generation: Arc<AtomicU64>,
     reopen_needed: Arc<AtomicBool>,
+}
+
+/// Full-track pre-decoded PCM buffer resident in RAM for zero-disk-I/O playback and instant seeking.
+struct RamTrackBuffer {
+    samples: Vec<f32>,
+    channels: usize,
+    total_frames: usize,
+    frame_cursor: usize,
+    /// Per-0.5s bitrate samples so live VBR/CBR kbps telemetry keeps updating during RAM playback.
+    bitrate_timeline: Vec<u32>,
+    variable_bitrate: bool,
+    last_emitted_bucket: Option<usize>,
+}
+
+impl RamTrackBuffer {
+    fn byte_len(&self) -> usize {
+        self.samples.len() * std::mem::size_of::<f32>()
+    }
+}
+
+enum RamLoadOutcome {
+    Loaded(RamTrackBuffer),
+    SkippedTooLarge,
+    Interrupted(AudioCommand),
+}
+
+/// Pre-decodes a full track into RAM when it fits under `max_bytes`.
+/// Checks `commands` every 64 packets so skipping or stopping during preload is instantaneous.
+fn try_load_track_to_ram(
+    decoder: &mut DecoderState,
+    max_bytes: usize,
+    commands: &Receiver<AudioCommand>,
+    initial_file_pos: f64,
+) -> RamLoadOutcome {
+    let ch = decoder.source_channels.max(1);
+    let sr = decoder.source_sample_rate.max(1);
+    let max_samples = max_bytes / std::mem::size_of::<f32>();
+    if let Some(dur) = decoder.duration {
+        let est_bytes = (dur * sr as f64 * ch as f64 * 4.0) as usize;
+        if est_bytes > max_bytes || dur > 3600.0 {
+            return RamLoadOutcome::SkippedTooLarge;
+        }
+    }
+    let prealloc = decoder
+        .duration
+        .map(|d| ((d * sr as f64 * ch as f64) as usize).min(max_samples))
+        .unwrap_or(sr as usize * ch * 60);
+    let mut samples: Vec<f32> = Vec::with_capacity(prealloc.min(16 * 1024 * 1024));
+    let mut sample_buf: Option<(usize, SampleBuffer<f32>)> = None;
+    let mut pkt_count: usize = 0;
+    let mut timeline: Vec<u32> = Vec::new();
+    let mut acc_bytes: usize = 0;
+    let mut acc_frames: u64 = 0;
+    let mut min_kbps: Option<u32> = None;
+    let mut max_kbps: Option<u32> = None;
+    let mut variable = is_variable_lossless(decoder.decoder.codec_params().codec);
+
+    loop {
+        pkt_count += 1;
+        if pkt_count.is_multiple_of(64)
+            && let Ok(cmd) = commands.try_recv()
+        {
+            match cmd {
+                AudioCommand::Play(_) | AudioCommand::Stop | AudioCommand::Shutdown => {
+                    return RamLoadOutcome::Interrupted(cmd);
+                }
+                _ => {}
+            }
+        }
+        let packet = match decoder.format.next_packet() {
+            Ok(p) => p,
+            Err(SymphoniaError::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(SymphoniaError::ResetRequired) => {
+                decoder.decoder.reset();
+                continue;
+            }
+            Err(_) => return RamLoadOutcome::SkippedTooLarge,
+        };
+        if packet.track_id() != decoder.track_id {
+            continue;
+        }
+        // Record 0.5s bitrate buckets for live VBR telemetry during RAM playback
+        acc_bytes += packet.buf().len();
+        acc_frames += packet.dur();
+        if let Some(tb) = decoder.time_base
+            && acc_frames > 0
+        {
+            let t = tb.calc_time(acc_frames);
+            let secs = t.seconds as f64 + t.frac;
+            if secs >= STATS_WINDOW_SECONDS {
+                let kbps = ((acc_bytes as f64 * 8.0 / secs) / 1000.0)
+                    .round()
+                    .max(1.0) as u32;
+                timeline.push(kbps);
+                min_kbps = Some(min_kbps.map_or(kbps, |m| m.min(kbps)));
+                max_kbps = Some(max_kbps.map_or(kbps, |m| m.max(kbps)));
+                if let (Some(lo), Some(hi)) = (min_kbps, max_kbps) {
+                    variable |= hi > lo.saturating_add((lo / 20).max(8));
+                }
+                acc_bytes = 0;
+                acc_frames = 0;
+            }
+        }
+        let Ok(audio) = decoder.decoder.decode(&packet) else {
+            continue;
+        };
+        let spec_audio = *audio.spec();
+        let pkt_ch = spec_audio.channels.count().max(1);
+        let cap = audio.capacity();
+        let buf = match &mut sample_buf {
+            Some((cur_cap, sb)) if *cur_cap >= cap => sb,
+            slot => {
+                *slot = Some((cap, SampleBuffer::<f32>::new(cap as u64, spec_audio)));
+                &mut slot.as_mut().unwrap().1
+            }
+        };
+        buf.copy_interleaved_ref(audio);
+        let raw = buf.samples();
+        if samples.len() + raw.len() > max_samples {
+            // Rewind file so streaming decoder can take over cleanly
+            let _ = decoder.seek(initial_file_pos);
+            return RamLoadOutcome::SkippedTooLarge;
+        }
+        if pkt_ch == ch {
+            samples.extend_from_slice(raw);
+        } else {
+            for frame in raw.chunks_exact(pkt_ch) {
+                for c in 0..ch {
+                    samples.push(frame.get(c).copied().unwrap_or(frame[0]));
+                }
+            }
+        }
+    }
+
+    if samples.is_empty() {
+        let _ = decoder.seek(initial_file_pos);
+        return RamLoadOutcome::SkippedTooLarge;
+    }
+    let total_frames = samples.len() / ch;
+    let start_frame = ((initial_file_pos * sr as f64).round() as usize).min(total_frames);
+    RamLoadOutcome::Loaded(RamTrackBuffer {
+        samples,
+        channels: ch,
+        total_frames,
+        frame_cursor: start_frame,
+        bitrate_timeline: timeline,
+        variable_bitrate: variable,
+        last_emitted_bucket: None,
+    })
 }
 
 struct PendingGapless {
@@ -780,6 +985,7 @@ struct PendingGapless {
     channels: u16,
     bit_depth: Option<u32>,
     duration: Option<f64>,
+    ram_bytes: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -794,29 +1000,57 @@ fn play_file(
     rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
     bit_perfect: &Arc<AtomicBool>,
+    direct_volume_lock: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp: &Arc<SharedDspParams>,
     prefs: &mut AudioEnginePrefs,
 ) -> Result<PlaybackExit> {
     let mut decoder = DecoderState::open(&spec.path)?;
     let initial_file_pos = spec.file_start_secs();
-    if initial_file_pos > 0.05 {
-        let _ = decoder.seek(initial_file_pos);
-    }
+    let mut ram_buf: Option<RamTrackBuffer> = if prefs.ram_playback
+        && spec.cue_start == 0.0
+        && spec.cue_end.is_none()
+        && prefs.ram_max_bytes > 0
+    {
+        match try_load_track_to_ram(&mut decoder, prefs.ram_max_bytes, commands, initial_file_pos) {
+            RamLoadOutcome::Loaded(buf) => Some(buf),
+            RamLoadOutcome::SkippedTooLarge => {
+                if initial_file_pos > 0.05 {
+                    let _ = decoder.seek(initial_file_pos);
+                }
+                None
+            }
+            RamLoadOutcome::Interrupted(cmd) => return Ok(PlaybackExit::Command(cmd)),
+        }
+    } else {
+        if initial_file_pos > 0.05 {
+            let _ = decoder.seek(initial_file_pos);
+        }
+        None
+    };
+
     rg_gain.store(spec.rg_gain_linear.clamp(0.1, 4.0).to_bits(), Ordering::Relaxed);
 
+    let effective_oversampling = if bit_perfect.load(Ordering::Relaxed) {
+        OversamplingMode::Native
+    } else {
+        prefs.oversampling
+    };
     let (output, mut producer) = create_output_stream(
         device,
         decoder.source_sample_rate,
+        effective_oversampling,
         volume,
         rg_gain,
         linear_volume,
         bit_perfect,
+        direct_volume_lock,
         visual_tap,
         dsp,
         events,
     )?;
     let output_rate = output.sample_rate;
+    let output_format_label = output.format_label.clone();
     visual_tap.set_sample_rate(output_rate);
 
     let mut track_origin_secs = spec.start_offset.max(0.0);
@@ -828,13 +1062,17 @@ fn play_file(
     let mut fade_in_total: usize = 0;
     let mut pending_gapless: Option<PendingGapless> = None;
 
-    let eff_dur = spec.effective_duration(decoder.duration);
+    let ram_dur = ram_buf
+        .as_ref()
+        .map(|rb| rb.total_frames as f64 / decoder.source_sample_rate.max(1) as f64);
+    let eff_dur = spec.effective_duration(decoder.duration.or(ram_dur));
     let bp_active = bit_perfect.load(Ordering::Relaxed)
         && decoder.source_sample_rate == output_rate
         && (prefs.speed - 1.0).abs() < 0.001;
     let _ = events.send(AudioEvent::Started {
         source_sample_rate: decoder.source_sample_rate,
         output_sample_rate: output_rate,
+        output_format: output_format_label.clone(),
         channels: decoder.source_channels.min(u16::MAX as usize) as u16,
         bit_depth: decoder.bit_depth,
         duration: eff_dur,
@@ -845,12 +1083,16 @@ fn play_file(
         } else {
             spec.rg_gain_db
         },
+        ram_bytes: ram_buf.as_ref().map(RamTrackBuffer::byte_len),
+        oversampling: effective_oversampling,
+        resampler_quality: prefs.resampler_quality,
     });
     let mut resampler = StreamResampler::new(
         decoder.source_sample_rate,
         output_rate,
         output.channels,
         prefs.speed,
+        prefs.resampler_quality,
     )?;
     let mut stats = BitrateMonitor::new(
         decoder.time_base,
@@ -894,9 +1136,15 @@ fn play_file(
             let bp = bit_perfect.load(Ordering::Relaxed)
                 && trans.source_sample_rate == output_rate
                 && (prefs.speed - 1.0).abs() < 0.001;
+            let eff_os = if bit_perfect.load(Ordering::Relaxed) {
+                OversamplingMode::Native
+            } else {
+                prefs.oversampling
+            };
             let _ = events.send(AudioEvent::GaplessTransitioned {
                 source_sample_rate: trans.source_sample_rate,
                 output_sample_rate: output_rate,
+                output_format: output_format_label.clone(),
                 channels: trans.channels,
                 bit_depth: trans.bit_depth,
                 duration: trans.duration,
@@ -907,6 +1155,9 @@ fn play_file(
                 } else {
                     spec.rg_gain_db
                 },
+                ram_bytes: trans.ram_bytes,
+                oversampling: eff_os,
+                resampler_quality: prefs.resampler_quality,
             });
             let _ = events.send(AudioEvent::Position(track_origin_secs));
         }
@@ -977,7 +1228,17 @@ fn play_file(
                 AudioCommand::Seek(rel_seconds) => {
                     let clamped_rel = rel_seconds.max(0.0);
                     let abs_secs = spec.cue_start + clamped_rel;
-                    match decoder.seek(abs_secs) {
+                    let seek_res = if let Some(ref mut rb) = ram_buf {
+                        let target_f = ((abs_secs * decoder.source_sample_rate as f64).round()
+                            as usize)
+                            .min(rb.total_frames);
+                        rb.frame_cursor = target_f;
+                        rb.last_emitted_bucket = None;
+                        Ok(())
+                    } else {
+                        decoder.seek(abs_secs)
+                    };
+                    match seek_res {
                         Ok(()) => {
                             resampler.reset();
                             current_block.clear();
@@ -1015,6 +1276,7 @@ fn play_file(
                             output_rate,
                             output.channels,
                             prefs.speed,
+                            prefs.resampler_quality,
                         ) {
                             resampler = new_r;
                         }
@@ -1033,6 +1295,28 @@ fn play_file(
                     let clamped = g.clamp(0.1, 4.0);
                     spec.rg_gain_linear = clamped;
                     rg_gain.store(clamped.to_bits(), Ordering::Relaxed);
+                }
+                AudioCommand::SetRamPlayback { enabled, max_mb } => {
+                    prefs.ram_playback = enabled;
+                    prefs.ram_max_bytes = (max_mb.clamp(64, 4096) as usize) * 1024 * 1024;
+                }
+                AudioCommand::SetOversampling { mode, quality } => {
+                    let changed = prefs.oversampling != mode || prefs.resampler_quality != quality;
+                    prefs.oversampling = mode;
+                    prefs.resampler_quality = quality;
+                    if changed {
+                        let pos = calc_position(
+                            played_now,
+                            track_origin_frame,
+                            track_origin_secs,
+                            prefs.speed,
+                        );
+                        visual_tap.set_active(false);
+                        let mut reopen = spec;
+                        reopen.start_offset = pos;
+                        reopen.start_paused = paused;
+                        return Ok(PlaybackExit::ReopenSpec(reopen));
+                    }
                 }
                 AudioCommand::SelectDevice(name) => {
                     prefs.preferred_device = name;
@@ -1065,7 +1349,14 @@ fn play_file(
             && current_pos >= b
         {
             let abs_a = spec.cue_start + a.max(0.0);
-            if decoder.seek(abs_a).is_ok() {
+            let seek_ok = if let Some(ref mut rb) = ram_buf {
+                rb.frame_cursor = ((abs_a * decoder.source_sample_rate as f64).round() as usize)
+                    .min(rb.total_frames);
+                true
+            } else {
+                decoder.seek(abs_a).is_ok()
+            };
+            if seek_ok {
                 resampler.reset();
                 current_block.clear();
                 block_offset = 0;
@@ -1085,6 +1376,20 @@ fn play_file(
 
         if last_position_update.elapsed() >= POSITION_UPDATE_INTERVAL {
             let _ = events.send(AudioEvent::Position(current_pos));
+            // Emit live VBR/CBR kbps telemetry from pre-recorded RAM timeline
+            if let Some(ref mut rb) = ram_buf
+                && !rb.bitrate_timeline.is_empty()
+            {
+                let bucket = ((current_pos / STATS_WINDOW_SECONDS).floor() as usize)
+                    .min(rb.bitrate_timeline.len() - 1);
+                if rb.last_emitted_bucket != Some(bucket) {
+                    rb.last_emitted_bucket = Some(bucket);
+                    let _ = events.send(AudioEvent::Bitrate {
+                        kbps: rb.bitrate_timeline[bucket],
+                        variable: rb.variable_bitrate,
+                    });
+                }
+            }
             last_position_update = Instant::now();
         }
 
@@ -1138,8 +1443,33 @@ fn play_file(
                         output_rate,
                         output.channels,
                         prefs.speed,
+                        prefs.resampler_quality,
                     ) {
-                        let next_dur = next_s.effective_duration(next_dec.duration);
+                        let next_ram = if prefs.ram_playback
+                            && next_s.cue_start == 0.0
+                            && next_s.cue_end.is_none()
+                            && prefs.ram_max_bytes > 0
+                        {
+                            match try_load_track_to_ram(
+                                &mut next_dec,
+                                prefs.ram_max_bytes,
+                                commands,
+                                start_f,
+                            ) {
+                                RamLoadOutcome::Loaded(buf) => Some(buf),
+                                RamLoadOutcome::SkippedTooLarge => None,
+                                RamLoadOutcome::Interrupted(cmd) => {
+                                    visual_tap.set_active(false);
+                                    return Ok(PlaybackExit::Command(cmd));
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let next_ram_dur = next_ram.as_ref().map(|rb| {
+                            rb.total_frames as f64 / next_dec.source_sample_rate.max(1) as f64
+                        });
+                        let next_dur = next_s.effective_duration(next_dec.duration.or(next_ram_dur));
                         pending_gapless = Some(PendingGapless {
                             boundary_frame: written_frames,
                             spec: next_s,
@@ -1147,6 +1477,7 @@ fn play_file(
                             channels: next_dec.source_channels.min(u16::MAX as usize) as u16,
                             bit_depth: next_dec.bit_depth,
                             duration: next_dur,
+                            ram_bytes: next_ram.as_ref().map(RamTrackBuffer::byte_len),
                         });
                         if prefs.crossfade_secs > 0.05 {
                             let fade_f = ((prefs.crossfade_secs * 0.5) * output_rate as f32).round()
@@ -1154,6 +1485,7 @@ fn play_file(
                             fade_in_total = fade_f;
                             fade_in_remaining = fade_f;
                         }
+                        ram_buf = next_ram;
                         decoder = next_dec;
                         resampler = next_resampler;
                         stats = BitrateMonitor::new(
@@ -1177,6 +1509,48 @@ fn play_file(
                 return Ok(PlaybackExit::Ended);
             }
             thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+
+        // Feed directly from RAM PCM buffer when Play-from-RAM is active (zero disk I/O!)
+        if let Some(ref mut rb) = ram_buf {
+            if rb.frame_cursor >= rb.total_frames {
+                resampler.finish();
+                decoder_finished = true;
+                continue;
+            }
+            let chunk_frames = 4096.min(rb.total_frames - rb.frame_cursor);
+            let ch = rb.channels;
+            let start_idx = rb.frame_cursor * ch;
+            let end_idx = (rb.frame_cursor + chunk_frames) * ch;
+            let raw_samples = &rb.samples[start_idx..end_idx];
+
+            let end_secs = Some(rb.total_frames as f64 / decoder.source_sample_rate.max(1) as f64);
+            let sr = decoder.source_sample_rate.max(1) as f64;
+            let fade_s = (prefs.crossfade_secs * 0.5) as f64;
+            let pkt_end_s = (decoded_source_frames + chunk_frames as u64) as f64 / sr;
+            if prefs.crossfade_secs > 0.05
+                && let Some(end_s) = end_secs
+                && pkt_end_s > (end_s - fade_s).max(0.0)
+            {
+                let fade_start = (end_s - fade_s).max(0.0);
+                let mut faded = raw_samples.to_vec();
+                for f_idx in 0..chunk_frames {
+                    let t_s = (decoded_source_frames + f_idx as u64) as f64 / sr;
+                    if t_s > fade_start {
+                        let rem = ((end_s - t_s) / fade_s).clamp(0.0, 1.0) as f32;
+                        let gain = (rem * std::f32::consts::FRAC_PI_2).sin();
+                        for c in 0..ch {
+                            faded[f_idx * ch + c] *= gain;
+                        }
+                    }
+                }
+                resampler.push_interleaved(&faded, ch);
+            } else {
+                resampler.push_interleaved(raw_samples, ch);
+            }
+            rb.frame_cursor += chunk_frames;
+            decoded_source_frames += chunk_frames as u64;
             continue;
         }
 
@@ -1278,40 +1652,110 @@ struct OutputConfig {
     format: SampleFormat,
 }
 
+/// Selects the optimal DAC hardware sample rate based on the audiophile oversampling policy.
+pub fn choose_target_sample_rate(
+    source_rate: u32,
+    supported_ranges: &[(u32, u32)],
+    mode: OversamplingMode,
+) -> Option<u32> {
+    if supported_ranges.is_empty() {
+        return None;
+    }
+    let supports = |rate: u32| -> bool {
+        supported_ranges
+            .iter()
+            .any(|&(lo, hi)| rate >= lo && rate <= hi)
+    };
+    const MAX_CAP: u32 = 384_000;
+    match mode {
+        OversamplingMode::Native => {
+            if supports(source_rate) {
+                Some(source_rate)
+            } else {
+                None
+            }
+        }
+        OversamplingMode::PowerOf2 => {
+            // Try highest synchronous integer power-of-2 multiple (8x, 4x, 2x, 1x) up to 384 kHz
+            for mult in [8_u32, 4, 2, 1] {
+                let candidate = source_rate.saturating_mul(mult);
+                if candidate <= MAX_CAP && supports(candidate) {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+        OversamplingMode::MaxDeviceRate => {
+            // Prefer standard audiophile rates from highest to lowest within supported ranges
+            for &rate in &[384_000_u32, 352_800, 192_000, 176_400, 96_000, 88_200, 48_000, 44_100] {
+                if supports(rate) {
+                    return Some(rate);
+                }
+            }
+            supported_ranges
+                .iter()
+                .map(|&(_, hi)| hi.min(MAX_CAP))
+                .max()
+        }
+    }
+}
+
+fn format_sample_format_label(fmt: SampleFormat) -> String {
+    match fmt {
+        SampleFormat::F32 => "32-bit float".into(),
+        SampleFormat::F64 => "64-bit float".into(),
+        SampleFormat::I32 => "32-bit int".into(),
+        SampleFormat::U32 => "32-bit uint".into(),
+        SampleFormat::I16 => "16-bit int".into(),
+        SampleFormat::U16 => "16-bit uint".into(),
+        SampleFormat::I8 => "8-bit int".into(),
+        SampleFormat::U8 => "8-bit uint".into(),
+        other => format!("{other}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_output_stream(
     device: &Device,
     source_rate: u32,
+    oversampling: OversamplingMode,
     volume: &Arc<AtomicU32>,
     rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
     bit_perfect: &Arc<AtomicBool>,
+    direct_volume_lock: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp: &Arc<SharedDspParams>,
     events: &Sender<AudioEvent>,
 ) -> Result<(OutputStream, HeapProd<f32>)> {
     let default = device.default_output_config()?;
-    let preferred_config = device
+    let ranges_vec: Vec<cpal::SupportedStreamConfigRange> = device
         .supported_output_configs()
-        .ok()
-        .and_then(|ranges| {
-            ranges
-                .filter(|range| range.channels() >= 1)
-                .filter(|range| {
-                    source_rate >= range.min_sample_rate() && source_rate <= range.max_sample_rate()
-                })
-                .min_by_key(|range| {
-                    let chan_diff = (range.channels() as u32).abs_diff(2);
-                    let fmt_rank = match range.sample_format() {
-                        SampleFormat::F32 => 0,
-                        SampleFormat::I32 => 1,
-                        SampleFormat::I16 => 2,
-                        _ => 3,
-                    };
-                    (chan_diff, fmt_rank)
-                })
-                .map(|range| range.with_sample_rate(source_rate))
+        .map(|it| it.filter(|r| r.channels() >= 1).collect())
+        .unwrap_or_default();
+    let rate_bounds: Vec<(u32, u32)> = ranges_vec
+        .iter()
+        .map(|r| (r.min_sample_rate(), r.max_sample_rate()))
+        .collect();
+    let target_rate = choose_target_sample_rate(source_rate, &rate_bounds, oversampling)
+        .unwrap_or(source_rate);
+
+    let preferred_config = ranges_vec
+        .into_iter()
+        .filter(|range| {
+            target_rate >= range.min_sample_rate() && target_rate <= range.max_sample_rate()
         })
+        .min_by_key(|range| {
+            let chan_diff = (range.channels() as u32).abs_diff(2);
+            let fmt_rank = match range.sample_format() {
+                SampleFormat::F32 => 0,
+                SampleFormat::I32 => 1,
+                SampleFormat::I16 => 2,
+                _ => 3,
+            };
+            (chan_diff, fmt_rank)
+        })
+        .map(|range| range.with_sample_rate(target_rate))
         .unwrap_or(default);
 
     let primary = OutputConfig {
@@ -1330,6 +1774,7 @@ fn create_output_stream(
         rg_gain,
         linear_volume,
         bit_perfect,
+        direct_volume_lock,
         visual_tap,
         dsp,
         events,
@@ -1357,6 +1802,7 @@ fn create_output_stream(
                 rg_gain,
                 linear_volume,
                 bit_perfect,
+                direct_volume_lock,
                 visual_tap,
                 dsp,
                 events,
@@ -1373,6 +1819,7 @@ fn open_with_config(
     rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
     bit_perfect: &Arc<AtomicBool>,
+    direct_volume_lock: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp: &Arc<SharedDspParams>,
     events: &Sender<AudioEvent>,
@@ -1395,6 +1842,7 @@ fn open_with_config(
                 rg_gain,
                 linear_volume,
                 bit_perfect,
+                direct_volume_lock,
                 visual_tap,
                 dsp,
                 &played_frames,
@@ -1421,6 +1869,7 @@ fn open_with_config(
             stream,
             sample_rate: output_rate,
             channels,
+            format_label: format_sample_format_label(output.format),
             played_frames,
             seek_generation,
             reopen_needed,
@@ -1493,6 +1942,7 @@ fn build_stream<T: CpalSample>(
     rg_gain: &Arc<AtomicU32>,
     linear_volume: &Arc<AtomicBool>,
     bit_perfect: &Arc<AtomicBool>,
+    direct_volume_lock: &Arc<AtomicBool>,
     visual_tap: &Arc<VisualTap>,
     dsp_params: &Arc<SharedDspParams>,
     played_frames: &Arc<AtomicU64>,
@@ -1505,16 +1955,21 @@ fn build_stream<T: CpalSample>(
     let rg_gain = Arc::clone(rg_gain);
     let linear_volume = Arc::clone(linear_volume);
     let bit_perfect = Arc::clone(bit_perfect);
+    let direct_volume_lock = Arc::clone(direct_volume_lock);
     let visual_tap = Arc::clone(visual_tap);
     let dsp_params = Arc::clone(dsp_params);
     let played_frames = Arc::clone(played_frames);
     let seek_generation = Arc::clone(seek_generation);
     let reopen_flag = Arc::clone(reopen_needed);
     let mut callback_generation = 0;
-    let mut smoothed_gain = volume_to_gain(
-        f32::from_bits(volume.load(Ordering::Relaxed)),
-        linear_volume.load(Ordering::Relaxed),
-    );
+    let mut smoothed_gain = if direct_volume_lock.load(Ordering::Relaxed) {
+        1.0
+    } else {
+        volume_to_gain(
+            f32::from_bits(volume.load(Ordering::Relaxed)),
+            linear_volume.load(Ordering::Relaxed),
+        )
+    };
     // Sample-rate-independent ~4.5 ms volume ramp constant (identical feel from 44.1 kHz to 192 kHz)
     let gain_alpha = (1.0 - (-1.0_f32 / (config.sample_rate.max(8_000) as f32 * 0.0045)).exp())
         .clamp(0.0005, 0.05);
@@ -1533,15 +1988,20 @@ fn build_stream<T: CpalSample>(
             }
             dsp.sync(&dsp_params);
             let bp = bit_perfect.load(Ordering::Relaxed);
+            let vol_lock = direct_volume_lock.load(Ordering::Relaxed);
             let rg = if bp {
                 1.0
             } else {
                 f32::from_bits(rg_gain.load(Ordering::Relaxed)).clamp(0.1, 4.0)
             };
-            let target_gain = volume_to_gain(
-                f32::from_bits(volume.load(Ordering::Relaxed)),
-                linear_volume.load(Ordering::Relaxed),
-            ) * rg;
+            let target_gain = if vol_lock {
+                rg
+            } else {
+                volume_to_gain(
+                    f32::from_bits(volume.load(Ordering::Relaxed)),
+                    linear_volume.load(Ordering::Relaxed),
+                ) * rg
+            };
             let mut sum_sq_l = 0.0_f32;
             let mut sum_sq_r = 0.0_f32;
             let mut sum_lr = 0.0_f32;
@@ -1551,6 +2011,11 @@ fn build_stream<T: CpalSample>(
 
             for frame in data.chunks_mut(channels) {
                 smoothed_gain += (target_gain - smoothed_gain) * gain_alpha;
+                let effective_gain = if vol_lock && bp && (smoothed_gain - 1.0).abs() < 1e-5 {
+                    1.0
+                } else {
+                    smoothed_gain
+                };
                 if consumer.occupied_len() >= channels {
                     let mut raw_l = 0.0_f32;
                     let mut raw_r = 0.0_f32;
@@ -1583,7 +2048,7 @@ fn build_stream<T: CpalSample>(
                         } else {
                             0.0
                         };
-                        *sample = T::from_float(out * smoothed_gain);
+                        *sample = T::from_float(out * effective_gain);
                     }
                     // Tap full-resolution pre-fader musical signal (muted gently only if muted)
                     let vis_scale = if target_gain <= 0.0001 { 0.12 } else { 1.0 };
@@ -1653,18 +2118,40 @@ struct StreamResampler {
 }
 
 impl StreamResampler {
-    fn new(source_rate: u32, output_rate: u32, channels: usize, speed: f32) -> Result<Self> {
+    fn new(
+        source_rate: u32,
+        output_rate: u32,
+        channels: usize,
+        speed: f32,
+        quality: ResamplerQuality,
+    ) -> Result<Self> {
         let channels = channels.max(1);
         let chunk_size = 1024;
         let speed = speed.clamp(0.5, 2.0) as f64;
         let ratio = output_rate as f64 / (source_rate.max(1) as f64 * speed);
         let resampler = if (ratio - 1.0).abs() > 1e-4 {
-            let parameters = SincInterpolationParameters {
-                sinc_len: 256,
-                f_cutoff: 0.95,
-                interpolation: SincInterpolationType::Linear,
-                oversampling_factor: 256,
-                window: WindowFunction::BlackmanHarris2,
+            let parameters = match quality {
+                ResamplerQuality::LinearPhaseStudio => SincInterpolationParameters {
+                    sinc_len: 256,
+                    f_cutoff: 0.95,
+                    interpolation: SincInterpolationType::Linear,
+                    oversampling_factor: 256,
+                    window: WindowFunction::BlackmanHarris2,
+                },
+                ResamplerQuality::SharpPrecision => SincInterpolationParameters {
+                    sinc_len: 256,
+                    f_cutoff: 0.97,
+                    interpolation: SincInterpolationType::Cubic,
+                    oversampling_factor: 256,
+                    window: WindowFunction::Hann2,
+                },
+                ResamplerQuality::GentleAnalog => SincInterpolationParameters {
+                    sinc_len: 128,
+                    f_cutoff: 0.91,
+                    interpolation: SincInterpolationType::Linear,
+                    oversampling_factor: 128,
+                    window: WindowFunction::Blackman,
+                },
             };
             Some(SincFixedIn::new(
                 ratio,
@@ -1892,5 +2379,31 @@ mod tests {
         assert!((out_l[63] - 63.0 / 64.0).abs() < 1e-6);
         assert!((out_r[63] + 63.0 / 64.0).abs() < 1e-6);
         assert_eq!(tap.levels(), (0.5, 0.4, 0.9, 0.8, -0.95));
+    }
+
+    #[test]
+    fn oversampling_picks_synchronous_power_of_2_and_max_dac_rates() {
+        let dac_192k = &[(44_100, 192_000)];
+        assert_eq!(
+            choose_target_sample_rate(44_100, dac_192k, OversamplingMode::Native),
+            Some(44_100)
+        );
+        assert_eq!(
+            choose_target_sample_rate(44_100, dac_192k, OversamplingMode::PowerOf2),
+            Some(176_400)
+        );
+        assert_eq!(
+            choose_target_sample_rate(48_000, dac_192k, OversamplingMode::PowerOf2),
+            Some(192_000)
+        );
+        assert_eq!(
+            choose_target_sample_rate(44_100, dac_192k, OversamplingMode::MaxDeviceRate),
+            Some(192_000)
+        );
+        let dac_96k = &[(44_100, 96_000)];
+        assert_eq!(
+            choose_target_sample_rate(44_100, dac_96k, OversamplingMode::PowerOf2),
+            Some(88_200)
+        );
     }
 }

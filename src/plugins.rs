@@ -122,6 +122,72 @@ impl ReplayGainMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum OversamplingMode {
+    #[default]
+    Native,
+    PowerOf2,
+    MaxDeviceRate,
+}
+
+impl OversamplingMode {
+    pub const ALL: &'static [OversamplingMode] = &[
+        OversamplingMode::Native,
+        OversamplingMode::PowerOf2,
+        OversamplingMode::MaxDeviceRate,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            OversamplingMode::Native => "Native (1:1)",
+            OversamplingMode::PowerOf2 => "Power of 2",
+            OversamplingMode::MaxDeviceRate => "Max DAC Rate",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            OversamplingMode::Native => "Keep native source sample rate (bit-matched when DAC supports it)",
+            OversamplingMode::PowerOf2 => {
+                "Synchronous integer upsampling (44.1→176.4 kHz, 48→192 kHz) up to DAC limit"
+            }
+            OversamplingMode::MaxDeviceRate => "Upsample every track to the highest rate supported by the DAC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ResamplerQuality {
+    #[default]
+    LinearPhaseStudio,
+    SharpPrecision,
+    GentleAnalog,
+}
+
+impl ResamplerQuality {
+    pub const ALL: &'static [ResamplerQuality] = &[
+        ResamplerQuality::LinearPhaseStudio,
+        ResamplerQuality::SharpPrecision,
+        ResamplerQuality::GentleAnalog,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ResamplerQuality::LinearPhaseStudio => "Studio Linear",
+            ResamplerQuality::SharpPrecision => "Sharp Precision",
+            ResamplerQuality::GentleAnalog => "Gentle Analog",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            ResamplerQuality::LinearPhaseStudio => "256-tap Blackman-Harris2 · 0.95 cutoff",
+            ResamplerQuality::SharpPrecision => "256-tap Hann2 · 0.97 steep cutoff",
+            ResamplerQuality::GentleAnalog => "128-tap Blackman · 0.91 soft rolloff",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DspConfig {
     #[serde(default)]
@@ -140,7 +206,7 @@ pub struct DspConfig {
     pub soft_limiter: bool,
     #[serde(default)]
     pub preamp_db: f32,
-    // Gapless, Crossfade, ReplayGain, and Bit-Perfect Exclusive settings
+    // Gapless, Crossfade, ReplayGain, and Bit-Perfect / Audirvāna-Class Engine settings
     #[serde(default = "default_true")]
     pub gapless_enabled: bool,
     #[serde(default)]
@@ -153,10 +219,24 @@ pub struct DspConfig {
     pub rg_prevent_clipping: bool,
     #[serde(default)]
     pub bit_perfect_mode: bool,
+    #[serde(default = "default_true")]
+    pub ram_playback: bool,
+    #[serde(default = "default_ram_mb")]
+    pub ram_buffer_mb: u32,
+    #[serde(default)]
+    pub oversampling: OversamplingMode,
+    #[serde(default)]
+    pub resampler_quality: ResamplerQuality,
+    #[serde(default)]
+    pub direct_volume_lock: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_ram_mb() -> u32 {
+    512
 }
 
 fn default_eq_bands() -> [f32; 10] {
@@ -184,6 +264,11 @@ impl Default for DspConfig {
             rg_preamp_db: 0.0,
             rg_prevent_clipping: true,
             bit_perfect_mode: false,
+            ram_playback: true,
+            ram_buffer_mb: default_ram_mb(),
+            oversampling: OversamplingMode::Native,
+            resampler_quality: ResamplerQuality::LinearPhaseStudio,
+            direct_volume_lock: false,
         }
     }
 }
