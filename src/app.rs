@@ -14926,7 +14926,7 @@ fn handle_borderless_resize(ctx: &egui::Context, p: &Palette) {
     // Subtle discoverable 3-line diagonal resize grip in bottom-right corner
     let grip_painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("borderless_resize_grip"),
+        egui::Id::unique("borderless_resize_grip"),
     ));
     let grip_col = Color32::from_rgba_unmultiplied(p.muted.r(), p.muted.g(), p.muted.b(), 120);
     for offset in [4.0_f32, 8.0, 12.0] {
