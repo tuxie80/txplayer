@@ -641,6 +641,7 @@ h2 .gold, h1 .gold { color: var(--gold); }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* ---------- screenshot viewer ---------- */
+.shot-pane { min-height: 610px; }
 .shot-item {
   max-width: 900px;
   margin: 0 auto;
@@ -651,13 +652,15 @@ h2 .gold, h1 .gold { color: var(--gold); }
   cursor: zoom-in;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
+.shot-item.shot-video { cursor: default; }
+.shot-item video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; background: #071014; }
 .shot-item[hidden] { display: none; }
 .shot-item:hover, .shot-item:focus-visible {
   border-color: var(--accent-50);
   box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
   outline: none;
 }
-.shot-item img { display: block; width: 100%; height: auto; }
+.shot-item img { display: block; width: 100%; height: auto; background: #071014; }
 .shot-item figcaption { padding: 0.8rem 1.05rem; border-top: 1px solid var(--line-soft); }
 .shot-item figcaption strong { display: block; font-size: 0.94rem; margin-bottom: 0.12rem; color: var(--text-hi); }
 .shot-item figcaption span { font-size: 0.82rem; color: var(--muted); }

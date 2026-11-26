@@ -59,7 +59,13 @@
         var on = j === i;
         t.setAttribute('aria-selected', on ? 'true' : 'false');
         t.tabIndex = on ? 0 : -1;
-        if (panes[j]) panes[j].hidden = !on;
+        if (panes[j]) {
+          panes[j].hidden = !on;
+          var vid = panes[j].querySelector('video');
+          if (vid) {
+            if (on) { vid.play().catch(function () {}); } else { vid.pause(); }
+          }
+        }
       });
       if (focus) tabs[i].focus();
     }
@@ -75,6 +81,15 @@
       });
     });
   });
+
+  var jumpVideo = document.getElementById('jumpVideoTour');
+  if (jumpVideo) {
+    jumpVideo.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var vtab = document.getElementById('sh-video');
+      if (vtab) vtab.click();
+    });
+  }
 
   // ---- screenshot viewer ----
   slice(document.querySelectorAll('.shot-pane')).forEach(function (pane) {

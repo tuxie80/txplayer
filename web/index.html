@@ -9,7 +9,7 @@
 <link rel="preload" href="fonts/space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css?v=4">
 </head>
 <body>
 
@@ -91,9 +91,9 @@
       <div><dt>0 cloud</dt><dd>100% local &amp; free</dd></div>
     </dl>
 
-    <figure class="hero-shot reveal" style="cursor:default">
-      <video src="img/txplayer-tour.mp4?v=3" poster="img/classic-piano-solarized.jpg" controls playsinline preload="metadata" muted loop aria-label="TxPlayer v1.12.0 visual tour"></video>
-      <figcaption>TxPlayer v1.12.0 in motion — Compact Mini-Player, 88-Key Piano, Grand Staff Sheet Music, Live Spectrogram, Interactive EQ, Blind ABX Lab, Insights &amp; Themes.</figcaption>
+    <figure class="hero-shot reveal" data-lightbox="img/classic-piano-solarized.jpg" tabindex="0">
+      <img src="img/classic-piano-solarized.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — 88-Key Precision CQT Piano Visualizer &amp; Inline DR Badges">
+      <figcaption>TxPlayer v1.12.0 — 88-Key Precision CQT Piano, Grand Staff Sheet Music, Compact Mode, 64-bit DSP &amp; Master Library. Click to zoom, or watch the <a href="#screenshots" id="jumpVideoTour">Video Tour ↓</a>.</figcaption>
     </figure>
   </div>
 </section>
@@ -169,28 +169,29 @@
     <div class="tabs reveal" id="shotTabs">
       <div class="tab-bar" role="tablist" aria-label="Screenshot categories">
         <button class="tab-btn" type="button" role="tab" id="sh-compact" aria-controls="shpane-compact" aria-selected="true">Compact Mode</button>
-        <button class="tab-btn" type="button" role="tab" id="sh-classic" aria-controls="shpane-classic" aria-selected="false" tabindex="-1">88-Key &amp; Visualizers</button>
+        <button class="tab-btn" type="button" role="tab" id="sh-classic" aria-controls="shpane-classic" aria-selected="false" tabindex="-1">88-Key &amp; Staff</button>
         <button class="tab-btn" type="button" role="tab" id="sh-settings" aria-controls="shpane-settings" aria-selected="false" tabindex="-1">Settings &amp; DSP</button>
         <button class="tab-btn" type="button" role="tab" id="sh-modals" aria-controls="shpane-modals" aria-selected="false" tabindex="-1">ABX, Insights &amp; Help</button>
         <button class="tab-btn" type="button" role="tab" id="sh-themes" aria-controls="shpane-themes" aria-selected="false" tabindex="-1">Themes</button>
+        <button class="tab-btn" type="button" role="tab" id="sh-video" aria-controls="shpane-video" aria-selected="false" tabindex="-1">▶ Video Tour</button>
       </div>
 
       <!-- COMPACT MODE (DEFAULT!) -->
       <div class="tab-pane shot-pane" role="tabpanel" id="shpane-compact" aria-labelledby="sh-compact">
         <figure class="shot-item compact-frame" data-lightbox="img/compact-studio-reference.jpg" tabindex="0">
-          <img src="img/compact-studio-reference.jpg" alt="TxPlayer Compact Mode — Studio Reference">
+          <img src="img/compact-studio-reference.jpg" width="1040" height="1244" alt="TxPlayer Compact Mode — Studio Reference">
           <figcaption><strong>Compact Mode · Studio Reference</strong><span>Live Signal Path pill, 1-click Classic toggle, quick queue &amp; instant filter.</span></figcaption>
         </figure>
         <figure class="shot-item compact-frame" data-lightbox="img/compact-solarized-dark.jpg" tabindex="0" hidden>
-          <img src="img/compact-solarized-dark.jpg" alt="TxPlayer Compact Mode — Solarized Dark" loading="lazy">
+          <img src="img/compact-solarized-dark.jpg" width="1040" height="1244" alt="TxPlayer Compact Mode — Solarized Dark">
           <figcaption><strong>Compact Mode · Solarized Dark</strong><span>Calm low-glare teal palette with remembered window size &amp; position.</span></figcaption>
         </figure>
         <figure class="shot-item compact-frame" data-lightbox="img/compact-tokyo-night.jpg" tabindex="0" hidden>
-          <img src="img/compact-tokyo-night.jpg" alt="TxPlayer Compact Mode — Tokyo Night" loading="lazy">
+          <img src="img/compact-tokyo-night.jpg" width="1040" height="1244" alt="TxPlayer Compact Mode — Tokyo Night">
           <figcaption><strong>Compact Mode · Tokyo Night</strong><span>Toggle Compact ↔ Classic anytime with ⌘⇧M / Ctrl+Shift+M.</span></figcaption>
         </figure>
         <figure class="shot-item compact-frame" data-lightbox="img/compact-solarized-light.jpg" tabindex="0" hidden>
-          <img src="img/compact-solarized-light.jpg" alt="TxPlayer Compact Mode — Solarized Light" loading="lazy">
+          <img src="img/compact-solarized-light.jpg" width="1040" height="1244" alt="TxPlayer Compact Mode — Solarized Light">
           <figcaption><strong>Compact Mode · Solarized Light</strong><span>Clean parchment light theme for bright desks.</span></figcaption>
         </figure>
         <div class="sv-controls">
@@ -203,19 +204,19 @@
       <!-- 88-KEY & VISUALIZERS (LATEST v1.12.0!) -->
       <div class="tab-pane shot-pane" role="tabpanel" id="shpane-classic" aria-labelledby="sh-classic" hidden>
         <figure class="shot-item" data-lightbox="img/classic-piano-solarized.jpg" tabindex="0">
-          <img src="img/classic-piano-solarized.jpg" alt="TxPlayer v1.12.0 — 88-Key Precision CQT Piano Visualizer" loading="lazy">
+          <img src="img/classic-piano-solarized.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — 88-Key Precision CQT Piano Visualizer">
           <figcaption><strong>88-Key Precision CQT Piano (v1.12.0)</strong><span>Dynamics-colored keybed, 10-voice harmonic cancellation, chord badge &amp; 1-click ASCII/ABC export.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/classic-staff-solarized.jpg" tabindex="0" hidden>
-          <img src="img/classic-staff-solarized.jpg" alt="TxPlayer v1.12.0 — Live Grand Staff Sheet Music Visualizer" loading="lazy">
+          <img src="img/classic-staff-solarized.jpg" width="1800" height="1069" alt="TxPlayer v1.12.0 — Live Grand Staff Sheet Music Visualizer">
           <figcaption><strong>Grand Staff Sheet Music (New in v1.12.0)</strong><span>Live Treble &amp; Bass clefs, noteheads, stems, accidentals, ledger lines &amp; 1-click ASCII / ABC copy.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/classic-spectrogram-studio.jpg" tabindex="0" hidden>
-          <img src="img/classic-spectrogram-studio.jpg" alt="TxPlayer v1.12.0 — Live Acoustic Spectrogram" loading="lazy">
+          <img src="img/classic-spectrogram-studio.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — Live Acoustic Spectrogram">
           <figcaption><strong>Live Acoustic Spectrogram (Sonogram)</strong><span>2D time-frequency waterfall (27.5 Hz – 18 kHz) with PEAK Hz readout &amp; 9 library facets.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/classic-roll-solarized.jpg" tabindex="0" hidden>
-          <img src="img/classic-roll-solarized.jpg" alt="TxPlayer v1.12.0 — 88-Key Concert Piano Roll" loading="lazy">
+          <img src="img/classic-roll-solarized.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — 88-Key Concert Piano Roll">
           <figcaption><strong>88-Key Concert Piano Roll</strong><span>Scrolling note waterfall — freezes on Pause for harmonic study.</span></figcaption>
         </figure>
         <div class="sv-controls">
@@ -228,15 +229,15 @@
       <!-- SETTINGS & DSP -->
       <div class="tab-pane shot-pane" role="tabpanel" id="shpane-settings" aria-labelledby="sh-settings" hidden>
         <figure class="shot-item" data-lightbox="img/settings-dsp-interactive.jpg" tabindex="0">
-          <img src="img/settings-dsp-interactive.jpg" alt="TxPlayer Settings — Interactive EQ Canvas &amp; DSP" loading="lazy">
+          <img src="img/settings-dsp-interactive.jpg" width="1680" height="998" alt="TxPlayer Settings — Interactive EQ Canvas &amp; DSP">
           <figcaption><strong>Settings → Audio &amp; DSP</strong><span>Draggable 10-band EQ nodes, AutoEQ PEQ, FFT Convolution IR, Pitch-Lock &amp; per-device profiles.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/settings-plugins-remote.jpg" tabindex="0" hidden>
-          <img src="img/settings-plugins-remote.jpg" alt="TxPlayer Settings — Modules &amp; LAN Remote" loading="lazy">
+          <img src="img/settings-plugins-remote.jpg" width="1680" height="998" alt="TxPlayer Settings — Modules &amp; LAN Remote">
           <figcaption><strong>Settings → Modules &amp; LAN Mobile Remote</strong><span>Visualizer engines, live ms/frame telemetry, tool health &amp; local Wi-Fi Remote.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/settings-appearance-themes.jpg" tabindex="0" hidden>
-          <img src="img/settings-appearance-themes.jpg" alt="TxPlayer Settings — Appearance &amp; Themes" loading="lazy">
+          <img src="img/settings-appearance-themes.jpg" width="1680" height="998" alt="TxPlayer Settings — Appearance &amp; Themes">
           <figcaption><strong>Settings → Appearance</strong><span>9 studio themes, 3 waveform scrubber styles &amp; row density controls.</span></figcaption>
         </figure>
         <div class="sv-controls">
@@ -249,15 +250,15 @@
       <!-- ABX, INSIGHTS & F1 HELP -->
       <div class="tab-pane shot-pane" role="tabpanel" id="shpane-modals" aria-labelledby="sh-modals" hidden>
         <figure class="shot-item" data-lightbox="img/modal-abx-lab.jpg" tabindex="0">
-          <img src="img/modal-abx-lab.jpg" alt="TxPlayer Loudness-Matched Blind ABX Lab" loading="lazy">
+          <img src="img/modal-abx-lab.jpg" width="1680" height="998" alt="TxPlayer Loudness-Matched Blind ABX Lab">
           <figcaption><strong>Blind ABX Comparison Lab</strong><span>Auto EBU R128 loudness trim (0.1 dB) + seamless blind X trials &amp; exact binomial p-value.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/modal-insights.jpg" tabindex="0" hidden>
-          <img src="img/modal-insights.jpg" alt="TxPlayer Library Insights &amp; Catalog Exports" loading="lazy">
+          <img src="img/modal-insights.jpg" width="1680" height="998" alt="TxPlayer Library Insights &amp; Catalog Exports">
           <figcaption><strong>Library Insights &amp; Exports</strong><span>Clickable Codec, Decade, DR &amp; Composer charts + HTML, Markdown &amp; CSV dossiers.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/modal-quick-help.jpg" tabindex="0" hidden>
-          <img src="img/modal-quick-help.jpg" alt="TxPlayer Built-In F1 Quick Guide" loading="lazy">
+          <img src="img/modal-quick-help.jpg" width="1680" height="998" alt="TxPlayer Built-In F1 Quick Guide">
           <figcaption><strong>Built-In F1 Quick Guide</strong><span>First steps, shortcuts, Power-Search tokens &amp; DSP reference inside the app.</span></figcaption>
         </figure>
         <div class="sv-controls">
@@ -270,15 +271,15 @@
       <!-- THEMES -->
       <div class="tab-pane shot-pane" role="tabpanel" id="shpane-themes" aria-labelledby="sh-themes" hidden>
         <figure class="shot-item" data-lightbox="img/theme-nord.jpg" tabindex="0">
-          <img src="img/theme-nord.jpg" alt="TxPlayer — Nord Theme" loading="lazy">
+          <img src="img/theme-nord.jpg" width="1680" height="998" alt="TxPlayer — Nord Theme">
           <figcaption><strong>Nord</strong><span>Arctic polar night &amp; frost across chrome, library &amp; 88-key stage.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/theme-catppuccin.jpg" tabindex="0" hidden>
-          <img src="img/theme-catppuccin.jpg" alt="TxPlayer — Catppuccin Mocha Theme" loading="lazy">
+          <img src="img/theme-catppuccin.jpg" width="1680" height="998" alt="TxPlayer — Catppuccin Mocha Theme">
           <figcaption><strong>Catppuccin Mocha</strong><span>Warm espresso paired with Live Acoustic Spectrogram.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/theme-solarized-light.jpg" tabindex="0" hidden>
-          <img src="img/theme-solarized-light.jpg" alt="TxPlayer — Solarized Light Theme" loading="lazy">
+          <img src="img/theme-solarized-light.jpg" width="1680" height="998" alt="TxPlayer — Solarized Light Theme">
           <figcaption><strong>Solarized Light</strong><span>High-legibility daytime parchment palette.</span></figcaption>
         </figure>
         <div class="sv-controls">
@@ -286,6 +287,14 @@
           <span class="sv-count" aria-live="polite">1 / 3</span>
           <button class="sv-next" type="button" aria-label="Next">›</button>
         </div>
+      </div>
+
+      <!-- VIDEO TOUR -->
+      <div class="tab-pane shot-pane" role="tabpanel" id="shpane-video" aria-labelledby="sh-video" hidden>
+        <figure class="shot-item shot-video">
+          <video id="tourVideo" src="img/txplayer-tour.mp4?v=3" poster="img/classic-piano-solarized.jpg" controls playsinline preload="metadata" muted loop aria-label="TxPlayer v1.12.0 visual tour"></video>
+          <figcaption><strong>TxPlayer v1.12.0 · 1080p Visual Tour</strong><span>24-second walkthrough: 88-Key Piano, Grand Staff Sheet Music, Compact Mode, Spectrogram, Interactive EQ, Blind ABX Lab, Insights &amp; Themes.</span></figcaption>
+        </figure>
       </div>
     </div>
   </div>
@@ -565,6 +574,6 @@
   <button class="lb-next" id="lbNext" aria-label="Next">›</button>
 </div>
 
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>
