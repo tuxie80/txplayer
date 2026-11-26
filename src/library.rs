@@ -1299,6 +1299,319 @@ impl Library {
         std::fs::write(path, out)?;
         Ok(self.tracks.len())
     }
+
+    /// Exports the active library, collection, or smart view to a clean Markdown listening dossier.
+    pub fn export_catalog_markdown(
+        &self,
+        title: &str,
+        track_ids: Option<&[u64]>,
+        path: &Path,
+    ) -> std::io::Result<usize> {
+        let selected: Vec<&Track> = match track_ids {
+            Some(ids) => ids.iter().filter_map(|id| self.get_by_id(*id)).collect(),
+            None => self.tracks.iter().collect(),
+        };
+        let total_secs: f64 = selected.iter().filter_map(|t| t.duration).sum();
+        let hires_n = selected.iter().filter(|t| t.is_hires()).count();
+        let dsd_n = selected
+            .iter()
+            .filter(|t| t.codec.starts_with("DSD"))
+            .count();
+        let dr_vals: Vec<f32> = selected
+            .iter()
+            .filter_map(|t| t.dr_score.map(|d| d as f32))
+            .collect();
+        let avg_dr = if dr_vals.is_empty() {
+            "—".to_string()
+        } else {
+            format!("DR{:.1}", dr_vals.iter().sum::<f32>() / dr_vals.len() as f32)
+        };
+
+        // Group tracks by (Album, Artist) preserving display order
+        let mut album_order: Vec<(String, String)> = Vec::new();
+        let mut album_map: HashMap<(String, String), Vec<&Track>> = HashMap::new();
+        for t in &selected {
+            let key = (t.album.to_lowercase(), t.artist.to_lowercase());
+            if !album_map.contains_key(&key) {
+                album_order.push(key.clone());
+            }
+            album_map.entry(key).or_default().push(*t);
+        }
+
+        let mut md = String::with_capacity(selected.len() * 160 + 512);
+        md.push_str(&format!("# {title} — Audiophile Listening Catalog\n\n"));
+        md.push_str(&format!(
+            "> Exported by **TxPlayer v{}** · **{}** tracks · **{}** albums · **{:.1} hrs** · **{}** Hi-Res / **{}** DSD · Avg **{}**\n\n",
+            env!("CARGO_PKG_VERSION"),
+            selected.len(),
+            album_order.len(),
+            total_secs / 3600.0,
+            hires_n,
+            dsd_n,
+            avg_dr
+        ));
+
+        let esc_md = |s: &str| s.replace('|', "\\|").replace(['\r', '\n'], " ");
+
+        for key in &album_order {
+            let Some(tracks) = album_map.get(key) else {
+                continue;
+            };
+            let first = tracks[0];
+            let yr = first
+                .year
+                .as_deref()
+                .map(|y| format!(" ({y})"))
+                .unwrap_or_default();
+            md.push_str(&format!(
+                "## {} — {}{}\n\n",
+                first.album, first.artist, yr
+            ));
+            let mut meta_parts = Vec::new();
+            if let Some(ref lbl) = first.label
+                && !lbl.trim().is_empty()
+            {
+                meta_parts.push(format!("**Label:** {}", lbl.trim()));
+            }
+            if let Some(ref cat) = first.catalog_number
+                && !cat.trim().is_empty()
+            {
+                meta_parts.push(format!("**Cat #:** {}", cat.trim()));
+            }
+            let alb_drs: Vec<f32> = tracks
+                .iter()
+                .filter_map(|t| t.dr_score.map(|d| d as f32))
+                .collect();
+            if !alb_drs.is_empty() {
+                meta_parts.push(format!(
+                    "**Album DR:** DR{:.0}",
+                    alb_drs.iter().sum::<f32>() / alb_drs.len() as f32
+                ));
+            }
+            if !meta_parts.is_empty() {
+                md.push_str(&meta_parts.join(" · "));
+                md.push_str("\n\n");
+            }
+            if let Some(note) = self.album_note(&first.album, &first.artist)
+                && !note.trim().is_empty()
+            {
+                md.push_str(&format!("> **Collector Liner Notes:** {}\n\n", note.trim()));
+            }
+            md.push_str("| # | Title | Composer / Work | Format | DR | LUFS | TrueHz | Tags |\n");
+            md.push_str("|---:|---|---|---|---:|---:|---|---|\n");
+            for (idx, t) in tracks.iter().enumerate() {
+                let num = t.track_number.unwrap_or((idx + 1) as u32);
+                let comp_work = match (t.composer.as_deref(), t.work.as_deref()) {
+                    (Some(c), Some(w)) if !c.is_empty() && !w.is_empty() => format!("{c} — {w}"),
+                    (Some(c), _) if !c.is_empty() => c.to_string(),
+                    (_, Some(w)) if !w.is_empty() => w.to_string(),
+                    _ => "—".into(),
+                };
+                let dr = t
+                    .dr_score
+                    .map(|d| format!("DR{d}"))
+                    .unwrap_or_else(|| "—".into());
+                let lufs = t
+                    .integrated_lufs
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "—".into());
+                let auth = match t.authenticity.as_deref() {
+                    Some("AuthenticHiRes") => "Verified Hi-Res",
+                    Some("StandardCd") => "CD Quality",
+                    Some("LikelyUpsampled") => "Upsampled",
+                    _ => "—",
+                };
+                let tags = if t.custom_tags.is_empty() {
+                    "—".into()
+                } else {
+                    t.custom_tags
+                        .iter()
+                        .map(|x| format!("#{x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    num,
+                    esc_md(&t.title),
+                    esc_md(&comp_work),
+                    esc_md(&t.quality_full()),
+                    dr,
+                    lufs,
+                    auth,
+                    esc_md(&tags),
+                ));
+            }
+            md.push('\n');
+        }
+        std::fs::write(path, md)?;
+        Ok(selected.len())
+    }
+
+    /// Exports the active library, collection, or smart view to a self-contained print-ready HTML dossier.
+    pub fn export_catalog_html(
+        &self,
+        title: &str,
+        track_ids: Option<&[u64]>,
+        path: &Path,
+    ) -> std::io::Result<usize> {
+        let selected: Vec<&Track> = match track_ids {
+            Some(ids) => ids.iter().filter_map(|id| self.get_by_id(*id)).collect(),
+            None => self.tracks.iter().collect(),
+        };
+        let total_secs: f64 = selected.iter().filter_map(|t| t.duration).sum();
+        let hires_n = selected.iter().filter(|t| t.is_hires()).count();
+        let dsd_n = selected
+            .iter()
+            .filter(|t| t.codec.starts_with("DSD"))
+            .count();
+        let dr_vals: Vec<f32> = selected
+            .iter()
+            .filter_map(|t| t.dr_score.map(|d| d as f32))
+            .collect();
+        let avg_dr = if dr_vals.is_empty() {
+            "—".to_string()
+        } else {
+            format!("DR{:.1}", dr_vals.iter().sum::<f32>() / dr_vals.len() as f32)
+        };
+
+        let mut album_order: Vec<(String, String)> = Vec::new();
+        let mut album_map: HashMap<(String, String), Vec<&Track>> = HashMap::new();
+        for t in &selected {
+            let key = (t.album.to_lowercase(), t.artist.to_lowercase());
+            if !album_map.contains_key(&key) {
+                album_order.push(key.clone());
+            }
+            album_map.entry(key).or_default().push(*t);
+        }
+
+        let esc = |s: &str| -> String {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+        };
+
+        let mut html = String::with_capacity(selected.len() * 320 + 2048);
+        html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+        html.push_str(&format!("<title>{} — TxPlayer Listening Catalog</title>\n", esc(title)));
+        html.push_str(
+            "<style>\
+            :root{--bg:#0f1215;--card:#171c21;--border:#262e36;--fg:#eef2f6;--muted:#8f9ca8;--accent:#4cb8a8;--gold:#e6b85c;--danger:#e06c75;}\
+            @media print{:root{--bg:#fff;--card:#fff;--border:#ddd;--fg:#111;--muted:#555;--accent:#1e6f64;--gold:#9c6f12;--danger:#b42318;}}\
+            *{box-sizing:border-box}body{margin:0;padding:32px;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:1120px;margin-inline:auto;}\
+            h1{margin:0 0 6px;font-size:26px;letter-spacing:-.02em}.sub{color:var(--muted);margin-bottom:20px;font-size:13px}\
+            .kpis{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px}.kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:128px}\
+            .kpi b{display:block;font-size:18px;font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent)}.kpi span{font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:.05em}\
+            .album{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:18px;break-inside:avoid}\
+            .album h2{margin:0 0 4px;font-size:17px}.meta{color:var(--muted);font-size:12px;margin-bottom:8px}\
+            .notes{border-left:3px solid var(--gold);padding:6px 12px;margin:8px 0 12px;background:rgba(230,184,92,.08);font-size:12.5px;white-space:pre-wrap}\
+            table{width:100%;border-collapse:collapse;font-size:12.5px}th,td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:left}\
+            th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}\
+            .pill{display:inline-block;padding:1px 6px;border-radius:4px;font:11px ui-monospace,SFMono-Regular,monospace;border:1px solid var(--border)}\
+            .gold{color:var(--gold);border-color:rgba(230,184,92,.45)}.acc{color:var(--accent);border-color:rgba(76,184,168,.45)}.bad{color:var(--danger);border-color:rgba(224,108,117,.45)}\
+            .tag{display:inline-block;margin-right:4px;font-size:11px;color:var(--accent)}\
+            </style>\n</head>\n<body>\n",
+        );
+        html.push_str(&format!("<h1>{}</h1>\n", esc(title)));
+        html.push_str(&format!(
+            "<div class=\"sub\">Audiophile Listening Catalog · Generated by TxPlayer v{}</div>\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+        html.push_str("<div class=\"kpis\">");
+        html.push_str(&format!("<div class=\"kpi\"><span>Tracks</span><b>{}</b></div>", selected.len()));
+        html.push_str(&format!("<div class=\"kpi\"><span>Albums</span><b>{}</b></div>", album_order.len()));
+        html.push_str(&format!("<div class=\"kpi\"><span>Runtime</span><b>{:.1} hrs</b></div>", total_secs / 3600.0));
+        html.push_str(&format!("<div class=\"kpi\"><span>Hi-Res / DSD</span><b style=\"color:var(--gold)\">{} / {}</b></div>", hires_n, dsd_n));
+        html.push_str(&format!("<div class=\"kpi\"><span>Average DR</span><b style=\"color:var(--gold)\">{}</b></div>", esc(&avg_dr)));
+        html.push_str("</div>\n");
+
+        for key in &album_order {
+            let Some(tracks) = album_map.get(key) else {
+                continue;
+            };
+            let first = tracks[0];
+            let yr = first
+                .year
+                .as_deref()
+                .map(|y| format!(" ({})", esc(y)))
+                .unwrap_or_default();
+            html.push_str("<section class=\"album\">\n");
+            html.push_str(&format!(
+                "<h2>{} — {}{}</h2>\n",
+                esc(&first.album),
+                esc(&first.artist),
+                yr
+            ));
+            let mut meta_parts = Vec::new();
+            if let Some(ref lbl) = first.label
+                && !lbl.trim().is_empty()
+            {
+                meta_parts.push(format!("Label: {}", esc(lbl.trim())));
+            }
+            if let Some(ref cat) = first.catalog_number
+                && !cat.trim().is_empty()
+            {
+                meta_parts.push(format!("Cat #: {}", esc(cat.trim())));
+            }
+            if !meta_parts.is_empty() {
+                html.push_str(&format!("<div class=\"meta\">{}</div>\n", meta_parts.join(" · ")));
+            }
+            if let Some(note) = self.album_note(&first.album, &first.artist)
+                && !note.trim().is_empty()
+            {
+                html.push_str(&format!(
+                    "<div class=\"notes\"><strong>Collector Liner Notes:</strong> {}</div>\n",
+                    esc(note.trim())
+                ));
+            }
+            html.push_str("<table><thead><tr><th>#</th><th>Title</th><th>Composer / Work</th><th>Format</th><th>DR</th><th>LUFS</th><th>Tags</th></tr></thead><tbody>\n");
+            for (idx, t) in tracks.iter().enumerate() {
+                let num = t.track_number.unwrap_or((idx + 1) as u32);
+                let comp_work = match (t.composer.as_deref(), t.work.as_deref()) {
+                    (Some(c), Some(w)) if !c.is_empty() && !w.is_empty() => format!("{c} — {w}"),
+                    (Some(c), _) if !c.is_empty() => c.to_string(),
+                    (_, Some(w)) if !w.is_empty() => w.to_string(),
+                    _ => "—".into(),
+                };
+                let fmt_cls = if t.is_hires() { "pill gold" } else if t.is_lossless() { "pill acc" } else { "pill" };
+                let dr_html = match t.dr_score {
+                    Some(d) if d >= 11 => format!("<span class=\"pill gold\">DR{d}</span>"),
+                    Some(d) if d >= 8 => format!("<span class=\"pill acc\">DR{d}</span>"),
+                    Some(d) => format!("<span class=\"pill bad\">DR{d}</span>"),
+                    None => "—".into(),
+                };
+                let lufs = t
+                    .integrated_lufs
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "—".into());
+                let tags_html = if t.custom_tags.is_empty() {
+                    "—".into()
+                } else {
+                    t.custom_tags
+                        .iter()
+                        .map(|x| format!("<span class=\"tag\">#{}</span>", esc(x)))
+                        .collect::<Vec<_>>()
+                        .join("")
+                };
+                html.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td><span class=\"{}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    num,
+                    esc(&t.title),
+                    esc(&comp_work),
+                    fmt_cls,
+                    esc(&t.quality_full()),
+                    dr_html,
+                    lufs,
+                    tags_html,
+                ));
+            }
+            html.push_str("</tbody></table>\n</section>\n");
+        }
+        html.push_str("</body>\n</html>\n");
+        std::fs::write(path, html)?;
+        Ok(selected.len())
+    }
 }
 
 /// Moves the elements at `moving_indices` (in their existing relative order) to `insert_before`
@@ -1978,5 +2291,53 @@ mod tests {
         assert_eq!(stats.dr_buckets[0], ("DR 14+ Ref".to_string(), 1));
         assert_eq!(stats.dr_buckets[1], ("DR 11–13 Dyn".to_string(), 1));
         assert_eq!(stats.dr_buckets[2], ("DR ≤7 Loud".to_string(), 1));
+    }
+
+    #[test]
+    fn exports_portable_markdown_and_html_listening_catalogs() {
+        let mut store = LibraryStore::default();
+        let lib = store.active_mut();
+        let mut t1 = sample_track(1, "/m/1.flac", "Sonata <No. 14> & Adagio");
+        t1.artist = "Maurizio Pollini".into();
+        t1.album = "Beethoven Sonatas".into();
+        t1.composer = Some("Ludwig van Beethoven".into());
+        t1.label = Some("Deutsche Grammophon".into());
+        t1.dr_score = Some(14);
+        t1.integrated_lufs = Some(-18.2);
+        t1.authenticity = Some("AuthenticHiRes".into());
+        t1.custom_tags = vec!["reference".into()];
+        lib.upsert(t1);
+        lib.set_album_note(
+            "Beethoven Sonatas",
+            "Maurizio Pollini",
+            "Original 1977 pressing — breathtaking dynamics.".to_string(),
+        );
+
+        let dir = std::env::temp_dir();
+        let md_path = dir.join("txplayer_catalog_test.md");
+        let html_path = dir.join("txplayer_catalog_test.html");
+        let n_md = lib
+            .export_catalog_markdown("Reference Classical", None, &md_path)
+            .expect("md export");
+        let n_html = lib
+            .export_catalog_html("Reference Classical", Some(&[1]), &html_path)
+            .expect("html export");
+        assert_eq!(n_md, 1);
+        assert_eq!(n_html, 1);
+
+        let md = std::fs::read_to_string(&md_path).unwrap();
+        assert!(md.contains("Reference Classical"));
+        assert!(md.contains("Collector Liner Notes:"));
+        assert!(md.contains("DR14"));
+        assert!(md.contains("#reference"));
+
+        let html = std::fs::read_to_string(&html_path).unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Sonata &lt;No. 14&gt; &amp; Adagio"));
+        assert!(html.contains("DR14"));
+        assert!(html.contains("Original 1977 pressing"));
+
+        let _ = std::fs::remove_file(&md_path);
+        let _ = std::fs::remove_file(&html_path);
     }
 }

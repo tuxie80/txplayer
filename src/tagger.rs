@@ -168,6 +168,275 @@ fn non_empty(s: &str) -> Option<String> {
     }
 }
 
+/// Pure-Rust batch metadata transformations for cleaning classical & audiophile rips.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchTagTransform {
+    /// Parse `01 - Artist - Title` or `01. Title` from filename into Track #, Artist & Title.
+    ParseFromFilename,
+    /// Swap `Artist` ↔ `Composer` (fixes classical rips tagged with Composer in Artist).
+    SwapArtistComposer,
+    /// Strip leading track number prefixes like `01 - `, `02. `, `1-03 ` from Title.
+    StripLeadingTrackNumbers,
+    /// Normalize Title & Album to smart Title Case while preserving `Op.`, `No.`, `BWV`, Roman numerals.
+    SmartTitleCase,
+    /// Case-sensitive find & replace across Title, Artist, Album, Composer, and Work.
+    FindReplace { find: String, replace: String },
+    /// Append a `#custom-tag` to every selected track.
+    AddCustomTag(String),
+    /// Sequentially assign Track # `1..=N` in the selected order.
+    AutoNumberTracks,
+}
+
+fn strip_leading_track_num(s: &str) -> (Option<u32>, String) {
+    let trimmed = s.trim();
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    // Optional disc prefix like "1-02 " or "2-01."
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 || i > 3 {
+        return (None, trimmed.to_string());
+    }
+    let first_num = trimmed[..i].parse::<u32>().ok();
+    let mut track_num = first_num;
+    let mut rest_idx = i;
+    // Check disc-track form e.g. `1-04 Title`
+    if i <= 2 && rest_idx < bytes.len() && bytes[rest_idx] == b'-' {
+        let mut j = rest_idx + 1;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j > rest_idx + 1 && j - (rest_idx + 1) <= 3 {
+            track_num = trimmed[rest_idx + 1..j].parse::<u32>().ok();
+            rest_idx = j;
+        }
+    }
+    // Require a separator after the number (`.`, `-`, `_`, `)`, or whitespace)
+    let after = &trimmed[rest_idx..];
+    let sep_stripped = after.trim_start_matches([' ', '.', '-', '_', ')']);
+    if sep_stripped.len() == after.len() || sep_stripped.is_empty() {
+        return (None, trimmed.to_string());
+    }
+    (track_num, sep_stripped.trim().to_string())
+}
+
+fn is_preserved_acronym_or_roman(word: &str) -> bool {
+    let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
+    if clean.is_empty() {
+        return false;
+    }
+    let upper = clean.to_uppercase();
+    if matches!(
+        upper.as_str(),
+        "II" | "III"
+            | "IV"
+            | "VI"
+            | "VII"
+            | "VIII"
+            | "IX"
+            | "XI"
+            | "XII"
+            | "BWV"
+            | "KV"
+            | "RV"
+            | "HOB"
+            | "SACD"
+            | "DSD"
+            | "PCM"
+            | "BBC"
+            | "LSO"
+            | "BSO"
+            | "NYP"
+            | "DG"
+            | "ECM"
+    ) {
+        return true;
+    }
+    false
+}
+
+fn smart_title_case(input: &str) -> String {
+    let minor = [
+        "a", "an", "and", "as", "at", "by", "de", "der", "des", "di", "du", "et", "for", "from",
+        "in", "la", "le", "of", "on", "or", "the", "to", "und", "van", "von", "with",
+    ];
+    let words: Vec<&str> = input.split_whitespace().collect();
+    let total = words.len();
+    words
+        .into_iter()
+        .enumerate()
+        .map(|(idx, w)| {
+            if is_preserved_acronym_or_roman(w) {
+                return w.to_uppercase();
+            }
+            let lower = w.to_lowercase();
+            if idx > 0 && idx + 1 < total && minor.contains(&lower.as_str()) {
+                return lower;
+            }
+            // Capitalize first alphabetic character, preserving leading punctuation like `(` or `"`
+            let mut out = String::with_capacity(w.len());
+            let mut cap_next = true;
+            for ch in lower.chars() {
+                if cap_next && ch.is_alphabetic() {
+                    for up in ch.to_uppercase() {
+                        out.push(up);
+                    }
+                    cap_next = false;
+                } else {
+                    out.push(ch);
+                    if ch == '-' || ch == '/' {
+                        cap_next = true;
+                    }
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Applies a batch metadata transform to a single track. Returns `true` if any field changed.
+pub fn apply_batch_transform(
+    track: &mut Track,
+    transform: &BatchTagTransform,
+    seq_index: usize,
+) -> bool {
+    match transform {
+        BatchTagTransform::ParseFromFilename => {
+            let Some(stem) = track.path.file_stem().and_then(|s| s.to_str()) else {
+                return false;
+            };
+            let normalized = stem.replace('_', " ");
+            let (parsed_num, remainder) = strip_leading_track_num(&normalized);
+            let mut changed = false;
+            if let Some(n) = parsed_num
+                && track.track_number != Some(n)
+            {
+                track.track_number = Some(n);
+                changed = true;
+            }
+            let parts: Vec<&str> = remainder
+                .split(" - ")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.len() >= 2 {
+                let new_artist = parts[0].to_string();
+                let new_title = parts[1..].join(" - ");
+                if !new_artist.is_empty() && track.artist != new_artist {
+                    track.artist = new_artist;
+                    changed = true;
+                }
+                if !new_title.is_empty() && track.title != new_title {
+                    track.title = new_title;
+                    changed = true;
+                }
+            } else if !remainder.is_empty() && track.title != remainder {
+                track.title = remainder;
+                changed = true;
+            }
+            changed
+        }
+        BatchTagTransform::SwapArtistComposer => {
+            let prev_artist = track.artist.trim().to_string();
+            let prev_comp = track.composer.clone().unwrap_or_default().trim().to_string();
+            if prev_artist.is_empty() && prev_comp.is_empty() {
+                return false;
+            }
+            track.composer = non_empty(&prev_artist);
+            track.artist = if prev_comp.is_empty() {
+                "Unknown Artist".into()
+            } else {
+                prev_comp
+            };
+            true
+        }
+        BatchTagTransform::StripLeadingTrackNumbers => {
+            let (parsed_num, stripped) = strip_leading_track_num(&track.title);
+            let mut changed = false;
+            if stripped != track.title && !stripped.is_empty() {
+                track.title = stripped;
+                changed = true;
+            }
+            if track.track_number.is_none()
+                && let Some(n) = parsed_num
+            {
+                track.track_number = Some(n);
+                changed = true;
+            }
+            changed
+        }
+        BatchTagTransform::SmartTitleCase => {
+            let new_title = smart_title_case(&track.title);
+            let new_album = smart_title_case(&track.album);
+            let mut changed = false;
+            if !new_title.is_empty() && new_title != track.title {
+                track.title = new_title;
+                changed = true;
+            }
+            if !new_album.is_empty() && new_album != track.album {
+                track.album = new_album;
+                changed = true;
+            }
+            changed
+        }
+        BatchTagTransform::FindReplace { find, replace } => {
+            if find.is_empty() {
+                return false;
+            }
+            let mut changed = false;
+            if track.title.contains(find.as_str()) {
+                track.title = track.title.replace(find.as_str(), replace.as_str());
+                changed = true;
+            }
+            if track.artist.contains(find.as_str()) {
+                track.artist = track.artist.replace(find.as_str(), replace.as_str());
+                changed = true;
+            }
+            if track.album.contains(find.as_str()) {
+                track.album = track.album.replace(find.as_str(), replace.as_str());
+                changed = true;
+            }
+            if let Some(ref mut comp) = track.composer
+                && comp.contains(find.as_str())
+            {
+                *comp = comp.replace(find.as_str(), replace.as_str());
+                changed = true;
+            }
+            if let Some(ref mut work) = track.work
+                && work.contains(find.as_str())
+            {
+                *work = work.replace(find.as_str(), replace.as_str());
+                changed = true;
+            }
+            changed
+        }
+        BatchTagTransform::AddCustomTag(raw) => {
+            let clean = raw.trim().trim_start_matches('#').to_lowercase();
+            if clean.is_empty()
+                || track
+                    .custom_tags
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&clean))
+            {
+                return false;
+            }
+            track.custom_tags.push(clean);
+            true
+        }
+        BatchTagTransform::AutoNumberTracks => {
+            let num = (seq_index + 1) as u32;
+            if track.track_number == Some(num) {
+                false
+            } else {
+                track.track_number = Some(num);
+                true
+            }
+        }
+    }
+}
+
 /// Persistent local Hash -> Verified Tags map so previously matched/saved hashes resolve instantly.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct HashTagCache {
@@ -1153,5 +1422,109 @@ mod tests {
         assert!(args.contains(&"date=".to_string()));
         assert!(args.contains(&"album_artist=".to_string()));
         assert!(args.contains(&"track=1".to_string()));
+    }
+
+    #[test]
+    fn batch_tag_transforms_parse_swap_case_replace_and_number() {
+        let mut t = Track {
+            id: 7,
+            path: PathBuf::from("/music/04 - Glenn Gould - goldberg variations bwv 988.flac"),
+            title: "04. goldberg variations bwv 988 iii (live)".into(),
+            artist: "Johann Sebastian Bach".into(),
+            album: "the goldberg variations".into(),
+            album_artist: None,
+            track_number: None,
+            disc_number: None,
+            year: Some("1981".into()),
+            genre: Some("Classical".into()),
+            duration: Some(180.0),
+            sample_rate: Some(96_000),
+            bit_depth: Some(24),
+            channels: Some(2),
+            codec: "FLAC".into(),
+            nominal_bitrate: None,
+            cover_path: None,
+            cue_start: None,
+            cue_end: None,
+            rg_track_gain_db: None,
+            rg_track_peak: None,
+            rg_album_gain_db: None,
+            rg_album_peak: None,
+            lyrics: None,
+            composer: Some("Glenn Gould".into()),
+            conductor: None,
+            orchestra: None,
+            work: None,
+            label: None,
+            catalog_number: None,
+            comment: None,
+            custom_tags: Vec::new(),
+            dr_score: None,
+            integrated_lufs: None,
+            true_peak_dbtp: None,
+            effective_bandwidth_hz: None,
+            authenticity: None,
+            play_count: 0,
+            last_played_at: None,
+            rating: 0,
+            added_at: 0,
+        };
+
+        assert!(apply_batch_transform(
+            &mut t,
+            &BatchTagTransform::StripLeadingTrackNumbers,
+            0
+        ));
+        assert_eq!(t.track_number, Some(4));
+        assert_eq!(t.title, "goldberg variations bwv 988 iii (live)");
+
+        assert!(apply_batch_transform(
+            &mut t,
+            &BatchTagTransform::SmartTitleCase,
+            0
+        ));
+        assert_eq!(t.title, "Goldberg Variations BWV 988 III (Live)");
+        assert_eq!(t.album, "The Goldberg Variations");
+
+        assert!(apply_batch_transform(
+            &mut t,
+            &BatchTagTransform::SwapArtistComposer,
+            0
+        ));
+        assert_eq!(t.artist, "Glenn Gould");
+        assert_eq!(t.composer.as_deref(), Some("Johann Sebastian Bach"));
+
+        assert!(apply_batch_transform(
+            &mut t,
+            &BatchTagTransform::FindReplace {
+                find: "(Live)".into(),
+                replace: "(1981 Studio)".into()
+            },
+            0
+        ));
+        assert!(t.title.ends_with("(1981 Studio)"));
+
+        assert!(apply_batch_transform(
+            &mut t,
+            &BatchTagTransform::AddCustomTag("#Reference".into()),
+            0
+        ));
+        assert_eq!(t.custom_tags, vec!["reference".to_string()]);
+
+        assert!(apply_batch_transform(
+            &mut t,
+            &BatchTagTransform::AutoNumberTracks,
+            2
+        ));
+        assert_eq!(t.track_number, Some(3));
+
+        assert!(apply_batch_transform(
+            &mut t,
+            &BatchTagTransform::ParseFromFilename,
+            0
+        ));
+        assert_eq!(t.track_number, Some(4));
+        assert_eq!(t.artist, "Glenn Gould");
+        assert_eq!(t.title, "goldberg variations bwv 988");
     }
 }

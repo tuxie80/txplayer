@@ -20,13 +20,14 @@ use crate::platform::{
     AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, open_file_with_default_app, reveal_in_file_manager,
 };
 use crate::plugins::{
-    CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EqPreset, HeadphonePreset, IrPreset,
-    OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
+    CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EQ_FREQS_HZ, EqPreset, HeadphonePreset,
+    IrPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
     TagProviderConfig, ToolHealth, TrackBookmark,
 };
 use crate::tagger::{
-    EditableTags, LookupStrategy, TagCandidate, TrackHashes, compute_fast_audio_hash,
-    download_cover_artwork, lookup_online, record_hash_cache, write_tags_to_file,
+    BatchTagTransform, EditableTags, LookupStrategy, TagCandidate, TrackHashes,
+    apply_batch_transform, compute_fast_audio_hash, download_cover_artwork, lookup_online,
+    record_hash_cache, write_tags_to_file,
 };
 use crate::theme::{Palette, ThemeId};
 use crate::visualizer::VisualizerMode;
@@ -130,8 +131,19 @@ pub struct TagEditorState {
     pub lookup_note: Option<String>,
     pub write_to_file: bool,
     pub saving: bool,
+    pub find_text: String,
+    pub replace_text: String,
+    pub batch_tag_input: String,
     pub tx: Sender<TagWorkerEvent>,
     pub rx: Receiver<TagWorkerEvent>,
+}
+
+pub enum TagEditorAction {
+    Save(Vec<u64>),
+    BatchTransform {
+        ids: Vec<u64>,
+        transform: BatchTagTransform,
+    },
 }
 
 impl TagEditorState {
@@ -155,6 +167,9 @@ impl TagEditorState {
             lookup_note: None,
             write_to_file: true,
             saving: false,
+            find_text: String::new(),
+            replace_text: String::new(),
+            batch_tag_input: String::new(),
             tx,
             rx,
         }
@@ -208,6 +223,9 @@ impl TagEditorState {
         self.lookup_note = None;
         self.hashes = None;
         self.hash_error = None;
+        self.find_text.clear();
+        self.replace_text.clear();
+        self.batch_tag_input.clear();
         self.hashing = true;
         self.searching = false;
         self.fetching_cover = false;
@@ -369,6 +387,39 @@ impl TagEditorState {
                     && let Some(h) = &hashes
                 {
                     record_hash_cache(h, &track);
+                }
+                updated.push(track);
+            }
+            let _ = tx.send(TagWorkerEvent::SaveDone {
+                updated_tracks: updated,
+                disk_written,
+                disk_errors,
+            });
+        });
+    }
+
+    pub fn trigger_batch_transform(
+        &mut self,
+        source_tracks: Vec<Track>,
+        transform: BatchTagTransform,
+    ) {
+        if self.saving || source_tracks.is_empty() {
+            return;
+        }
+        self.saving = true;
+        let write_disk = self.write_to_file;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let mut updated = Vec::with_capacity(source_tracks.len());
+            let mut disk_written = 0usize;
+            let mut disk_errors = Vec::new();
+            for (idx, mut track) in source_tracks.into_iter().enumerate() {
+                let changed = apply_batch_transform(&mut track, &transform, idx);
+                if changed && write_disk {
+                    match write_tags_to_file(&track, false) {
+                        Ok(()) => disk_written += 1,
+                        Err(e) => disk_errors.push(format!("{}: {e}", track.title)),
+                    }
                 }
                 updated.push(track);
             }
@@ -1413,9 +1464,11 @@ pub fn show_settings_window(
                         );
                     }
 
-                    // Live combined Graphic + Parametric Frequency Response Curve
+                    // Live interactive drag-to-shape Graphic + Parametric Frequency Response Curve
                     ui.add_space(6.0);
-                    paint_eq_response_graph(ui, &plugins.dsp, palette);
+                    if interactive_eq_response_canvas(ui, &mut plugins.dsp, palette) {
+                        actions.dsp_changed = true;
+                    }
 
                     ui.add_space(10.0);
                     ui.separator();
@@ -2252,11 +2305,11 @@ pub fn show_tag_editor_window(
     acoustid_key: &str,
     providers: &TagProviderConfig,
     palette: &Palette,
-) -> Option<Vec<u64>> {
+) -> Option<TagEditorAction> {
     if !state.open {
         return None;
     }
-    let mut save_targets: Option<Vec<u64>> = None;
+    let mut action: Option<TagEditorAction> = None;
     let mut is_open = state.open;
     let batch_count = state.target_ids.len();
     let title = if batch_count > 1 {
@@ -2267,7 +2320,7 @@ pub fn show_tag_editor_window(
 
     // Cmd+Enter saves tags immediately without moving mouse
     if context.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) && !state.saving {
-        save_targets = Some(state.target_ids.clone());
+        action = Some(TagEditorAction::Save(state.target_ids.clone()));
     }
 
     themed_modal_window(
@@ -2476,9 +2529,129 @@ pub fn show_tag_editor_window(
                     }
                 });
 
-            ui.add_space(10.0);
-            ui.separator();
             ui.add_space(8.0);
+            // Batch Multi-Track Tag Transformation Tools (1-click classical & archive cleanup)
+            Frame::new()
+                .fill(palette.surface)
+                .stroke(Stroke::new(1.0, palette.border))
+                .corner_radius(7.0)
+                .inner_margin(Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("BATCH TRANSFORMS:")
+                                .size(9.5)
+                                .strong()
+                                .color(palette.faint),
+                        );
+                        if pill_button(ui, "Filename → Tags", None, PillStyle::Secondary, palette)
+                            .on_hover_text("Parse Track #, Artist, and Title from filenames (e.g. '01 - Artist - Title')")
+                            .clicked()
+                            && !state.saving
+                        {
+                            action = Some(TagEditorAction::BatchTransform {
+                                ids: state.target_ids.clone(),
+                                transform: BatchTagTransform::ParseFromFilename,
+                            });
+                        }
+                        if pill_button(
+                            ui,
+                            "Swap Artist ↔ Composer",
+                            None,
+                            PillStyle::Secondary,
+                            palette,
+                        )
+                        .on_hover_text("Swap Artist and Composer fields (ideal for classical rips)")
+                        .clicked()
+                            && !state.saving
+                        {
+                            action = Some(TagEditorAction::BatchTransform {
+                                ids: state.target_ids.clone(),
+                                transform: BatchTagTransform::SwapArtistComposer,
+                            });
+                        }
+                        if pill_button(ui, "Strip Track #", None, PillStyle::Secondary, palette)
+                            .on_hover_text("Strip leading track number prefixes ('01 - ', '02. ') from Titles")
+                            .clicked()
+                            && !state.saving
+                        {
+                            action = Some(TagEditorAction::BatchTransform {
+                                ids: state.target_ids.clone(),
+                                transform: BatchTagTransform::StripLeadingTrackNumbers,
+                            });
+                        }
+                        if pill_button(ui, "Smart Title Case", None, PillStyle::Secondary, palette)
+                            .on_hover_text("Normalize Title & Album casing while preserving Op., BWV, Roman numerals")
+                            .clicked()
+                            && !state.saving
+                        {
+                            action = Some(TagEditorAction::BatchTransform {
+                                ids: state.target_ids.clone(),
+                                transform: BatchTagTransform::SmartTitleCase,
+                            });
+                        }
+                        if pill_button(ui, "Auto-Number 1..N", None, PillStyle::Secondary, palette)
+                            .on_hover_text("Assign sequential Track # 1..N in current selection order")
+                            .clicked()
+                            && !state.saving
+                        {
+                            action = Some(TagEditorAction::BatchTransform {
+                                ids: state.target_ids.clone(),
+                                transform: BatchTagTransform::AutoNumberTracks,
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_sized(
+                            [130.0, 22.0],
+                            egui::TextEdit::singleline(&mut state.find_text)
+                                .hint_text("Find text…"),
+                        );
+                        ui.add_sized(
+                            [130.0, 22.0],
+                            egui::TextEdit::singleline(&mut state.replace_text)
+                                .hint_text("Replace with…"),
+                        );
+                        if pill_button(ui, "Replace All", None, PillStyle::Active, palette)
+                            .on_hover_text("Find & replace across Title, Artist, Album, Composer & Work")
+                            .clicked()
+                            && !state.saving
+                            && !state.find_text.is_empty()
+                        {
+                            action = Some(TagEditorAction::BatchTransform {
+                                ids: state.target_ids.clone(),
+                                transform: BatchTagTransform::FindReplace {
+                                    find: state.find_text.clone(),
+                                    replace: state.replace_text.clone(),
+                                },
+                            });
+                        }
+                        ui.add_space(8.0);
+                        ui.add_sized(
+                            [115.0, 22.0],
+                            egui::TextEdit::singleline(&mut state.batch_tag_input)
+                                .hint_text("#custom-tag"),
+                        );
+                        if pill_button(ui, "+ Tag All", None, PillStyle::Secondary, palette)
+                            .on_hover_text("Append a #custom-tag to every selected track")
+                            .clicked()
+                            && !state.saving
+                            && !state.batch_tag_input.trim().is_empty()
+                        {
+                            let t = state.batch_tag_input.trim().to_string();
+                            state.batch_tag_input.clear();
+                            action = Some(TagEditorAction::BatchTransform {
+                                ids: state.target_ids.clone(),
+                                transform: BatchTagTransform::AddCustomTag(t),
+                            });
+                        }
+                    });
+                });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
 
             // Online Lookup Services Section
             ui.horizontal_wrapped(|ui| {
@@ -2680,7 +2853,7 @@ pub fn show_tag_editor_window(
                                 .clicked()
                                 {
                                     state.apply_candidate(sel_idx, true);
-                                    save_targets = Some(state.target_ids.clone());
+                                    action = Some(TagEditorAction::Save(state.target_ids.clone()));
                                 }
                                 if pill_button(
                                     ui,
@@ -2751,14 +2924,14 @@ pub fn show_tag_editor_window(
                     )
                     .clicked()
                     {
-                        save_targets = Some(state.target_ids.clone());
+                        action = Some(TagEditorAction::Save(state.target_ids.clone()));
                     }
                 });
             });
         });
 
     state.open = is_open;
-    save_targets
+    action
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3693,31 +3866,127 @@ pub fn paint_dsp_controls(ui: &mut Ui, dsp: &mut DspConfig, palette: &Palette) -
     changed
 }
 
-/// Paints a crisp 20 Hz .. 20 kHz analytical frequency response curve of the combined
-/// 10-band Graphic EQ + 16-band Parametric / AutoEQ headphone profile.
-fn paint_eq_response_graph(ui: &mut Ui, dsp: &DspConfig, palette: &Palette) {
+/// Interactive 20 Hz .. 20 kHz studio frequency response canvas with 10 draggable EQ band nodes.
+/// Drag any node vertically to shape the live EQ curve (-12..+12 dB); double-click a node to reset to 0 dB.
+fn interactive_eq_response_canvas(
+    ui: &mut Ui,
+    dsp: &mut DspConfig,
+    palette: &Palette,
+) -> bool {
     let w = ui.available_width().max(220.0);
-    let h = 68.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let h = 104.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click_and_drag());
+    let plot = Rect::from_min_max(
+        pos2(rect.left() + 26.0, rect.top() + 10.0),
+        pos2(rect.right() - 10.0, rect.bottom() - 16.0),
+    );
+    let zero_y = plot.center().y;
+    let half_h = plot.height() * 0.46;
+    let log_min = 20.0_f32.ln();
+    let log_max = 20_000.0_f32.ln();
+    let freq_to_x = |hz: f32| -> f32 {
+        let t = ((hz.ln() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
+        plot.left() + t * plot.width()
+    };
+    let db_to_y = |db: f32| -> f32 {
+        let norm = (db / 12.0).clamp(-1.0, 1.0);
+        (zero_y - norm * half_h).clamp(plot.top(), plot.bottom())
+    };
+    let y_to_db = |y: f32| -> f32 {
+        let raw = ((zero_y - y) / half_h).clamp(-1.0, 1.0) * 12.0;
+        (raw * 2.0).round() * 0.5
+    };
+
+    // Precompute screen coordinates for all 10 graphic EQ nodes
+    let mut node_pts = [pos2(0.0, 0.0); 10];
+    for (i, &hz) in EQ_FREQS_HZ.iter().enumerate() {
+        node_pts[i] = pos2(freq_to_x(hz), db_to_y(dsp.eq_bands_db[i]));
+    }
+
+    let drag_id = ui.scope_id().with("interactive_eq_drag_band");
+    let mut dragged_band: Option<usize> = ui.ctx().data(|d| d.get_temp(drag_id));
+    let mut changed = false;
+
+    let nearest_band = |pos: egui::Pos2| -> Option<(usize, f32)> {
+        node_pts
+            .iter()
+            .enumerate()
+            .map(|(i, pt)| (i, pt.distance(pos)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    };
+
+    let hovered_band = resp
+        .hover_pos()
+        .and_then(|pos| nearest_band(pos).filter(|(_, d)| *d <= 18.0).map(|(i, _)| i));
+
+    if resp.double_clicked()
+        && let Some(pos) = resp.interact_pointer_pos()
+        && let Some((idx, dist)) = nearest_band(pos)
+        && dist <= 22.0
+    {
+        dsp.eq_bands_db[idx] = 0.0;
+        dsp.eq_preset = EqPreset::Custom;
+        changed = true;
+    } else if resp.drag_started()
+        && let Some(pos) = resp.interact_pointer_pos()
+        && let Some((idx, _)) = nearest_band(pos)
+    {
+        dragged_band = Some(idx);
+        ui.ctx().data_mut(|d| d.insert_temp(drag_id, idx));
+    }
+
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let idx = dragged_band.or_else(|| nearest_band(pos).map(|(i, _)| i));
+        if let Some(i) = idx {
+            let next_db = y_to_db(pos.y);
+            if (dsp.eq_bands_db[i] - next_db).abs() > 0.01 {
+                dsp.eq_bands_db[i] = next_db;
+                dsp.eq_preset = EqPreset::Custom;
+                dsp.eq_enabled = true;
+                dsp.enabled = true;
+                dsp.bit_perfect_mode = false;
+                node_pts[i].y = db_to_y(next_db);
+                changed = true;
+            }
+        }
+    }
+
+    if resp.drag_stopped() {
+        dragged_band = None;
+        ui.ctx().data_mut(|d| d.remove::<usize>(drag_id));
+    }
+
     let painter = ui.painter();
     painter.rect_filled(rect, 6.0, palette.background);
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, palette.border), StrokeKind::Inside);
 
-    let plot = Rect::from_min_max(
-        pos2(rect.left() + 8.0, rect.top() + 8.0),
-        pos2(rect.right() - 8.0, rect.bottom() - 15.0),
-    );
-    let zero_y = plot.center().y;
-    // Reference 0 dB / +6 dB / -6 dB lines
-    painter.line_segment(
-        [pos2(plot.left(), zero_y), pos2(plot.right(), zero_y)],
-        Stroke::new(0.8, palette.border_strong),
-    );
-    for frac in [0.25_f32, 0.75] {
-        let gy = plot.top() + plot.height() * frac;
+    // Horizontal dB gridlines (+12 / +6 / 0 / -6 / -12 dB)
+    for (db, label) in [(12.0_f32, "+12"), (6.0, "+6"), (0.0, "0"), (-6.0, "-6"), (-12.0, "-12")]
+    {
+        let gy = db_to_y(db);
+        let stroke = if db.abs() < 0.1 {
+            Stroke::new(0.9, palette.border_strong)
+        } else {
+            Stroke::new(0.5, palette.border.gamma_multiply(0.45))
+        };
+        painter.line_segment([pos2(plot.left(), gy), pos2(plot.right(), gy)], stroke);
+        painter.text(
+            pos2(plot.left() - 4.0, gy),
+            Align2::RIGHT_CENTER,
+            label,
+            FontId::monospace(7.5),
+            palette.faint,
+        );
+    }
+
+    // Subtle vertical frequency gridlines
+    for hz in [62.0_f32, 250.0, 1000.0, 4000.0, 16000.0] {
+        let gx = freq_to_x(hz);
         painter.line_segment(
-            [pos2(plot.left(), gy), pos2(plot.right(), gy)],
-            Stroke::new(0.5, palette.border.gamma_multiply(0.5)),
+            [pos2(gx, plot.top()), pos2(gx, plot.bottom())],
+            Stroke::new(0.5, palette.border.gamma_multiply(0.35)),
         );
     }
 
@@ -3731,42 +4000,121 @@ fn paint_eq_response_graph(ui: &mut Ui, dsp: &DspConfig, palette: &Palette) {
     let mut pts = Vec::with_capacity(curve.len());
     for (i, &db) in curve.iter().enumerate() {
         let x = plot.left() + (i as f32 / (curve.len() - 1).max(1) as f32) * plot.width();
-        let norm = (db / 12.0).clamp(-1.0, 1.0);
-        let y = (zero_y - norm * (plot.height() * 0.48)).clamp(plot.top(), plot.bottom());
-        pts.push(pos2(x, y));
-    }
-    if pts.len() >= 2 {
-        painter.add(egui::Shape::line(pts, Stroke::new(1.6, line_col)));
+        pts.push(pos2(x, db_to_y(db)));
     }
 
-    let axis_y = rect.bottom() - 7.0;
-    let log_min = 20.0_f32.ln();
-    let log_max = 20_000.0_f32.ln();
+    // Translucent area shading between curve and 0 dB axis
+    if pts.len() >= 2 {
+        let fill_col = Color32::from_rgba_unmultiplied(
+            line_col.r(),
+            line_col.g(),
+            line_col.b(),
+            if active { 28 } else { 12 },
+        );
+        for pair in pts.windows(2) {
+            let p0 = pair[0];
+            let p1 = pair[1];
+            let y_top = p0.y.min(p1.y).min(zero_y);
+            let y_bot = p0.y.max(p1.y).max(zero_y);
+            if y_bot - y_top > 0.5 {
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(p0.x, y_top), pos2(p1.x + 0.5, y_bot)),
+                    0.0,
+                    fill_col,
+                );
+            }
+        }
+        painter.add(egui::Shape::line(pts, Stroke::new(1.8, line_col)));
+    }
+
+    // 10 Draggable EQ Band Control Nodes
+    let focus_band = dragged_band.or(hovered_band);
+    for (i, pt) in node_pts.iter().enumerate() {
+        let is_focus = focus_band == Some(i);
+        let non_zero = dsp.eq_bands_db[i].abs() >= 0.25;
+        let r = if is_focus { 5.2 } else if non_zero { 4.0 } else { 3.2 };
+        let fill = if is_focus {
+            palette.hires_gold
+        } else if non_zero && active {
+            palette.accent_bright
+        } else {
+            palette.surface_elevated
+        };
+        if is_focus {
+            painter.circle_filled(
+                *pt,
+                8.5,
+                Color32::from_rgba_unmultiplied(
+                    palette.hires_gold.r(),
+                    palette.hires_gold.g(),
+                    palette.hires_gold.b(),
+                    55,
+                ),
+            );
+        }
+        painter.circle_filled(*pt, r, fill);
+        painter.circle_stroke(
+            *pt,
+            r,
+            Stroke::new(
+                1.0,
+                if is_focus {
+                    palette.text
+                } else if active {
+                    palette.accent
+                } else {
+                    palette.border_strong
+                },
+            ),
+        );
+    }
+
+    // Floating readout pill for hovered/dragged EQ node
+    if let Some(bi) = focus_band {
+        let pt = node_pts[bi];
+        let tag = format!("{} · {:+.1} dB", EQ_FREQ_LABELS[bi], dsp.eq_bands_db[bi]);
+        let pill_w = 78.0;
+        let px = (pt.x - pill_w * 0.5).clamp(plot.left(), plot.right() - pill_w);
+        let py = if pt.y > plot.top() + 24.0 {
+            pt.y - 22.0
+        } else {
+            pt.y + 10.0
+        };
+        let pill = Rect::from_min_size(pos2(px, py), vec2(pill_w, 16.0));
+        painter.rect_filled(pill, 4.0, palette.surface_elevated);
+        painter.rect_stroke(pill, 4.0, Stroke::new(0.8, palette.hires_gold), StrokeKind::Inside);
+        painter.text(
+            pill.center(),
+            Align2::CENTER_CENTER,
+            tag,
+            FontId::monospace(8.5),
+            palette.hires_gold,
+        );
+    }
+
+    // Frequency axis labels
+    let axis_y = rect.bottom() - 7.5;
     for (lbl, hz) in [
-        ("20", 20.0_f32),
-        ("100", 100.0),
+        ("31", 31.0_f32),
+        ("125", 125.0),
         ("500", 500.0),
         ("2k", 2000.0),
         ("8k", 8000.0),
-        ("20k", 20000.0),
+        ("16k", 16000.0),
     ] {
-        let t = ((hz.ln() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
-        let x = plot.left() + t * plot.width();
-        let align = if hz <= 21.0 {
-            Align2::LEFT_CENTER
-        } else if hz >= 19_000.0 {
-            Align2::RIGHT_CENTER
-        } else {
-            Align2::CENTER_CENTER
-        };
         painter.text(
-            pos2(x, axis_y),
-            align,
+            pos2(freq_to_x(hz), axis_y),
+            Align2::CENTER_CENTER,
             lbl,
-            FontId::monospace(8.5),
+            FontId::monospace(8.0),
             palette.faint,
         );
     }
+
+    let _ = resp.on_hover_text(
+        "Drag any frequency node to sculpt EQ live · Double-click a node to reset to 0.0 dB",
+    );
+    changed
 }
 
 pub struct SignalPathDisplay<'a> {
@@ -4971,6 +5319,8 @@ pub fn show_smart_view_builder_modal(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LibraryInsightsAction {
     ExportCsv,
+    ExportCatalogHtml,
+    ExportCatalogMarkdown,
     BackupJson,
     RestoreJson,
     OpenDbHealth,
@@ -5336,9 +5686,33 @@ pub fn show_library_insights_modal(
             ui.horizontal_wrapped(|ui| {
                 if pill_button(
                     ui,
-                    "Export Catalog (.csv)",
-                    Some(Icon::List),
+                    "HTML Dossier (.html)",
+                    Some(Icon::Info),
                     PillStyle::Accent,
+                    palette,
+                )
+                .on_hover_text("Export a print-ready portable HTML audiophile catalog with DR badges & liner notes")
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::ExportCatalogHtml);
+                }
+                if pill_button(
+                    ui,
+                    "Markdown (.md)",
+                    Some(Icon::List),
+                    PillStyle::Active,
+                    palette,
+                )
+                .on_hover_text("Export a clean Markdown listening catalog grouped by album with liner notes")
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::ExportCatalogMarkdown);
+                }
+                if pill_button(
+                    ui,
+                    "Spreadsheet (.csv)",
+                    Some(Icon::List),
+                    PillStyle::Secondary,
                     palette,
                 )
                 .on_hover_text("Export complete track metadata, DR, LUFS, and tags to a CSV spreadsheet")
@@ -6242,6 +6616,8 @@ pub enum PaletteCommand {
     SetLoopB,
     ClearAbLoop,
     CopyCurrentTrackSpecs,
+    ExportViewCatalogHtml,
+    ExportViewCatalogMarkdown,
 }
 
 pub struct PaletteEntry {

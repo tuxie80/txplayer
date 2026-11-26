@@ -28,8 +28,8 @@ use crate::metadata::{
 use crate::modals::{
     self, CommandPaletteState, DbHealthAction, FolderModalAction, LibraryInsightsAction,
     PaletteCommand, PaletteEntry, PillStyle, ProgressBarStyle, RowDensity, SettingsTab,
-    SignalPathDisplay, SleepTimerPreset, SmartViewDraft, TagEditorState, TagWorkerEvent,
-    TrackInfoAction, collection_accent_color, pill_button,
+    SignalPathDisplay, SleepTimerPreset, SmartViewDraft, TagEditorAction, TagEditorState,
+    TagWorkerEvent, TrackInfoAction, collection_accent_color, pill_button,
 };
 use crate::platform::{
     FILE_MANAGER_NAME, MOD_SHORT, open_file_with_default_app, reveal_in_file_manager,
@@ -403,6 +403,16 @@ enum DialogEvent {
     ImportAutoEq(Option<PathBuf>),
     ImportWavIr(Option<PathBuf>),
     ExportCsv(Option<PathBuf>),
+    ExportCatalogHtml {
+        path: Option<PathBuf>,
+        title: String,
+        track_ids: Option<Vec<u64>>,
+    },
+    ExportCatalogMarkdown {
+        path: Option<PathBuf>,
+        title: String,
+        track_ids: Option<Vec<u64>>,
+    },
     BackupDatabaseJson(Option<PathBuf>),
     RestoreDatabaseJson(Option<PathBuf>),
     InspectSacdIso(Option<PathBuf>),
@@ -2787,6 +2797,60 @@ impl TxPlayerApp {
         });
     }
 
+    fn export_catalog_dialog(
+        &mut self,
+        html: bool,
+        title: String,
+        track_ids: Option<Vec<u64>>,
+    ) {
+        if self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
+        let slug: String = title
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+            .collect();
+        let slug = slug.trim_matches('-');
+        let base = if slug.is_empty() { "txplayer-catalog" } else { slug };
+        let file_name = if html {
+            format!("{base}.html")
+        } else {
+            format!("{base}.md")
+        };
+        let dialog_title = if html {
+            "Export Audiophile Listening Catalog (HTML)"
+        } else {
+            "Export Audiophile Listening Catalog (Markdown)"
+        };
+        let events = self.dialog_sender.clone();
+        thread::spawn(move || {
+            let mut d = rfd::FileDialog::new()
+                .set_title(dialog_title)
+                .set_file_name(&file_name);
+            d = if html {
+                d.add_filter("HTML Document", &["html", "htm"])
+            } else {
+                d.add_filter("Markdown Document", &["md"])
+            };
+            let path = d.save_file();
+            let ev = if html {
+                DialogEvent::ExportCatalogHtml {
+                    path,
+                    title,
+                    track_ids,
+                }
+            } else {
+                DialogEvent::ExportCatalogMarkdown {
+                    path,
+                    title,
+                    track_ids,
+                }
+            };
+            let _ = events.send(ev);
+        });
+    }
+
     fn apply_device_profile_if_saved(&mut self, device_name: &str) -> bool {
         let Some(profile) = self.plugins.device_profiles.get(device_name).cloned() else {
             return false;
@@ -3341,6 +3405,48 @@ impl TxPlayerApp {
                                     .unwrap_or("catalog.csv")
                             )),
                             Err(err) => self.set_status(format!("CSV export failed: {err}")),
+                        }
+                    }
+                }
+                DialogEvent::ExportCatalogHtml {
+                    path,
+                    title,
+                    track_ids,
+                } => {
+                    if let Some(dest) = path {
+                        match self.store.active().export_catalog_html(
+                            &title,
+                            track_ids.as_deref(),
+                            &dest,
+                        ) {
+                            Ok(n) => self.set_status(format!(
+                                "Exported HTML dossier ({n} tracks) to {}",
+                                dest.file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("catalog.html")
+                            )),
+                            Err(err) => self.set_status(format!("HTML export failed: {err}")),
+                        }
+                    }
+                }
+                DialogEvent::ExportCatalogMarkdown {
+                    path,
+                    title,
+                    track_ids,
+                } => {
+                    if let Some(dest) = path {
+                        match self.store.active().export_catalog_markdown(
+                            &title,
+                            track_ids.as_deref(),
+                            &dest,
+                        ) {
+                            Ok(n) => self.set_status(format!(
+                                "Exported Markdown catalog ({n} tracks) to {}",
+                                dest.file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("catalog.md")
+                            )),
+                            Err(err) => self.set_status(format!("Markdown export failed: {err}")),
                         }
                     }
                 }
@@ -9200,18 +9306,29 @@ impl TxPlayerApp {
         }
 
         // 2) Tag Editor & Online Matcher Window
-        if let Some(save_ids) = modals::show_tag_editor_window(
+        if let Some(tag_action) = modals::show_tag_editor_window(
             context,
             &mut self.tag_editor,
             &self.acoustid_api_key,
             &self.plugins.tag_providers,
             &p,
         ) {
-            let tracks: Vec<Track> = save_ids
-                .iter()
-                .filter_map(|id| self.track(*id).cloned())
-                .collect();
-            self.tag_editor.trigger_save(tracks);
+            match tag_action {
+                TagEditorAction::Save(save_ids) => {
+                    let tracks: Vec<Track> = save_ids
+                        .iter()
+                        .filter_map(|id| self.track(*id).cloned())
+                        .collect();
+                    self.tag_editor.trigger_save(tracks);
+                }
+                TagEditorAction::BatchTransform { ids, transform } => {
+                    let tracks: Vec<Track> = ids
+                        .iter()
+                        .filter_map(|id| self.track(*id).cloned())
+                        .collect();
+                    self.tag_editor.trigger_batch_transform(tracks, transform);
+                }
+            }
         }
 
         // 3) Track Inspector Window
@@ -9464,6 +9581,14 @@ impl TxPlayerApp {
                                 let _ = tx.send(DialogEvent::ExportCsv(path));
                             });
                         }
+                    }
+                    LibraryInsightsAction::ExportCatalogHtml => {
+                        let title = self.store.active().name.clone();
+                        self.export_catalog_dialog(true, title, None);
+                    }
+                    LibraryInsightsAction::ExportCatalogMarkdown => {
+                        let title = self.store.active().name.clone();
+                        self.export_catalog_dialog(false, title, None);
                     }
                     LibraryInsightsAction::BackupJson => {
                         if !self.dialog_open {
@@ -10203,6 +10328,18 @@ impl TxPlayerApp {
             subtitle: "Scan a folder into active library".into(),
             action: PaletteCommand::AddFolder,
         });
+        entries.push(PaletteEntry {
+            category: "EXPORT",
+            label: "Export Active View / Collection as HTML Catalog…".into(),
+            subtitle: "Print-ready portable audiophile dossier with DR & liner notes".into(),
+            action: PaletteCommand::ExportViewCatalogHtml,
+        });
+        entries.push(PaletteEntry {
+            category: "EXPORT",
+            label: "Export Active View / Collection as Markdown Catalog…".into(),
+            subtitle: "Clean Markdown tables grouped by album with liner notes".into(),
+            action: PaletteCommand::ExportViewCatalogMarkdown,
+        });
         for &m in VisualizerMode::ALL {
             entries.push(PaletteEntry {
                 category: "VISUAL",
@@ -10417,6 +10554,36 @@ impl TxPlayerApp {
                 } else {
                     self.set_status("Play a track first to copy specs".into());
                 }
+            }
+            PaletteCommand::ExportViewCatalogHtml | PaletteCommand::ExportViewCatalogMarkdown => {
+                let html = matches!(cmd, PaletteCommand::ExportViewCatalogHtml);
+                let visible = self.visible_tracks();
+                let ids: Vec<u64> = visible.iter().map(|t| t.id).collect();
+                let title = match self.view {
+                    View::Collection(cid) => self
+                        .store
+                        .active()
+                        .collection(cid)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| "Collection".into()),
+                    View::SavedView(sv_id) => self
+                        .store
+                        .active()
+                        .saved_view(sv_id)
+                        .map(|v| v.name.clone())
+                        .unwrap_or_else(|| "Smart View".into()),
+                    View::Playlist(pl_id) => self
+                        .store
+                        .active()
+                        .playlist(pl_id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Playlist".into()),
+                    View::Favorites => "Favorites".into(),
+                    View::Queue => "Play Queue".into(),
+                    View::Smart(_) => "Smart View".into(),
+                    _ => self.store.active().name.clone(),
+                };
+                self.export_catalog_dialog(html, title, Some(ids));
             }
         }
     }
