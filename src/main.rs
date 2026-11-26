@@ -10,6 +10,7 @@ mod dsd;
 mod dsp;
 mod exclusive;
 mod icons;
+mod ipc;
 mod library;
 mod lyrics;
 mod media_controls;
@@ -45,6 +46,22 @@ fn load_app_icon() -> Option<Arc<egui::IconData>> {
 }
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let ephemeral = args
+        .iter()
+        .any(|a| a == "--screenshot" || a == "--demo-piano" || a == "--demo-spectrogram");
+    let launch_paths = ipc::extract_cli_launch_paths(&args);
+
+    let single_instance = if !ephemeral {
+        let port_file = ipc::instance_port_file();
+        if ipc::try_forward_to_running_instance(&port_file, &launch_paths) {
+            return Ok(());
+        }
+        ipc::SingleInstanceServer::start(port_file)
+    } else {
+        None
+    };
+
     let layout = startup_window_layout();
 
     let mut viewport = egui::ViewportBuilder::default()
@@ -79,10 +96,19 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
+    let mut single_instance_opt = single_instance;
+    let mut launch_paths_opt = Some(launch_paths);
+
     eframe::run_native(
         "TxPlayer",
         options,
-        Box::new(|context| Ok(Box::new(TxPlayerApp::new(context)))),
+        Box::new(move |context| {
+            Ok(Box::new(TxPlayerApp::new(
+                context,
+                single_instance_opt.take(),
+                launch_paths_opt.take().unwrap_or_default(),
+            )))
+        }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }

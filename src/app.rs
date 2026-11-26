@@ -18,8 +18,10 @@ use crate::audio::{
     list_output_devices,
 };
 use crate::icons::{self, Icon};
+use crate::ipc::SingleInstanceServer;
 use crate::library::{
-    LibraryStore, ScanEvent, cover_directory, data_directory, reorder_vec_indices, scan,
+    LibraryStore, ScanEvent, collect_supported_files, cover_directory, data_directory,
+    reorder_vec_indices, scan,
 };
 use crate::lyrics::{TrackLyrics, load_lyrics_for_track};
 use crate::media_controls::{OsMediaBridge, OsMediaCommand};
@@ -745,10 +747,19 @@ pub struct TxPlayerApp {
     screenshot_frames: u32,
     demo_piano_lock: bool,
     ephemeral_session: bool,
+    single_instance: Option<SingleInstanceServer>,
+    last_external_open_at: Option<Instant>,
 }
 
 impl TxPlayerApp {
-    pub fn new(context: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        context: &eframe::CreationContext<'_>,
+        single_instance: Option<SingleInstanceServer>,
+        launch_paths: Vec<PathBuf>,
+    ) -> Self {
+        if let Some(ref ipc) = single_instance {
+            ipc.attach_egui_ctx(context.egui_ctx.clone());
+        }
         let preferences = Preferences::load();
         let palette = theme::apply(&context.egui_ctx, preferences.theme);
         let audio = AudioHandle::spawn();
@@ -1005,6 +1016,8 @@ impl TxPlayerApp {
             screenshot_frames: 0,
             demo_piano_lock: false,
             ephemeral_session: false,
+            single_instance,
+            last_external_open_at: None,
         };
 
         let force_compact = arguments.iter().any(|a| a == "--compact");
@@ -1092,19 +1105,8 @@ impl TxPlayerApp {
             app.screenshot_out = Some(PathBuf::from(path));
             app.ephemeral_session = true;
         }
-        if let Some(index) = arguments.iter().position(|argument| argument == "--play")
-            && let Some(path) = arguments.get(index + 1).map(PathBuf::from)
-        {
-            match crate::metadata::read_track(&path, &cover_directory()) {
-                Ok(track) => {
-                    app.current_queue = vec![track.id];
-                    app.current_index = Some(0);
-                    app.store.active_mut().upsert(track);
-                    app.store.active_mut().sort_default();
-                    app.start_current();
-                }
-                Err(error) => app.set_status(format!("Could not open {path:?}: {error:#}")),
-            }
+        if !launch_paths.is_empty() {
+            app.open_external_paths(launch_paths, false);
         } else if !app.ephemeral_session
             && let Some(sess) = SessionState::load()
             && sess.active_library_id == app.store.active_id
@@ -1139,6 +1141,204 @@ impl TxPlayerApp {
             }
         }
         app
+    }
+
+    /// Opens one or more files, playlists, CUE sheets, SACD ISOs, or folders passed by the OS
+    /// (Windows file association, Explorer multi-select, Linux `.desktop`, or CLI), queues them
+    /// in order, and immediately begins playing the first track.
+    ///
+    /// When `append_burst` is true (subsequent files forwarded within ~1.5 s from Windows Explorer
+    /// multi-select), newly opened tracks are appended to the active queue without restarting
+    /// track #1.
+    fn open_external_paths(&mut self, paths: Vec<PathBuf>, append_burst: bool) {
+        let cover_dir = cover_directory();
+        let mut opened_tracks: Vec<Track> = Vec::new();
+        let mut failed_count = 0usize;
+
+        // Expand any playlist files (.m3u, .m3u8, .pls) into their target paths first
+        let mut expanded: Vec<PathBuf> = Vec::new();
+        for p in paths {
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            if matches!(ext.as_str(), "m3u" | "m3u8" | "pls") {
+                match import_playlist_paths(&p) {
+                    Ok(list) if !list.is_empty() => expanded.extend(list),
+                    _ => failed_count += 1,
+                }
+            } else {
+                expanded.push(p);
+            }
+        }
+
+        for p in expanded {
+            if !p.exists() {
+                failed_count += 1;
+                continue;
+            }
+            if p.is_dir() {
+                let (audio_files, cue_files) = collect_supported_files(&p);
+                let mut cue_refs: HashSet<PathBuf> = HashSet::new();
+                for cue_path in &cue_files {
+                    if let Ok((trs, refs)) = crate::cue::read_cue_tracks(cue_path, &cover_dir) {
+                        cue_refs.extend(refs);
+                        opened_tracks.extend(trs);
+                    }
+                }
+                for af in audio_files {
+                    if cue_refs.contains(&af) {
+                        continue;
+                    }
+                    if let Some(trs) = crate::cue::read_embedded_flac_cue_tracks(&af, &cover_dir) {
+                        opened_tracks.extend(trs);
+                    } else if let Ok(tr) = crate::metadata::read_track(&af, &cover_dir) {
+                        opened_tracks.push(tr);
+                    } else {
+                        failed_count += 1;
+                    }
+                }
+                continue;
+            }
+
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            if ext == "cue" {
+                match crate::cue::read_cue_tracks(&p, &cover_dir) {
+                    Ok((trs, _)) => opened_tracks.extend(trs),
+                    Err(_) => failed_count += 1,
+                }
+            } else if ext == "iso" {
+                match crate::dsd::probe_sacd_iso(&p) {
+                    Ok(info) if !info.tracks.is_empty() && !info.is_dst_compressed => {
+                        let title = if info.album_title.is_empty() {
+                            p.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("SACD ISO")
+                                .to_string()
+                        } else {
+                            info.album_title
+                        };
+                        let artist = if info.album_artist.is_empty() {
+                            "Unknown Artist".to_string()
+                        } else {
+                            info.album_artist
+                        };
+                        let mut cursor_secs = 0.0_f64;
+                        for tr in &info.tracks {
+                            let start = cursor_secs;
+                            let end = cursor_secs + tr.duration_secs;
+                            cursor_secs = end;
+                            opened_tracks.push(Track {
+                                id: crate::metadata::cue_track_id(&p, tr.track_number, start),
+                                path: p.clone(),
+                                title: tr.title.clone(),
+                                artist: artist.clone(),
+                                album: title.clone(),
+                                album_artist: Some(artist.clone()),
+                                track_number: Some(tr.track_number),
+                                disc_number: Some(1),
+                                year: (info.disc_year > 0).then(|| info.disc_year.to_string()),
+                                genre: Some("SACD".into()),
+                                duration: Some(tr.duration_secs),
+                                sample_rate: Some(2_822_400),
+                                bit_depth: Some(1),
+                                channels: Some(2),
+                                nominal_bitrate: None,
+                                codec: "DSD64".into(),
+                                cover_path: None,
+                                cue_start: Some(start),
+                                cue_end: Some(end),
+                                rg_track_gain_db: None,
+                                rg_track_peak: None,
+                                rg_album_gain_db: None,
+                                rg_album_peak: None,
+                                lyrics: None,
+                                composer: None,
+                                conductor: None,
+                                orchestra: None,
+                                work: None,
+                                label: (!info.publisher.is_empty())
+                                    .then(|| info.publisher.clone()),
+                                catalog_number: None,
+                                comment: Some("Imported from SACD .iso".into()),
+                                custom_tags: vec!["sacd".into()],
+                                dr_score: None,
+                                integrated_lufs: None,
+                                true_peak_dbtp: None,
+                                effective_bandwidth_hz: None,
+                                authenticity: None,
+                                play_count: 0,
+                                last_played_at: None,
+                                rating: 0,
+                                added_at: 0,
+                            });
+                        }
+                    }
+                    _ => failed_count += 1,
+                }
+            } else if let Some(trs) = crate::cue::read_embedded_flac_cue_tracks(&p, &cover_dir) {
+                opened_tracks.extend(trs);
+            } else {
+                match crate::metadata::read_track(&p, &cover_dir) {
+                    Ok(tr) => opened_tracks.push(tr),
+                    Err(_) => failed_count += 1,
+                }
+            }
+        }
+
+        if opened_tracks.is_empty() {
+            if failed_count > 0 {
+                self.set_status("Could not open selected audio file(s).".into());
+            }
+            return;
+        }
+
+        let mut opened_ids = Vec::with_capacity(opened_tracks.len());
+        let first_title = opened_tracks[0].title.clone();
+        for tr in opened_tracks {
+            opened_ids.push(tr.id);
+            self.store.active_mut().upsert(tr);
+        }
+        if self.sort != SortMode::Custom {
+            self.store.active_mut().sort_default();
+        }
+        self.mark_library_dirty();
+        self.store.save();
+
+        if append_burst && !self.current_queue.is_empty() {
+            for id in opened_ids {
+                if !self.current_queue.contains(&id) {
+                    self.current_queue.push(id);
+                }
+            }
+            self.mark_queue_dirty();
+            self.preload_next_track();
+            let total = self.current_queue.len();
+            if let Some(cur) = self.current_track() {
+                self.set_status(format!("Playing: {} ({total} tracks queued)", cur.title));
+            }
+        } else {
+            let count = opened_ids.len();
+            self.current_queue = opened_ids;
+            self.current_index = Some(0);
+            self.view = View::Queue;
+            self.mark_queue_dirty();
+            self.start_current();
+            if count > 1 {
+                self.set_status(format!(
+                    "Playing: {first_title} (+{} queued)",
+                    count - 1
+                ));
+            } else {
+                self.set_status(format!("Playing: {first_title}"));
+            }
+        }
+        self.last_external_open_at = Some(Instant::now());
     }
 
     fn set_theme(&mut self, ctx: &egui::Context, theme_id: ThemeId) {
@@ -3641,6 +3841,29 @@ impl TxPlayerApp {
                             Err(err) => self.set_status(format!("SACD ISO probe failed: {err}")),
                         }
                     }
+                }
+            }
+        }
+
+        // Single-instance IPC: files opened from Windows Explorer / Linux .desktop while already running
+        let ipc_batches: Vec<Vec<PathBuf>> = if let Some(ref ipc) = self.single_instance {
+            let mut batches = Vec::new();
+            while let Ok(paths) = ipc.rx.try_recv() {
+                batches.push(paths);
+            }
+            batches
+        } else {
+            Vec::new()
+        };
+        if !ipc_batches.is_empty() {
+            context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            context.send_viewport_cmd(egui::ViewportCommand::Focus);
+            for paths in ipc_batches {
+                if !paths.is_empty() {
+                    let is_burst = self
+                        .last_external_open_at
+                        .is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
+                    self.open_external_paths(paths, is_burst);
                 }
             }
         }
