@@ -283,6 +283,173 @@ impl Library {
             pl.track_ids.swap(from, to);
         }
     }
+
+    pub fn rename_playlist(&mut self, playlist_id: u64, new_name: String) -> Option<String> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let pl = self.playlists.iter_mut().find(|p| p.id == playlist_id)?;
+        pl.name = trimmed.to_string();
+        Some(pl.name.clone())
+    }
+
+    pub fn duplicate_playlist(&mut self, playlist_id: u64) -> Option<(u64, String)> {
+        let orig = self.playlists.iter().find(|p| p.id == playlist_id)?.clone();
+        let copy_name = format!("{} (Copy)", orig.name);
+        let id = unique_id(&copy_name, self.playlists.len() as u64 + 77);
+        self.playlists.push(Playlist {
+            id,
+            name: copy_name.clone(),
+            track_ids: orig.track_ids,
+        });
+        Some((id, copy_name))
+    }
+
+    pub fn clear_playlist(&mut self, playlist_id: u64) -> usize {
+        let Some(pl) = self.playlists.iter_mut().find(|p| p.id == playlist_id) else {
+            return 0;
+        };
+        let n = pl.track_ids.len();
+        pl.track_ids.clear();
+        n
+    }
+
+    pub fn set_playlist_tracks(&mut self, playlist_id: u64, track_ids: Vec<u64>) {
+        if let Some(pl) = self.playlists.iter_mut().find(|p| p.id == playlist_id) {
+            pl.track_ids = track_ids;
+        }
+    }
+
+    /// Reorders a single track or multi-selected block of indices inside a custom playlist.
+    /// Returns the new contiguous range `(start, len)` if order actually changed.
+    pub fn reorder_playlist_indices(
+        &mut self,
+        playlist_id: u64,
+        moving_indices: &[usize],
+        insert_before: usize,
+    ) -> Option<(usize, usize)> {
+        let pl = self.playlists.iter_mut().find(|p| p.id == playlist_id)?;
+        reorder_vec_indices(&mut pl.track_ids, moving_indices, insert_before)
+    }
+
+    /// Removes duplicate entries (by track ID or identical normalized title+artist) from a playlist.
+    pub fn deduplicate_playlist(&mut self, playlist_id: u64) -> usize {
+        let Some(pl_idx) = self.playlists.iter().position(|p| p.id == playlist_id) else {
+            return 0;
+        };
+        let old_ids = self.playlists[pl_idx].track_ids.clone();
+        let mut seen_ids: HashSet<u64> = HashSet::with_capacity(old_ids.len());
+        let mut seen_meta: HashSet<(String, String)> = HashSet::with_capacity(old_ids.len());
+        let mut kept = Vec::with_capacity(old_ids.len());
+        for tid in old_ids {
+            if !seen_ids.insert(tid) {
+                continue;
+            }
+            if let Some(tr) = self.get_by_id(tid) {
+                let key = (tr.title.trim().to_lowercase(), tr.artist.trim().to_lowercase());
+                if !seen_meta.insert(key) {
+                    continue;
+                }
+            }
+            kept.push(tid);
+        }
+        let removed = self.playlists[pl_idx].track_ids.len() - kept.len();
+        self.playlists[pl_idx].track_ids = kept;
+        removed
+    }
+
+    /// Removes entries pointing to deleted/missing files from a playlist.
+    pub fn prune_missing_in_playlist(&mut self, playlist_id: u64) -> usize {
+        let Some(pl_idx) = self.playlists.iter().position(|p| p.id == playlist_id) else {
+            return 0;
+        };
+        let old_ids = self.playlists[pl_idx].track_ids.clone();
+        let mut kept = Vec::with_capacity(old_ids.len());
+        for tid in old_ids {
+            if self.get_by_id(tid).is_some_and(|t| t.path.exists()) {
+                kept.push(tid);
+            }
+        }
+        let removed = self.playlists[pl_idx].track_ids.len() - kept.len();
+        self.playlists[pl_idx].track_ids = kept;
+        removed
+    }
+
+    pub fn reverse_playlist(&mut self, playlist_id: u64) -> bool {
+        let Some(pl) = self.playlists.iter_mut().find(|p| p.id == playlist_id) else {
+            return false;
+        };
+        if pl.track_ids.len() < 2 {
+            return false;
+        }
+        pl.track_ids.reverse();
+        true
+    }
+
+    pub fn randomize_playlist(&mut self, playlist_id: u64) -> bool {
+        use rand::seq::SliceRandom;
+        let Some(pl) = self.playlists.iter_mut().find(|p| p.id == playlist_id) else {
+            return false;
+        };
+        if pl.track_ids.len() < 2 {
+            return false;
+        }
+        let mut rng = rand::thread_rng();
+        pl.track_ids.shuffle(&mut rng);
+        true
+    }
+}
+
+/// Moves the elements at `moving_indices` (in their existing relative order) to `insert_before`
+/// inside `items`. Returns `Some((new_start, count))` if the order changed, or `None` on a no-op.
+pub fn reorder_vec_indices<T: Clone>(
+    items: &mut Vec<T>,
+    moving_indices: &[usize],
+    insert_before: usize,
+) -> Option<(usize, usize)> {
+    let len = items.len();
+    if len < 2 || moving_indices.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<usize> = moving_indices
+        .iter()
+        .copied()
+        .filter(|&i| i < len)
+        .collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.is_empty() || sorted.len() == len {
+        return None;
+    }
+    let insert_clamped = insert_before.min(len);
+    let before_count = sorted.iter().filter(|&&i| i < insert_clamped).count();
+    let dest = insert_clamped.saturating_sub(before_count);
+
+    // Check if the block is already contiguous at `dest` (no-op drop)
+    let is_already_in_place =
+        sorted.first() == Some(&dest) && sorted.last() == Some(&(dest + sorted.len() - 1));
+    if is_already_in_place {
+        return None;
+    }
+
+    let moving_set: HashSet<usize> = sorted.iter().copied().collect();
+    let mut moved = Vec::with_capacity(sorted.len());
+    let mut remaining = Vec::with_capacity(len - sorted.len());
+    for (idx, item) in items.drain(..).enumerate() {
+        if moving_set.contains(&idx) {
+            moved.push(item);
+        } else {
+            remaining.push(item);
+        }
+    }
+    let insert_at = dest.min(remaining.len());
+    let moved_len = moved.len();
+    let tail = remaining.split_off(insert_at);
+    remaining.extend(moved);
+    remaining.extend(tail);
+    *items = remaining;
+    Some((insert_at, moved_len))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -636,5 +803,48 @@ mod tests {
         let reloaded: LibraryStore = serde_json::from_slice(&raw).unwrap();
         assert_eq!(reloaded.active().tracks.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playlist_drag_reorder_dedupe_rename_and_duplicate() {
+        let mut store = LibraryStore::default();
+        let lib = store.active_mut();
+        for id in 1..=5u64 {
+            lib.upsert(sample_track(id, &format!("/m/{id}.flac"), &format!("Track {id}")));
+        }
+        // Duplicate track metadata under different ID
+        lib.upsert(sample_track(6, "/m/dup.flac", "Track 2"));
+
+        let pl_id = lib.create_playlist("Favorites Mix".into());
+        lib.add_tracks_to_playlist(pl_id, &[1, 2, 3, 4, 5]);
+
+        // Drag single track 0 -> before index 4 (after Track 4) => [2, 3, 4, 1, 5]
+        assert_eq!(lib.reorder_playlist_indices(pl_id, &[0], 4), Some((3, 1)));
+        assert_eq!(lib.playlist(pl_id).unwrap().track_ids, vec![2, 3, 4, 1, 5]);
+
+        // Drag multi-selection [1, 2] (Tracks 3, 4) -> top (index 0) => [3, 4, 2, 1, 5]
+        assert_eq!(lib.reorder_playlist_indices(pl_id, &[1, 2], 0), Some((0, 2)));
+        assert_eq!(lib.playlist(pl_id).unwrap().track_ids, vec![3, 4, 2, 1, 5]);
+
+        // No-op drag returns None
+        assert_eq!(lib.reorder_playlist_indices(pl_id, &[0, 1], 1), None);
+
+        // Dedupe removes Track 6 (same title+artist as Track 2)
+        lib.add_tracks_to_playlist(pl_id, &[6]);
+        assert_eq!(lib.deduplicate_playlist(pl_id), 1);
+        assert_eq!(lib.playlist(pl_id).unwrap().track_ids, vec![3, 4, 2, 1, 5]);
+
+        // Rename & duplicate
+        assert_eq!(
+            lib.rename_playlist(pl_id, "Evening Chopin".into()).as_deref(),
+            Some("Evening Chopin")
+        );
+        let (dup_id, dup_name) = lib.duplicate_playlist(pl_id).unwrap();
+        assert_eq!(dup_name, "Evening Chopin (Copy)");
+        assert_eq!(lib.playlist(dup_id).unwrap().track_ids, vec![3, 4, 2, 1, 5]);
+
+        // Reverse
+        assert!(lib.reverse_playlist(dup_id));
+        assert_eq!(lib.playlist(dup_id).unwrap().track_ids, vec![5, 1, 2, 4, 3]);
     }
 }
