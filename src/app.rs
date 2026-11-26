@@ -1036,7 +1036,6 @@ impl TxPlayerApp {
             match val.to_lowercase().as_str() {
                 "piano" => app.visualizer.mode = VisualizerMode::PianoHarmonic,
                 "roll" => app.visualizer.mode = VisualizerMode::PianoRoll,
-                "staff" | "sheet" | "notes" => app.visualizer.mode = VisualizerMode::GrandStaff,
                 "spectrum" => app.visualizer.mode = VisualizerMode::ConcertSpectrum,
                 "spectrogram" | "sonogram" => app.visualizer.mode = VisualizerMode::Spectrogram,
                 "scope" => app.visualizer.mode = VisualizerMode::StereoScope,
@@ -4048,7 +4047,6 @@ impl TxPlayerApp {
                 egui::Key::Num4,
                 egui::Key::Num5,
                 egui::Key::Num6,
-                egui::Key::Num7,
             ];
             let enabled = self.plugins.visualizers.enabled_modes();
             for (idx, key) in num_keys.iter().enumerate() {
@@ -6147,9 +6145,7 @@ impl TxPlayerApp {
                 }
                 if matches!(
                     self.visualizer.mode,
-                    VisualizerMode::PianoHarmonic
-                        | VisualizerMode::PianoRoll
-                        | VisualizerMode::GrandStaff
+                    VisualizerMode::PianoHarmonic | VisualizerMode::PianoRoll
                 ) {
                     let eng = self.plugins.visualizers.piano_engine;
                     if pill_button(ui, eng.short_name(), Some(Icon::Plugin), PillStyle::Secondary, &p)
@@ -6167,23 +6163,6 @@ impl TxPlayerApp {
                             "Piano Engine: {}",
                             self.plugins.visualizers.piano_engine.name()
                         ));
-                    }
-                    if pill_button(ui, "ASCII / ABC", None, PillStyle::Secondary, &p)
-                        .on_hover_text(
-                            "Copy current piano chord & notes as ASCII Grand Staff + Keyboard + ABC musical notation (press Space first to freeze a chord!)",
-                        )
-                        .clicked()
-                    {
-                        let title = self
-                            .current_track()
-                            .map(|t| t.title.clone());
-                        let ascii_sheet =
-                            self.visualizer.format_ascii_musical_snapshot(title.as_deref());
-                        ui.ctx().copy_text(ascii_sheet);
-                        self.set_status(
-                            "Copied ASCII Grand Staff + ABC musical notation to clipboard."
-                                .to_string(),
-                        );
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

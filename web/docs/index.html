@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TxPlayer Documentation &amp; Quick Start · v1.12.0</title>
+<title>TxPlayer Documentation &amp; Quick Start · v1.12.1</title>
 <link rel="icon" type="image/png" href="favicon.png">
-<meta name="description" content="Complete Quick Start, First Steps, and Technical Reference Manual for TxPlayer v1.12.0 — bit-perfect Rust audiophile player, 64-bit DSP &amp; FFT convolution, Pitch-Locked Practice, Blind ABX Lab, LAN Mobile Remote, 88-key Piano &amp; Grand Staff Sheet Music visualizer, and master library database.">
+<meta name="description" content="Complete Quick Start, First Steps, and Technical Reference Manual for TxPlayer v1.12.1 — bit-perfect Rust audiophile player, 64-bit DSP &amp; FFT convolution, Pitch-Locked Practice, Blind ABX Lab, LAN Mobile Remote, 88-key piano visualizer, and master library database.">
 <style>
 @font-face { font-family:'Space Grotesk'; src:url('../fonts/space-grotesk.woff2') format('woff2'); font-weight:300 700; font-display:swap; }
 @font-face { font-family:'Inter'; src:url('../fonts/inter.woff2') format('woff2'); font-weight:100 900; font-display:swap; }
@@ -123,7 +123,7 @@ table.ref tr:hover td{background:var(--bg2)}
   <a class="brand" href="../">
     <span class="logo">Tx</span>
     <span>TxPlayer Docs</span>
-    <span class="ver-badge">v1.12.0</span>
+    <span class="ver-badge">v1.12.1</span>
   </a>
   <div class="top-actions">
     <input class="global-search" id="docSearch" type="search" placeholder="Filter docs, shortcuts, query tokens…" aria-label="Filter documentation sections">
@@ -161,7 +161,7 @@ table.ref tr:hover td{background:var(--bg2)}
       <li><a href="#troubleshooting">Data, Backups &amp; Helpers</a></li>
     </ul>
     <div class="nav-foot">
-      TxPlayer <strong>v1.12.0</strong><br>
+      TxPlayer <strong>v1.12.1</strong><br>
       Press <strong>F1</strong> in-app for Quick Guide<br>
       <a href="../">tuxie.eu/txplayer</a>
     </div>
@@ -285,8 +285,8 @@ table.ref tr:hover td{background:var(--bg2)}
 
     <!-- VISUALIZERS -->
     <section class="doc-section" id="visualizers">
-      <h2>4. Concert Visualizer Suite (7 Modes)</h2>
-      <p>Press <kbd>V</kbd> to toggle the panoramic Concert Visualizer Stage, <kbd>1</kbd>–<kbd>7</kbd> to jump between modes, or double-click the stage to cycle through enabled modes. In Piano, Roll, or Staff mode, click <strong>ASCII / ABC</strong> to copy an ASCII Grand Staff, mini keyboard, and ABC musical notation snapshot to your clipboard.</p>
+      <h2>4. Concert Visualizer Suite (6 Modes)</h2>
+      <p>Press <kbd>V</kbd> to toggle the panoramic Concert Visualizer Stage, <kbd>1</kbd>–<kbd>6</kbd> to jump between modes, or double-click the stage to cycle through enabled modes. Configure active modes and monitor live <code>ms/frame</code> compute time inside <strong>Settings → Plugins</strong>.</p>
 
       <div class="scroll-x">
         <table class="ref">
@@ -294,7 +294,6 @@ table.ref tr:hover td{background:var(--bg2)}
           <tbody>
             <tr><td><strong>88-Key Piano Spectrum</strong></td><td>Multi-rate Butterworth Precision CQT (<code>1× / ÷4 / ÷16</code>), Railsback stretch tuning, 10-voice harmonic cancellation</td><td>Classical piano study, live chord &amp; voicing readout, <strong>Pause-Freeze</strong> chord inspection</td></tr>
             <tr><td><strong>88-Key Piano Roll</strong></td><td>Scrolling real-time note waterfall rising from the grand keybed</td><td>Following counterpoint, arpeggios, and melodic phrasing over time</td></tr>
-            <tr><td><strong>Grand Staff Sheet Music</strong></td><td>Live Treble G-clef &amp; Bass F-clef notation with noteheads, stems, ledger lines, accidentals &amp; 1-click <strong>ASCII / ABC</strong> copy</td><td>Sight-reading chords &amp; voicing on musical staves and pasting notes into study docs or ABC editors</td></tr>
             <tr><td><strong>64-Band Spectrum RTA</strong></td><td>4096-pt precomputed-twiddle FFT mapped to 64 log bands (<code>27.5 Hz – 18 kHz</code>) with peak-hold</td><td>Tonal balance, room-mode checking, and EQ curve verification</td></tr>
             <tr><td><strong>Live Acoustic Spectrogram</strong></td><td>Scrolling 2D time-frequency waterfall (<code>96 × 64</code>) with thermal-gold heatmap &amp; <code>PEAK Hz</code> badge</td><td>Inspecting overtones, vibrato, vocal formants, and Hi-Res high-frequency energy</td></tr>
             <tr><td><strong>Stereo Scope &amp; Vectorscope</strong></td><td>Zero-crossing triggered L/R oscilloscope + M/S phase goniometer</td><td>Checking stereo width, panning geometry, and waveform clipping</td></tr>

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TxPlayer — Fast Native Rust Music Player &amp; Master Library</title>
 <link rel="icon" type="image/png" href="favicon.png">
-<meta name="description" content="TxPlayer v1.12.0 — fast, 100% free native Rust music player for macOS, Windows, and Linux. Compact or Classic, 88-key Piano &amp; Grand Staff Sheet Music visualizer, Bit-Perfect DAC &amp; DoP v1.1, 64-bit DSP, Blind ABX Lab, and offline master library.">
+<meta name="description" content="TxPlayer v1.12.1 — fast, 100% free native Rust music player for macOS, Windows, and Linux. Compact or Classic, 88-key piano visualizer, Bit-Perfect DAC &amp; DoP v1.1, 64-bit DSP, Blind ABX Lab, and offline master library.">
 <link rel="preload" href="fonts/space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin>
@@ -20,7 +20,7 @@
     <a class="brand" href="#top">
       <span class="brand-mark">Tx</span>
       <span class="brand-name">TxPlayer</span>
-      <span class="brand-ver">v1.12.0</span>
+      <span class="brand-ver">v1.12.1</span>
     </a>
     <nav class="nav-links" id="navLinks">
       <a href="#basics">Basics</a>
@@ -47,7 +47,7 @@
           100% free, native Rust (~8.5&nbsp;MB), zero cloud.
         </p>
         <div class="hero-actions reveal">
-          <a class="btn btn-primary" href="#install">Download v1.12.0</a>
+          <a class="btn btn-primary" href="#install">Download v1.12.1</a>
           <a class="btn btn-ghost" href="#screenshots">Screenshots &amp; Video</a>
           <a class="btn btn-ghost" href="https://github.com/tuxie80/txplayer" target="_blank" rel="noopener">GitHub ↗</a>
         </div>
@@ -60,11 +60,11 @@
 
       <div class="steps reveal">
         <div class="step-card">
-          <p class="step-label"><b>1</b> Download Ready Installers (v1.12.0)</p>
+          <p class="step-label"><b>1</b> Download Ready Installers (v1.12.1)</p>
           <p class="step-note" style="margin-top:0">
-            <a href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/TxPlayer-v1.12.0-macos-arm64.dmg" target="_blank" rel="noopener"><strong>macOS .dmg</strong></a> ·
-            <a href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/TxPlayer-v1.12.0-windows-x86_64-setup.exe" target="_blank" rel="noopener"><strong>Windows setup.exe</strong></a> ·
-            <a href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/txplayer_1.12.0_amd64.deb" target="_blank" rel="noopener"><strong>Linux .deb</strong></a> ·
+            <a href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/TxPlayer-v1.12.1-macos-arm64.dmg" target="_blank" rel="noopener"><strong>macOS .dmg</strong></a> ·
+            <a href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/TxPlayer-v1.12.1-windows-x86_64-setup.exe" target="_blank" rel="noopener"><strong>Windows setup.exe</strong></a> ·
+            <a href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/txplayer_1.12.1_amd64.deb" target="_blank" rel="noopener"><strong>Linux .deb</strong></a> ·
             <a href="https://github.com/tuxie80/txplayer/releases/latest" target="_blank" rel="noopener">All releases ↗</a>
           </p>
         </div>
@@ -86,14 +86,14 @@
     <dl class="hero-stats reveal">
       <div><dt>~8.5 MB</dt><dd>native Rust binary</dd></div>
       <div><dt>64-bit</dt><dd>DSP, FFT IR &amp; Pitch</dd></div>
-      <div><dt>7 modes</dt><dd>Piano · Staff · Sonogram</dd></div>
+      <div><dt>6 modes</dt><dd>Piano · Spectrogram · VU</dd></div>
       <div><dt>9 themes</dt><dd>Compact &amp; Classic</dd></div>
       <div><dt>0 cloud</dt><dd>100% local &amp; free</dd></div>
     </dl>
 
     <figure class="hero-shot reveal" data-lightbox="img/classic-piano-solarized.jpg" tabindex="0">
-      <img src="img/classic-piano-solarized.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — 88-Key Precision CQT Piano Visualizer &amp; Inline DR Badges">
-      <figcaption>TxPlayer v1.12.0 — 88-Key Precision CQT Piano, Grand Staff Sheet Music, Compact Mode, 64-bit DSP &amp; Master Library. Click to zoom, or watch the <a href="#screenshots" id="jumpVideoTour">Video Tour ↓</a>.</figcaption>
+      <img src="img/classic-piano-solarized.jpg" width="1680" height="998" alt="TxPlayer — 88-Key Precision CQT Piano Visualizer &amp; Inline DR Badges">
+      <figcaption>TxPlayer v1.12.1 — 88-Key Precision CQT Piano, Compact Mode, 64-bit DSP &amp; Master Library. Click to zoom, or watch the <a href="#screenshots" id="jumpVideoTour">Video Tour ↓</a>.</figcaption>
     </figure>
   </div>
 </section>
@@ -163,13 +163,13 @@
 <!-- ================= SCREENSHOTS (COMPACT BY DEFAULT!) ================= -->
 <section class="section section-alt" id="screenshots">
   <div class="section-inner">
-    <p class="kicker reveal">Real v1.12.0 screenshots</p>
+    <p class="kicker reveal">Real screenshots &amp; video</p>
     <h2 class="reveal">Compact by default. <span class="acc">Studio when needed.</span></h2>
 
     <div class="tabs reveal" id="shotTabs">
       <div class="tab-bar" role="tablist" aria-label="Screenshot categories">
         <button class="tab-btn" type="button" role="tab" id="sh-compact" aria-controls="shpane-compact" aria-selected="true">Compact Mode</button>
-        <button class="tab-btn" type="button" role="tab" id="sh-classic" aria-controls="shpane-classic" aria-selected="false" tabindex="-1">88-Key &amp; Staff</button>
+        <button class="tab-btn" type="button" role="tab" id="sh-classic" aria-controls="shpane-classic" aria-selected="false" tabindex="-1">88-Key &amp; Visualizers</button>
         <button class="tab-btn" type="button" role="tab" id="sh-settings" aria-controls="shpane-settings" aria-selected="false" tabindex="-1">Settings &amp; DSP</button>
         <button class="tab-btn" type="button" role="tab" id="sh-modals" aria-controls="shpane-modals" aria-selected="false" tabindex="-1">ABX, Insights &amp; Help</button>
         <button class="tab-btn" type="button" role="tab" id="sh-themes" aria-controls="shpane-themes" aria-selected="false" tabindex="-1">Themes</button>
@@ -201,27 +201,23 @@
         </div>
       </div>
 
-      <!-- 88-KEY & VISUALIZERS (LATEST v1.12.0!) -->
+      <!-- 88-KEY & VISUALIZERS -->
       <div class="tab-pane shot-pane" role="tabpanel" id="shpane-classic" aria-labelledby="sh-classic" hidden>
         <figure class="shot-item" data-lightbox="img/classic-piano-solarized.jpg" tabindex="0">
-          <img src="img/classic-piano-solarized.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — 88-Key Precision CQT Piano Visualizer">
-          <figcaption><strong>88-Key Precision CQT Piano (v1.12.0)</strong><span>Dynamics-colored keybed, 10-voice harmonic cancellation, chord badge &amp; 1-click ASCII/ABC export.</span></figcaption>
-        </figure>
-        <figure class="shot-item" data-lightbox="img/classic-staff-solarized.jpg" tabindex="0" hidden>
-          <img src="img/classic-staff-solarized.jpg" width="1800" height="1069" alt="TxPlayer v1.12.0 — Live Grand Staff Sheet Music Visualizer">
-          <figcaption><strong>Grand Staff Sheet Music (New in v1.12.0)</strong><span>Live Treble &amp; Bass clefs, noteheads, stems, accidentals, ledger lines &amp; 1-click ASCII / ABC copy.</span></figcaption>
+          <img src="img/classic-piano-solarized.jpg" width="1680" height="998" alt="TxPlayer — 88-Key Precision CQT Piano Visualizer">
+          <figcaption><strong>88-Key Precision CQT Piano</strong><span>Dynamics-colored keybed, 10-voice harmonic cancellation, chord badge &amp; inline DR pills.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/classic-spectrogram-studio.jpg" tabindex="0" hidden>
-          <img src="img/classic-spectrogram-studio.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — Live Acoustic Spectrogram">
+          <img src="img/classic-spectrogram-studio.jpg" width="1680" height="998" alt="TxPlayer — Live Acoustic Spectrogram">
           <figcaption><strong>Live Acoustic Spectrogram (Sonogram)</strong><span>2D time-frequency waterfall (27.5 Hz – 18 kHz) with PEAK Hz readout &amp; 9 library facets.</span></figcaption>
         </figure>
         <figure class="shot-item" data-lightbox="img/classic-roll-solarized.jpg" tabindex="0" hidden>
-          <img src="img/classic-roll-solarized.jpg" width="1680" height="998" alt="TxPlayer v1.12.0 — 88-Key Concert Piano Roll">
+          <img src="img/classic-roll-solarized.jpg" width="1680" height="998" alt="TxPlayer — 88-Key Concert Piano Roll">
           <figcaption><strong>88-Key Concert Piano Roll</strong><span>Scrolling note waterfall — freezes on Pause for harmonic study.</span></figcaption>
         </figure>
         <div class="sv-controls">
           <button class="sv-prev" type="button" aria-label="Previous">‹</button>
-          <span class="sv-count" aria-live="polite">1 / 4</span>
+          <span class="sv-count" aria-live="polite">1 / 3</span>
           <button class="sv-next" type="button" aria-label="Next">›</button>
         </div>
       </div>
@@ -292,8 +288,8 @@
       <!-- VIDEO TOUR -->
       <div class="tab-pane shot-pane" role="tabpanel" id="shpane-video" aria-labelledby="sh-video" hidden>
         <figure class="shot-item shot-video">
-          <video id="tourVideo" src="img/txplayer-tour.mp4?v=3" poster="img/classic-piano-solarized.jpg" controls playsinline preload="metadata" muted loop aria-label="TxPlayer v1.12.0 visual tour"></video>
-          <figcaption><strong>TxPlayer v1.12.0 · 1080p Visual Tour</strong><span>24-second walkthrough: 88-Key Piano, Grand Staff Sheet Music, Compact Mode, Spectrogram, Interactive EQ, Blind ABX Lab, Insights &amp; Themes.</span></figcaption>
+          <video id="tourVideo" src="img/txplayer-tour.mp4?v=4" poster="img/classic-piano-solarized.jpg" controls playsinline preload="metadata" muted loop aria-label="TxPlayer visual tour"></video>
+          <figcaption><strong>TxPlayer · 1080p Visual Tour</strong><span>22-second walkthrough: 88-Key Piano, Compact Mode, Live Spectrogram, Interactive EQ, Blind ABX Lab, Insights &amp; Themes.</span></figcaption>
         </figure>
       </div>
     </div>
@@ -336,11 +332,11 @@
             </ul>
           </article>
           <article class="card overview-card">
-            <div class="card-head"><span class="ico-box"><svg viewBox="0 0 24 24"><path d="M2 12h3l2-6 4 12 3-8 2 4h6"/></svg></span><h3>03 · 7 Visualizers</h3></div>
+            <div class="card-head"><span class="ico-box"><svg viewBox="0 0 24 24"><path d="M2 12h3l2-6 4 12 3-8 2 4h6"/></svg></span><h3>03 · 6 Visualizers</h3></div>
             <ul class="dots">
-              <li><strong>88-Key Piano CQT</strong> &amp; <strong>Grand Staff</strong> notation</li>
-              <li>1-click <strong>ASCII Staff + ABC</strong> musical note copy</li>
-              <li><strong>Live Spectrogram</strong>, Roll, RTA, Scope &amp; VU/LUFS</li>
+              <li><strong>88-Key Piano CQT</strong> + Pause-Freeze chords</li>
+              <li><strong>Live Acoustic Spectrogram</strong> &amp; Piano Roll</li>
+              <li>64-Band RTA, Scope &amp; Mastering VU / LUFS</li>
             </ul>
           </article>
           <article class="card overview-card">
@@ -422,12 +418,11 @@
       <div class="tab-pane" role="tabpanel" id="fpane-vis" aria-labelledby="ftab-vis" hidden>
         <div class="card-grid feature-grid">
           <article class="card feat-card">
-            <h3>88-Key Piano, Grand Staff &amp; ASCII / ABC</h3>
+            <h3>88-Key Precision CQT Piano &amp; Roll</h3>
             <ul class="dots">
               <li><strong>Multi-Rate CQT:</strong> 3 Butterworth stages (<code>1× / ÷4 / ÷16</code>) + Railsback stretch tuning</li>
-              <li><strong>Grand Staff Notation:</strong> Live Treble &amp; Bass clefs, noteheads, stems, ledger lines &amp; accidentals</li>
-              <li><strong>ASCII / ABC Copy:</strong> 1-click copies an ASCII Grand Staff, mini keyboard &amp; ABC score</li>
-              <li><strong>Pause-Freeze:</strong> Pressing Space freezes pressed keys, staff notes &amp; chord badge</li>
+              <li><strong>Harmonic Cancellation:</strong> 10-voice overtone subtraction kills octave/fifth ghosts</li>
+              <li><strong>Pause-Freeze:</strong> Pressing Space freezes pressed keys &amp; chord badge for study</li>
             </ul>
           </article>
           <article class="card feat-card">
@@ -435,7 +430,7 @@
             <ul class="dots">
               <li><strong>Live Spectrogram:</strong> <code>96 × 64</code> scrolling 2D sonogram + live <code>PEAK Hz</code> badge</li>
               <li><strong>Mastering VU:</strong> Live EBU R128 Momentary/Short-Term LUFS, 4× True Peak &amp; Phase</li>
-              <li><strong>Direct Keys:</strong> Press <code>V</code> for stage, <code>1</code>–<code>7</code> for modes; live <code>ms/frame</code> telemetry</li>
+              <li><strong>Direct Keys:</strong> Press <code>V</code> for stage, <code>1</code>–<code>6</code> for modes; live <code>ms/frame</code> telemetry</li>
             </ul>
           </article>
         </div>
@@ -492,30 +487,30 @@
 <!-- ================= DOWNLOAD, INSTALL & DOCS ================= -->
 <section class="section section-alt" id="install">
   <div class="section-inner">
-    <p class="kicker reveal">Download · v1.12.0 Release</p>
+    <p class="kicker reveal">Download · v1.12.1 Release</p>
     <h2 class="reveal">Native installers for <span class="acc">macOS, Windows &amp; Linux.</span></h2>
     <div class="install-grid">
       <div class="card install-card reveal">
         <h3>macOS (Apple Silicon)</h3>
         <div style="display:flex;gap:0.55rem;flex-wrap:wrap">
-          <a class="btn btn-primary" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/TxPlayer-v1.12.0-macos-arm64.dmg" target="_blank" rel="noopener">Download .dmg ↗</a>
-          <a class="btn btn-ghost" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/txplayer-v1.12.0-macos-arm64.tar.gz" target="_blank" rel="noopener">.tar.gz</a>
+          <a class="btn btn-primary" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/TxPlayer-v1.12.1-macos-arm64.dmg" target="_blank" rel="noopener">Download .dmg ↗</a>
+          <a class="btn btn-ghost" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/txplayer-v1.12.1-macos-arm64.tar.gz" target="_blank" rel="noopener">.tar.gz</a>
         </div>
         <p>Signed <code>TxPlayer.app</code> drag-to-Applications DMG · CoreAudio Exclusive &amp; DoP.</p>
       </div>
       <div class="card install-card reveal">
         <h3>Windows (x64)</h3>
         <div style="display:flex;gap:0.55rem;flex-wrap:wrap">
-          <a class="btn btn-primary" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/TxPlayer-v1.12.0-windows-x86_64-setup.exe" target="_blank" rel="noopener">Download setup.exe ↗</a>
-          <a class="btn btn-ghost" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/txplayer-v1.12.0-windows-x86_64.zip" target="_blank" rel="noopener">Portable .zip</a>
+          <a class="btn btn-primary" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/TxPlayer-v1.12.1-windows-x86_64-setup.exe" target="_blank" rel="noopener">Download setup.exe ↗</a>
+          <a class="btn btn-ghost" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/txplayer-v1.12.1-windows-x86_64.zip" target="_blank" rel="noopener">Portable .zip</a>
         </div>
         <p>Standard Windows installer (Start Menu + uninstaller) · WASAPI Exclusive.</p>
       </div>
       <div class="card install-card reveal">
         <h3>Linux (x86_64)</h3>
         <div style="display:flex;gap:0.55rem;flex-wrap:wrap">
-          <a class="btn btn-primary" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/txplayer_1.12.0_amd64.deb" target="_blank" rel="noopener">Download .deb ↗</a>
-          <a class="btn btn-ghost" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.0/txplayer-v1.12.0-linux-x86_64.tar.gz" target="_blank" rel="noopener">Universal .tar.gz</a>
+          <a class="btn btn-primary" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/txplayer_1.12.1_amd64.deb" target="_blank" rel="noopener">Download .deb ↗</a>
+          <a class="btn btn-ghost" href="https://github.com/tuxie80/txplayer/releases/download/v1.12.1/txplayer-v1.12.1-linux-x86_64.tar.gz" target="_blank" rel="noopener">Universal .tar.gz</a>
         </div>
         <p>Debian/Ubuntu <code>.deb</code> + universal tarball with <code>install.sh</code> · ALSA / PipeWire.</p>
       </div>
@@ -529,7 +524,7 @@
           <code>cargo test &amp;&amp; cargo run --release</code>
           <button class="term-copy" type="button" aria-label="Copy" title="Copy"><svg class="ic ic-copy" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="4.5" width="8" height="10" rx="1.5"/><path d="M2.5 11.5v-8A1.5 1.5 0 0 1 4 2h7"/></svg><svg class="ic ic-check" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8.5l3.5 3.5 7-8"/></svg></button>
         </div>
-        <p>Rust 1.95+ · 57/57 unit tests · zero Electron.</p>
+        <p>Rust 1.95+ · 55/55 unit tests · zero Electron.</p>
       </div>
       <div class="card install-card reveal">
         <h3>GitHub &amp; Checksums</h3>
@@ -545,7 +540,7 @@
           <a class="btn btn-primary" href="docs/#quick-start">Quick Start ↗</a>
           <a class="btn btn-ghost" href="docs/">Full Docs ↗</a>
         </div>
-        <p>Shortcuts, Power-Search tokens, DAC setup, Grand Staff &amp; DSP guide.</p>
+        <p>Shortcuts, Power-Search tokens, DAC setup &amp; DSP guide.</p>
       </div>
     </div>
   </div>
@@ -555,7 +550,7 @@
 <footer class="footer">
   <div class="footer-inner">
     <div>
-      <p class="footer-brand">TxPlayer <span>v1.12.0</span></p>
+      <p class="footer-brand">TxPlayer <span>v1.12.1</span></p>
       <p class="footer-note">100% free, open-source native Rust music player · Made with <strong>Gemini 4 Neon</strong>.<br>Sibling of <a href="https://tuxie.eu/txui" target="_blank" rel="noopener">TxUI</a> by <a href="https://tuxie.eu" target="_blank" rel="noopener">Tuxie</a>.</p>
     </div>
     <div class="footer-meta">

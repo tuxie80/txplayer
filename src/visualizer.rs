@@ -30,7 +30,6 @@ pub enum VisualizerMode {
     #[default]
     PianoHarmonic,
     PianoRoll,
-    GrandStaff,
     ConcertSpectrum,
     Spectrogram,
     StereoScope,
@@ -41,7 +40,6 @@ impl VisualizerMode {
     pub const ALL: &'static [VisualizerMode] = &[
         VisualizerMode::PianoHarmonic,
         VisualizerMode::PianoRoll,
-        VisualizerMode::GrandStaff,
         VisualizerMode::ConcertSpectrum,
         VisualizerMode::Spectrogram,
         VisualizerMode::StereoScope,
@@ -52,7 +50,6 @@ impl VisualizerMode {
         match self {
             VisualizerMode::PianoHarmonic => "88-Key Piano Spectrum",
             VisualizerMode::PianoRoll => "88-Key Piano Roll",
-            VisualizerMode::GrandStaff => "Grand Staff Sheet Music",
             VisualizerMode::ConcertSpectrum => "64-Band Spectrum RTA",
             VisualizerMode::Spectrogram => "Live Acoustic Spectrogram",
             VisualizerMode::StereoScope => "Stereo Scope & Vectorscope",
@@ -64,7 +61,6 @@ impl VisualizerMode {
         match self {
             VisualizerMode::PianoHarmonic => "Piano",
             VisualizerMode::PianoRoll => "Roll",
-            VisualizerMode::GrandStaff => "Staff",
             VisualizerMode::ConcertSpectrum => "RTA",
             VisualizerMode::Spectrogram => "Sonogram",
             VisualizerMode::StereoScope => "Scope",
@@ -79,9 +75,6 @@ impl VisualizerMode {
             }
             VisualizerMode::PianoRoll => {
                 "Scrolling real-time note waterfall rising from the 88-key keybed."
-            }
-            VisualizerMode::GrandStaff => {
-                "Live Treble & Bass Clef Grand Staff notation with scrolling musical noteheads, accidentals, ledger lines, and 1-click ASCII/ABC export."
             }
             VisualizerMode::ConcertSpectrum => {
                 "64-band logarithmic real-time spectrum analyzer (27.5 Hz – 18 kHz) with dB scale."
@@ -985,7 +978,7 @@ impl VisualizerState {
         // Only compute the DSP needed for the active visualizer mode!
         let needs_piano = matches!(
             self.mode,
-            VisualizerMode::PianoHarmonic | VisualizerMode::PianoRoll | VisualizerMode::GrandStaff
+            VisualizerMode::PianoHarmonic | VisualizerMode::PianoRoll
         );
         let needs_spectrum = matches!(
             self.mode,
@@ -1280,9 +1273,7 @@ impl VisualizerState {
         );
         let inner = rect.shrink2(Vec2::new(6.0, 4.0));
         match self.mode {
-            VisualizerMode::PianoHarmonic
-            | VisualizerMode::PianoRoll
-            | VisualizerMode::GrandStaff => {
+            VisualizerMode::PianoHarmonic | VisualizerMode::PianoRoll => {
                 self.paint_piano_ribbon(painter, inner, palette, false, false)
             }
             VisualizerMode::ConcertSpectrum => {
@@ -1335,9 +1326,6 @@ impl VisualizerState {
             }
             VisualizerMode::PianoRoll => {
                 self.paint_piano_roll(painter, inner, palette, plugin_cfg.show_chord_readout);
-            }
-            VisualizerMode::GrandStaff => {
-                self.paint_grand_staff(painter, inner, palette, plugin_cfg.show_chord_readout);
             }
             VisualizerMode::ConcertSpectrum => {
                 self.paint_concert_spectrum(painter, inner, palette, true);
@@ -1508,351 +1496,6 @@ impl VisualizerState {
                 inner.max,
             );
             self.paint_keybed(painter, kb_rect, palette);
-        }
-    }
-
-    /// Formats the active (or paused-frozen) piano voicing into an ASCII Grand Staff,
-    /// mini ASCII keyboard, and pasteable ABC musical notation snippet.
-    pub fn format_ascii_musical_snapshot(&self, track_title: Option<&str>) -> String {
-        let mut active: Vec<(usize, f32)> = self
-            .piano_levels
-            .iter()
-            .enumerate()
-            .filter(|&(k, &v)| self.piano_key_held[k] || v >= 0.14)
-            .map(|(k, &v)| (21 + k, v))
-            .collect();
-
-        if active.is_empty()
-            && let Some(last) = self.piano_roll.iter().rev().find(|s| s.iter().any(|&b| b >= 48))
-        {
-            active = last
-                .iter()
-                .enumerate()
-                .filter(|&(_, &b)| b >= 48)
-                .map(|(k, &b)| (21 + k, b as f32 / 255.0))
-                .collect();
-        }
-        active.sort_by_key(|&(midi, _)| midi);
-
-        let header = match (track_title, self.detected_harmony.is_empty()) {
-            (Some(t), false) => format!("TxPlayer · Musical Notes — {} ({})", t, self.detected_harmony),
-            (Some(t), true) => format!("TxPlayer · Musical Notes — {}", t),
-            (None, false) => format!("TxPlayer · Musical Notes ({})", self.detected_harmony),
-            (None, true) => "TxPlayer · Musical Notes".to_string(),
-        };
-
-        if active.is_empty() {
-            return format!(
-                "{header}\n(No active notes detected yet — play audio or press Space on a chord to freeze.)"
-            );
-        }
-
-        // Build ASCII Grand Staff rows (from A5 = +12 down to E2 = -12)
-        // Staff lines: Treble F5(10) D5(8) B4(6) G4(4) E4(2), ledger C4(0), Bass A3(-2) F3(-4) D3(-6) B2(-8) G2(-10)
-        let mut by_step: std::collections::BTreeMap<i32, Vec<(usize, Option<&'static str>)>> =
-            std::collections::BTreeMap::new();
-        for &(midi, _) in &active {
-            let (step, acc) = midi_to_diatonic_staff(midi);
-            by_step.entry(step).or_default().push((midi, acc));
-        }
-
-        let mut lines = Vec::new();
-        lines.push(header);
-        lines.push("================================================================".to_string());
-
-        let render_row = |step: i32, is_line: bool, clef_tag: &str| -> String {
-            let bg = if is_line { '-' } else { ' ' };
-            let mut body = String::new();
-            if let Some(notes) = by_step.get(&step) {
-                let mut tokens = Vec::new();
-                for &(midi, acc) in notes {
-                    let sym = match acc {
-                        Some("#") => "#o",
-                        Some("b") => "bo",
-                        _ => "o",
-                    };
-                    tokens.push(format!("{sym}({})", midi_note_name(midi)));
-                }
-                let joined = tokens.join(" ");
-                let pad_left = 4;
-                for _ in 0..pad_left {
-                    body.push(bg);
-                }
-                body.push_str(&joined);
-                while body.len() < 42 {
-                    body.push(bg);
-                }
-            } else {
-                for _ in 0..42 {
-                    body.push(bg);
-                }
-            }
-            format!("{clef_tag} |{body}|")
-        };
-
-        // Treble top ledger (if needed)
-        if by_step.keys().any(|&s| s >= 12) {
-            lines.push(render_row(12, false, "   A5 "));
-        }
-        lines.push(render_row(10, true, "TR F5 "));
-        lines.push(render_row(9, false, "   E5 "));
-        lines.push(render_row(8, true, "   D5 "));
-        lines.push(render_row(7, false, "   C5 "));
-        lines.push(render_row(6, true, "   B4 "));
-        lines.push(render_row(5, false, "   A4 "));
-        lines.push(render_row(4, true, " G G4 "));
-        lines.push(render_row(3, false, "   F4 "));
-        lines.push(render_row(2, true, "   E4 "));
-        lines.push(render_row(1, false, "   D4 "));
-        // Middle C ledger line
-        let c4_line = by_step.contains_key(&0);
-        lines.push(render_row(0, c4_line, "-- C4 "));
-        lines.push(render_row(-1, false, "   B3 "));
-        lines.push(render_row(-2, true, "BS A3 "));
-        lines.push(render_row(-3, false, "   G3 "));
-        lines.push(render_row(-4, true, " F F3 "));
-        lines.push(render_row(-5, false, "   E3 "));
-        lines.push(render_row(-6, true, "   D3 "));
-        lines.push(render_row(-7, false, "   C3 "));
-        lines.push(render_row(-8, true, "   B2 "));
-        lines.push(render_row(-9, false, "   A2 "));
-        lines.push(render_row(-10, true, "   G2 "));
-        if by_step.keys().any(|&s| s <= -11) {
-            lines.push(render_row(-11, false, "   F2 "));
-            lines.push(render_row(-12, true, "-- E2 "));
-            if by_step.keys().any(|&s| s <= -14) {
-                lines.push(render_row(-14, true, "-- C2 "));
-            }
-        }
-
-        // Mini ASCII 1-octave keyboard highlighting active pitch classes
-        let mut pc_active = [false; 12];
-        for &(midi, _) in &active {
-            pc_active[midi % 12] = true;
-        }
-        let bk = |pc: usize| if pc_active[pc] { "*" } else { "#" };
-        let wk = |pc: usize| if pc_active[pc] { "*" } else { " " };
-        lines.push("----------------------------------------------------------------".to_string());
-        lines.push(format!(
-            "Keys  |  |{}| |{}|   |{}| |{}| |{}|   (* = active pitch class)",
-            bk(1),
-            bk(3),
-            bk(6),
-            bk(8),
-            bk(10)
-        ));
-        lines.push(format!(
-            "      |{} |{} |{} |{} |{} |{} |{} |  (C D E F G A B)",
-            wk(0),
-            wk(2),
-            wk(4),
-            wk(5),
-            wk(7),
-            wk(9),
-            wk(11)
-        ));
-
-        let note_list: Vec<String> = active.iter().map(|&(m, _)| midi_note_name(m)).collect();
-        let abc_notes: Vec<String> = active.iter().map(|&(m, _)| midi_to_abc_note(m)).collect();
-        lines.push(format!("Notes | {}", note_list.join("  ")));
-        lines.push(format!("ABC   | X:1 | K:C | [{}]", abc_notes.join("")));
-        lines.join("\n")
-    }
-
-    /// Live Grand Staff Sheet Music visualizer (Treble G-clef + Bass F-clef) with
-    /// scrolling musical noteheads, accidentals, ledger lines, and active playhead chord!
-    fn paint_grand_staff(
-        &self,
-        painter: &egui::Painter,
-        inner: Rect,
-        palette: &Palette,
-        show_chord: bool,
-    ) {
-        let ppp = painter.pixels_per_point().max(1.0);
-        let clef_margin = 54.0_f32.min(inner.width() * 0.14);
-        let label_margin = 54.0_f32.min(inner.width() * 0.10);
-        let staff_left = inner.left() + 8.0;
-        let notes_left = inner.left() + clef_margin;
-        let playhead_x = (inner.right() - label_margin - 14.0).max(notes_left + 40.0);
-        let staff_right = (inner.right() - 6.0).max(playhead_x + 12.0);
-
-        // Compute vertical half-step spacing so 10 treble+bass staff lines + middle C gap + ledger room fit crisply
-        // Diatonic steps rendered comfortably from -14 (C2) to +14 (C6): 28 half-steps total
-        let step_h = (inner.height() / 28.0).clamp(2.8, 6.2);
-        let mid_c_y = inner.center().y;
-        let step_to_y = |step: i32| -> f32 { mid_c_y - step as f32 * step_h };
-
-        // Grand staff outer barline + left brace
-        let top_line_y = snap_px(step_to_y(10), ppp); // F5
-        let bot_line_y = snap_px(step_to_y(-10), ppp); // G2
-        let staff_line_col = palette.border_strong.gamma_multiply(0.82);
-
-        painter.line_segment(
-            [pos2(snap_px(staff_left + 8.0, ppp), top_line_y), pos2(snap_px(staff_left + 8.0, ppp), bot_line_y)],
-            Stroke::new(1.4, staff_line_col),
-        );
-        // Subtle end barline at right edge
-        painter.line_segment(
-            [pos2(snap_px(staff_right, ppp), top_line_y), pos2(snap_px(staff_right, ppp), bot_line_y)],
-            Stroke::new(1.4, staff_line_col),
-        );
-        painter.line_segment(
-            [pos2(snap_px(staff_right - 3.5, ppp), top_line_y), pos2(snap_px(staff_right - 3.5, ppp), bot_line_y)],
-            Stroke::new(0.8, staff_line_col.gamma_multiply(0.7)),
-        );
-
-        // Curved Grand Staff brace `{`
-        let brace_x = staff_left + 4.5;
-        let mut brace_pts = Vec::with_capacity(21);
-        for i in 0..=20 {
-            let t = i as f32 / 20.0;
-            let y = top_line_y + (bot_line_y - top_line_y) * t;
-            // Pinch smoothly outward at the middle C center, inward at the tips
-            let s = (t - 0.5).abs() * 2.0; // 0 at center, 1 at ends
-            let dx = -4.2 * (1.0 - s).powf(2.2) + 2.4 * (s * std::f32::consts::PI).sin();
-            brace_pts.push(pos2(brace_x + dx, y));
-        }
-        painter.add(Shape::line(brace_pts, Stroke::new(1.5, palette.muted)));
-
-        // Draw 5 Treble staff lines (E4=2, G4=4, B4=6, D5=8, F5=10) and 5 Bass lines (A3=-2, F3=-4, D3=-6, B2=-8, G2=-10)
-        for &line_step in &[10, 8, 6, 4, 2, -2, -4, -6, -8, -10] {
-            let y = snap_px(step_to_y(line_step), ppp);
-            painter.line_segment(
-                [pos2(staff_left + 8.0, y), pos2(staff_right, y)],
-                Stroke::new(0.85, staff_line_col),
-            );
-        }
-
-        // Faint dashed Middle C4 reference guide
-        let c4_y = snap_px(step_to_y(0), ppp);
-        let mut cx_dash = notes_left;
-        while cx_dash < playhead_x - 6.0 {
-            painter.line_segment(
-                [pos2(cx_dash, c4_y), pos2((cx_dash + 4.0).min(playhead_x - 6.0), c4_y)],
-                Stroke::new(0.55, palette.border.gamma_multiply(0.45)),
-            );
-            cx_dash += 12.0;
-        }
-
-        // Vector Treble G-clef (centered around G4 = step 4) & Bass F-clef (around F3 = step -4)
-        paint_treble_clef(painter, staff_left + 25.0, step_to_y(4), step_h, palette.accent_bright.gamma_multiply(0.9));
-        paint_bass_clef(painter, staff_left + 23.0, step_to_y(-4), step_h, palette.muted.gamma_multiply(1.15));
-
-        // Subtle measure barlines across the scrolling timeline
-        let lane_w = (playhead_x - notes_left).max(20.0);
-        for m in 1..=3 {
-            let bx = snap_px(notes_left + lane_w * (m as f32 / 4.0), ppp);
-            painter.line_segment(
-                [pos2(bx, top_line_y), pos2(bx, bot_line_y)],
-                Stroke::new(0.7, palette.border.gamma_multiply(0.45)),
-            );
-        }
-
-        // Vertical glowing playhead line on the right where the live chord strikes
-        painter.line_segment(
-            [pos2(snap_px(playhead_x, ppp), top_line_y - step_h * 2.0), pos2(snap_px(playhead_x, ppp), bot_line_y + step_h * 2.0)],
-            Stroke::new(1.2, palette.accent.gamma_multiply(0.45)),
-        );
-
-        // Plot scrolling historical musical columns from `self.piano_roll` (sampled every 5 frames for clean engraved spacing)
-        let hist_cols = 14usize;
-        let roll_len = self.piano_roll.len();
-        if roll_len > 2 {
-            let stride = (roll_len / hist_cols).max(1);
-            for c in 0..hist_cols {
-                let rev_offset = (c + 1) * stride;
-                if rev_offset >= roll_len {
-                    break;
-                }
-                let frame = &self.piano_roll[roll_len - 1 - rev_offset];
-                let age_frac = (c + 1) as f32 / (hist_cols as f32 + 1.0);
-                let x = playhead_x - age_frac * (lane_w - 14.0);
-                if x < notes_left + 8.0 {
-                    break;
-                }
-                let fade = (1.0 - age_frac * 0.72).clamp(0.20, 0.85);
-                // Pick up to 6 strongest notes in this beat column
-                let mut col_notes: Vec<(usize, f32)> = frame
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &raw)| raw >= 64)
-                    .map(|(k, &raw)| (21 + k, raw as f32 / 255.0))
-                    .collect();
-                col_notes.sort_by(|a, b| b.1.total_cmp(&a.1));
-                col_notes.truncate(6);
-                for (midi, energy) in col_notes {
-                    let (step, acc) = midi_to_diatonic_staff(midi);
-                    if !(-16..=16).contains(&step) {
-                        continue;
-                    }
-                    let ny = step_to_y(step);
-                    let col = piano_dynamic_color(energy, palette);
-                    let faded = Color32::from_rgba_unmultiplied(
-                        col.r(),
-                        col.g(),
-                        col.b(),
-                        (fade * 215.0).round() as u8,
-                    );
-                    paint_staff_notehead(
-                        painter,
-                        x,
-                        ny,
-                        step,
-                        step_h,
-                        acc,
-                        faded,
-                        false,
-                        staff_line_col,
-                    );
-                }
-            }
-        }
-
-        // Plot active LIVE playhead chord notes prominently with stems, ledger lines, accidentals & right-edge labels!
-        let mut live_notes: Vec<(usize, f32)> = self
-            .piano_levels
-            .iter()
-            .enumerate()
-            .filter(|&(k, &v)| self.piano_key_held[k] || v >= 0.14)
-            .map(|(k, &v)| (21 + k, v))
-            .collect();
-        live_notes.sort_by_key(|&(m, _)| m);
-        live_notes.truncate(8);
-
-        let mut last_label_y = f32::INFINITY;
-        for &(midi, energy) in live_notes.iter().rev() {
-            let (step, acc) = midi_to_diatonic_staff(midi);
-            if !(-16..=16).contains(&step) {
-                continue;
-            }
-            let ny = step_to_y(step);
-            let col = piano_dynamic_color(energy, palette);
-            paint_staff_notehead(
-                painter,
-                playhead_x,
-                ny,
-                step,
-                step_h,
-                acc,
-                col,
-                true,
-                palette.accent_bright.gamma_multiply(0.65),
-            );
-            // Delicate note name tag on the right (collision-avoiding)
-            if (last_label_y - ny).abs() >= 10.5 && label_margin >= 34.0 {
-                painter.text(
-                    pos2(playhead_x + 12.0, ny),
-                    Align2::LEFT_CENTER,
-                    midi_note_name(midi),
-                    FontId::monospace(8.5),
-                    col,
-                );
-                last_label_y = ny;
-            }
-        }
-
-        if show_chord {
-            self.paint_harmony_badge(painter, inner, palette);
         }
     }
 
@@ -2801,193 +2444,6 @@ fn midi_note_name(midi: usize) -> String {
     format!("{}{octave}", NOTE_NAMES[pc])
 }
 
-/// Maps a MIDI note (21..=108) to `(diatonic_step_from_C4, accidental)`.
-/// Middle C (`C4`, MIDI 60) = `0`; `E4` = `+2`; `F5` = `+10`; `A3` = `-2`; `G2` = `-10`.
-pub fn midi_to_diatonic_staff(midi: usize) -> (i32, Option<&'static str>) {
-    let pc = midi % 12;
-    let octave = (midi as i32 / 12) - 1;
-    let (dia, acc) = match pc {
-        0 => (0, None),        // C
-        1 => (0, Some("#")),   // C#
-        2 => (1, None),        // D
-        3 => (2, Some("b")),   // Eb
-        4 => (2, None),        // E
-        5 => (3, None),        // F
-        6 => (3, Some("#")),   // F#
-        7 => (4, None),        // G
-        8 => (5, Some("b")),   // Ab
-        9 => (5, None),        // A
-        10 => (6, Some("b")),  // Bb
-        _ => (6, None),        // B
-    };
-    ((octave - 4) * 7 + dia, acc)
-}
-
-/// Converts a MIDI note number into standard ABC musical notation (e.g. C4 -> `C`, C5 -> `c`, Eb3 -> `_E,`, C2 -> `C,,`).
-pub fn midi_to_abc_note(midi: usize) -> String {
-    let pc = midi % 12;
-    let octave = (midi as i32 / 12) - 1;
-    let (prefix, letter) = match pc {
-        0 => ("", 'C'),
-        1 => ("^", 'C'),
-        2 => ("", 'D'),
-        3 => ("_", 'E'),
-        4 => ("", 'E'),
-        5 => ("", 'F'),
-        6 => ("^", 'F'),
-        7 => ("", 'G'),
-        8 => ("_", 'A'),
-        9 => ("", 'A'),
-        10 => ("_", 'B'),
-        _ => ("", 'B'),
-    };
-    if octave >= 5 {
-        let mut s = format!("{prefix}{}", letter.to_ascii_lowercase());
-        for _ in 5..octave {
-            s.push('\'');
-        }
-        s
-    } else {
-        let mut s = format!("{prefix}{letter}");
-        for _ in octave..4 {
-            s.push(',');
-        }
-        s
-    }
-}
-
-/// Draws a clean vector Treble (G) clef centered on the G4 staff line.
-fn paint_treble_clef(painter: &egui::Painter, cx: f32, g4_y: f32, step_h: f32, color: Color32) {
-    let r = (step_h * 2.1).clamp(6.0, 12.5);
-    // Spiral around G4 line
-    let mut spiral = Vec::with_capacity(28);
-    for i in 0..=26 {
-        let t = i as f32 / 26.0;
-        let angle = -0.4 + t * std::f32::consts::TAU * 1.12;
-        let rad = r * (0.28 + 0.85 * t);
-        spiral.push(pos2(cx + angle.cos() * rad * 0.85, g4_y + angle.sin() * rad * 0.95));
-    }
-    painter.add(Shape::line(spiral, Stroke::new(1.5, color)));
-    // Upright stem sweeping up through top of treble staff and hooking down below E4
-    let spine = vec![
-        pos2(cx + r * 0.25, g4_y - r * 2.5),
-        pos2(cx - r * 0.35, g4_y - r * 1.9),
-        pos2(cx - r * 0.15, g4_y - r * 0.5),
-        pos2(cx + r * 0.08, g4_y + r * 1.65),
-        pos2(cx - r * 0.35, g4_y + r * 2.0),
-    ];
-    painter.add(Shape::line(spine, Stroke::new(1.5, color)));
-    painter.circle_filled(pos2(cx - r * 0.42, g4_y + r * 1.85), 1.8, color);
-}
-
-/// Draws a clean vector Bass (F) clef anchored on the F3 staff line with its iconic twin dots.
-fn paint_bass_clef(painter: &egui::Painter, cx: f32, f3_y: f32, step_h: f32, color: Color32) {
-    let r = (step_h * 2.2).clamp(6.0, 12.5);
-    painter.circle_filled(pos2(cx - r * 0.45, f3_y), (step_h * 0.48).clamp(1.8, 3.0), color);
-    let mut curve = Vec::with_capacity(18);
-    for i in 0..=16 {
-        let t = i as f32 / 16.0;
-        let angle = -std::f32::consts::PI * 0.82 + t * std::f32::consts::PI * 1.25;
-        let rx = r * (0.85 - 0.15 * t);
-        let ry = r * (0.95 + 0.55 * t);
-        curve.push(pos2(cx + angle.cos() * rx, f3_y + r * 0.35 + angle.sin() * ry));
-    }
-    painter.add(Shape::line(curve, Stroke::new(1.6, color)));
-    // Twin F-line dots (above & below F3)
-    let dot_x = cx + r * 1.15;
-    let dot_r = (step_h * 0.30).clamp(1.2, 2.1);
-    painter.circle_filled(pos2(dot_x, f3_y - step_h * 0.9), dot_r, color);
-    painter.circle_filled(pos2(dot_x, f3_y + step_h * 0.9), dot_r, color);
-}
-
-/// Draws a musical notehead (tilted oval), stem, accidental (`#`/`b`), and any required ledger lines.
-#[allow(clippy::too_many_arguments)]
-fn paint_staff_notehead(
-    painter: &egui::Painter,
-    x: f32,
-    y: f32,
-    step: i32,
-    step_h: f32,
-    accidental: Option<&'static str>,
-    color: Color32,
-    live_highlight: bool,
-    ledger_color: Color32,
-) {
-    let rx = (step_h * 1.08).clamp(3.2, 5.8);
-    let ry = (step_h * 0.78).clamp(2.3, 4.2);
-
-    // Ledger lines: Middle C (step == 0), above Treble F5 (step >= 12), below Bass G2 (step <= -12)
-    let draw_ledger = |l_step: i32| {
-        let ly = y + (step - l_step) as f32 * step_h;
-        painter.line_segment(
-            [pos2(x - rx * 1.65, ly), pos2(x + rx * 1.65, ly)],
-            Stroke::new(0.95, ledger_color),
-        );
-    };
-    if step == 0 {
-        draw_ledger(0);
-    } else if step >= 12 {
-        let mut s = 12;
-        while s <= step {
-            draw_ledger(s);
-            s += 2;
-        }
-    } else if step <= -12 {
-        let mut s = -12;
-        while s >= step {
-            draw_ledger(s);
-            s -= 2;
-        }
-    }
-
-    // Subtle luminous halo for active playhead notes
-    if live_highlight {
-        painter.circle_filled(
-            pos2(x, y),
-            rx * 1.55,
-            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 44),
-        );
-    }
-
-    // Engraved tilted elliptical notehead (12-vertex polygon rotated -20 deg)
-    let cos_a = (-0.34_f32).cos();
-    let sin_a = (-0.34_f32).sin();
-    let mut head_pts = Vec::with_capacity(12);
-    for i in 0..12 {
-        let a = i as f32 * std::f32::consts::TAU / 12.0;
-        let lx = a.cos() * rx;
-        let ly = a.sin() * ry;
-        head_pts.push(pos2(x + lx * cos_a - ly * sin_a, y + lx * sin_a + ly * cos_a));
-    }
-    painter.add(Shape::convex_polygon(head_pts, color, Stroke::NONE));
-
-    // Musical stem (up on right for lower notes on each staff, down on left for upper notes)
-    let stem_h = (step_h * 5.2).clamp(14.0, 26.0);
-    let stem_up = if step >= 0 { step < 6 } else { step < -6 };
-    if stem_up {
-        painter.line_segment(
-            [pos2(x + rx * 0.85, y), pos2(x + rx * 0.85, y - stem_h)],
-            Stroke::new(1.15, color.gamma_multiply(0.92)),
-        );
-    } else {
-        painter.line_segment(
-            [pos2(x - rx * 0.85, y), pos2(x - rx * 0.85, y + stem_h)],
-            Stroke::new(1.15, color.gamma_multiply(0.92)),
-        );
-    }
-
-    // Accidental (`#` or `b`) cleanly positioned to the left of the notehead
-    if let Some(acc) = accidental {
-        painter.text(
-            pos2(x - rx - 2.5, y),
-            Align2::RIGHT_CENTER,
-            acc,
-            FontId::monospace((step_h * 2.05).clamp(7.5, 10.5)),
-            color,
-        );
-    }
-}
-
 /// Infers active chord name + top sounding piano notes from 88-key energies.
 fn detect_chord_and_notes(levels: &[f32; PIANO_KEYS]) -> String {
     let mut active: Vec<(usize, f32)> = levels
@@ -3455,38 +2911,5 @@ mod tests {
             "Expected dominant spectrogram peak near 1000 Hz, got {} Hz",
             vis.peak_freq_hz
         );
-    }
-
-    #[test]
-    fn midi_diatonic_staff_and_abc_notation_are_musically_accurate() {
-        // Middle C4 = step 0, natural, ABC "C"
-        assert_eq!(midi_to_diatonic_staff(60), (0, None));
-        assert_eq!(midi_to_abc_note(60), "C");
-        // Treble G4 = step +4, natural, ABC "G"
-        assert_eq!(midi_to_diatonic_staff(67), (4, None));
-        assert_eq!(midi_to_abc_note(67), "G");
-        // Treble F5 = step +10, natural, ABC "f"
-        assert_eq!(midi_to_diatonic_staff(77), (10, None));
-        assert_eq!(midi_to_abc_note(77), "f");
-        // Eb3 = step -5, flat "b", ABC "_E,"
-        assert_eq!(midi_to_diatonic_staff(51), (-5, Some("b")));
-        assert_eq!(midi_to_abc_note(51), "_E,");
-        // Bass G2 = step -10, natural, ABC "G,,"
-        assert_eq!(midi_to_diatonic_staff(43), (-10, None));
-        assert_eq!(midi_to_abc_note(43), "G,,");
-    }
-
-    #[test]
-    fn ascii_musical_snapshot_renders_grand_staff_keys_and_abc() {
-        let mut vis = VisualizerState::new(VisualizerMode::GrandStaff, true, 1.15);
-        vis.seed_demo_piano_state();
-        let snap = vis.format_ascii_musical_snapshot(Some("Chopin Nocturne"));
-        assert!(snap.contains("Chopin Nocturne"));
-        assert!(snap.contains("TR F5"));
-        assert!(snap.contains("BS A3"));
-        assert!(snap.contains("o(C4)"));
-        assert!(snap.contains("bo(Eb3)"));
-        assert!(snap.contains("ABC   | X:1 | K:C | ["));
-        assert!(snap.contains("Keys  |"));
     }
 }
