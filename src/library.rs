@@ -27,6 +27,267 @@ pub struct Playlist {
     pub track_ids: Vec<u64>,
 }
 
+/// Curated multi-album / multi-track Collection (box sets, themes, audiophile references, eras).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub accent_index: u8,
+    #[serde(default)]
+    pub track_ids: Vec<u64>,
+}
+
+/// Queryable metadata & audio-analysis fields for Custom Saved Views (Smart Database Views).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueryField {
+    Title,
+    Artist,
+    Album,
+    Composer,
+    Genre,
+    Label,
+    Codec,
+    CustomTag,
+    SampleRateHz,
+    BitDepth,
+    DynamicRange,
+    Rating,
+    PlayCount,
+    Year,
+    HasReplayGain,
+    Authenticity,
+}
+
+impl QueryField {
+    pub const ALL: &'static [QueryField] = &[
+        QueryField::Composer,
+        QueryField::Artist,
+        QueryField::Album,
+        QueryField::Title,
+        QueryField::Genre,
+        QueryField::Label,
+        QueryField::Codec,
+        QueryField::CustomTag,
+        QueryField::SampleRateHz,
+        QueryField::BitDepth,
+        QueryField::DynamicRange,
+        QueryField::Rating,
+        QueryField::PlayCount,
+        QueryField::Year,
+        QueryField::HasReplayGain,
+        QueryField::Authenticity,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            QueryField::Title => "Title",
+            QueryField::Artist => "Artist",
+            QueryField::Album => "Album",
+            QueryField::Composer => "Composer",
+            QueryField::Genre => "Genre",
+            QueryField::Label => "Label",
+            QueryField::Codec => "Codec",
+            QueryField::CustomTag => "Custom Tag",
+            QueryField::SampleRateHz => "Sample Rate (Hz)",
+            QueryField::BitDepth => "Bit Depth",
+            QueryField::DynamicRange => "DR Score",
+            QueryField::Rating => "Rating (0-5)",
+            QueryField::PlayCount => "Play Count",
+            QueryField::Year => "Year",
+            QueryField::HasReplayGain => "Has ReplayGain",
+            QueryField::Authenticity => "TrueHz Verdict",
+        }
+    }
+
+    pub fn is_numeric(self) -> bool {
+        matches!(
+            self,
+            QueryField::SampleRateHz
+                | QueryField::BitDepth
+                | QueryField::DynamicRange
+                | QueryField::Rating
+                | QueryField::PlayCount
+                | QueryField::Year
+        )
+    }
+
+    pub fn is_bool(self) -> bool {
+        matches!(self, QueryField::HasReplayGain)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueryOp {
+    Contains,
+    Equals,
+    NotEquals,
+    GreaterOrEq,
+    LessOrEq,
+    IsTrue,
+    IsFalse,
+}
+
+impl QueryOp {
+    pub const ALL: &'static [QueryOp] = &[
+        QueryOp::Contains,
+        QueryOp::Equals,
+        QueryOp::NotEquals,
+        QueryOp::GreaterOrEq,
+        QueryOp::LessOrEq,
+        QueryOp::IsTrue,
+        QueryOp::IsFalse,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            QueryOp::Contains => "contains",
+            QueryOp::Equals => "equals",
+            QueryOp::NotEquals => "not equals",
+            QueryOp::GreaterOrEq => ">=",
+            QueryOp::LessOrEq => "<=",
+            QueryOp::IsTrue => "is yes",
+            QueryOp::IsFalse => "is no",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryRule {
+    pub field: QueryField,
+    pub op: QueryOp,
+    #[serde(default)]
+    pub value: String,
+}
+
+impl QueryRule {
+    pub fn matches(&self, t: &Track) -> bool {
+        let needle = self.value.trim().to_lowercase();
+        let match_str = |hay: &str| -> bool {
+            let h = hay.to_lowercase();
+            match self.op {
+                QueryOp::Contains => needle.is_empty() || h.contains(&needle),
+                QueryOp::Equals => h == needle,
+                QueryOp::NotEquals => h != needle,
+                QueryOp::GreaterOrEq => h >= needle,
+                QueryOp::LessOrEq => h <= needle,
+                QueryOp::IsTrue => !h.is_empty(),
+                QueryOp::IsFalse => h.is_empty(),
+            }
+        };
+        let match_num = |val: Option<i64>| -> bool {
+            let target = needle.parse::<i64>().ok();
+            match (val, target, self.op) {
+                (Some(v), Some(n), QueryOp::Equals) => v == n,
+                (Some(v), Some(n), QueryOp::NotEquals) => v != n,
+                (Some(v), Some(n), QueryOp::GreaterOrEq) => v >= n,
+                (Some(v), Some(n), QueryOp::LessOrEq) => v <= n,
+                (Some(v), Some(n), QueryOp::Contains) => v.to_string().contains(&n.to_string()),
+                (Some(v), _, QueryOp::IsTrue) => v > 0,
+                (Some(v), _, QueryOp::IsFalse) => v == 0,
+                (None, _, QueryOp::IsFalse) => true,
+                (None, Some(0), QueryOp::Equals | QueryOp::LessOrEq) => true,
+                _ => false,
+            }
+        };
+
+        match self.field {
+            QueryField::Title => match_str(&t.title),
+            QueryField::Artist => match_str(&t.artist),
+            QueryField::Album => match_str(&t.album),
+            QueryField::Composer => match_str(t.composer.as_deref().unwrap_or("")),
+            QueryField::Genre => match_str(t.genre.as_deref().unwrap_or("")),
+            QueryField::Label => match_str(t.label.as_deref().unwrap_or("")),
+            QueryField::Codec => match_str(&t.codec),
+            QueryField::CustomTag => {
+                if self.op == QueryOp::IsTrue {
+                    !t.custom_tags.is_empty()
+                } else if self.op == QueryOp::IsFalse {
+                    t.custom_tags.is_empty()
+                } else if self.op == QueryOp::NotEquals {
+                    t.custom_tags.iter().all(|tag| tag.to_lowercase() != needle)
+                } else {
+                    t.custom_tags.iter().any(|tag| match_str(tag))
+                }
+            }
+            QueryField::SampleRateHz => match_num(t.sample_rate.map(|v| v as i64)),
+            QueryField::BitDepth => match_num(t.bit_depth.map(|v| v as i64)),
+            QueryField::DynamicRange => match_num(t.dr_score.map(|v| v as i64)),
+            QueryField::Rating => match_num(Some(t.rating as i64)),
+            QueryField::PlayCount => match_num(Some(t.play_count as i64)),
+            QueryField::Year => {
+                let y = t
+                    .year
+                    .as_deref()
+                    .and_then(|s| s.get(..4).unwrap_or(s).parse::<i64>().ok());
+                match_num(y)
+            }
+            QueryField::HasReplayGain => {
+                let has = t.rg_track_gain_db.is_some() || t.rg_album_gain_db.is_some();
+                match self.op {
+                    QueryOp::IsFalse | QueryOp::NotEquals => !has,
+                    _ => has,
+                }
+            }
+            QueryField::Authenticity => match_str(t.authenticity.as_deref().unwrap_or("")),
+        }
+    }
+}
+
+/// User-defined persistent database Smart View (dynamic rule-based query).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedView {
+    pub id: u64,
+    pub name: String,
+    #[serde(default = "default_true_lib")]
+    pub match_all: bool,
+    #[serde(default)]
+    pub rules: Vec<QueryRule>,
+}
+
+fn default_true_lib() -> bool {
+    true
+}
+
+impl SavedView {
+    pub fn matches(&self, track: &Track) -> bool {
+        if self.rules.is_empty() {
+            return true;
+        }
+        if self.match_all {
+            self.rules.iter().all(|r| r.matches(track))
+        } else {
+            self.rules.iter().any(|r| r.matches(track))
+        }
+    }
+}
+
+/// Aggregate analytics snapshot computed from the active Library database.
+#[derive(Debug, Clone, Default)]
+pub struct LibraryStats {
+    pub total_tracks: usize,
+    pub total_albums: usize,
+    pub total_artists: usize,
+    pub total_composers: usize,
+    pub total_genres: usize,
+    pub total_labels: usize,
+    pub total_duration_secs: f64,
+    pub hires_tracks: usize,
+    pub lossless_tracks: usize,
+    pub dsd_tracks: usize,
+    pub rg_scanned_tracks: usize,
+    pub dr_analyzed_tracks: usize,
+    pub avg_dr: Option<f32>,
+    pub verified_hires_tracks: usize,
+    pub collections_count: usize,
+    pub saved_views_count: usize,
+    pub playlists_count: usize,
+    pub codec_counts: Vec<(String, usize)>,
+    pub rate_buckets: Vec<(String, usize)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Library {
     #[serde(default = "default_library_id")]
@@ -41,6 +302,10 @@ pub struct Library {
     pub favorites: HashSet<u64>,
     #[serde(default)]
     pub playlists: Vec<Playlist>,
+    #[serde(default)]
+    pub collections: Vec<Collection>,
+    #[serde(default)]
+    pub saved_views: Vec<SavedView>,
     /// O(1) lookup index (`track.id -> index in tracks`); rebuilt automatically on load/mutate.
     #[serde(skip)]
     id_index: HashMap<u64, usize>,
@@ -63,6 +328,8 @@ impl Default for Library {
             folders: Vec::new(),
             favorites: HashSet::new(),
             playlists: Vec::new(),
+            collections: Vec::new(),
+            saved_views: Vec::new(),
             id_index: HashMap::new(),
         }
     }
@@ -105,13 +372,34 @@ impl Library {
             .or_else(|| self.tracks.iter().position(|item| item.id == track.id));
         if let Some(idx) = existing_idx {
             let existing = &mut self.tracks[idx];
-            // Preserve user listening stats, ratings, and original added_at when rescanning!
+            // Preserve user listening stats, ratings, custom tags, ReplayGain & audio analysis across rescans!
             track.play_count = existing.play_count.max(track.play_count);
+            if track.last_played_at.is_none() {
+                track.last_played_at = existing.last_played_at;
+            }
             if track.rating == 0 {
                 track.rating = existing.rating;
             }
             if existing.added_at > 0 {
                 track.added_at = existing.added_at;
+            }
+            if track.custom_tags.is_empty() && !existing.custom_tags.is_empty() {
+                track.custom_tags = existing.custom_tags.clone();
+            }
+            if track.rg_track_gain_db.is_none() {
+                track.rg_track_gain_db = existing.rg_track_gain_db;
+                track.rg_track_peak = existing.rg_track_peak;
+            }
+            if track.rg_album_gain_db.is_none() {
+                track.rg_album_gain_db = existing.rg_album_gain_db;
+                track.rg_album_peak = existing.rg_album_peak;
+            }
+            if track.dr_score.is_none() {
+                track.dr_score = existing.dr_score;
+                track.integrated_lufs = existing.integrated_lufs;
+                track.true_peak_dbtp = existing.true_peak_dbtp;
+                track.effective_bandwidth_hz = existing.effective_bandwidth_hz;
+                track.authenticity = existing.authenticity.clone();
             }
             *existing = track;
             self.id_index.insert(self.tracks[idx].id, idx);
@@ -125,6 +413,11 @@ impl Library {
     pub fn increment_play_count(&mut self, id: u64) {
         if let Some(t) = self.get_by_id_mut(id) {
             t.play_count = t.play_count.saturating_add(1);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            t.last_played_at = Some(now);
         }
     }
 
@@ -203,6 +496,9 @@ impl Library {
         }
         for pl in &mut self.playlists {
             pl.track_ids.retain(|tid| !id_set.contains(tid));
+        }
+        for col in &mut self.collections {
+            col.track_ids.retain(|tid| !id_set.contains(tid));
         }
         if !removed.is_empty() {
             self.rebuild_index();
@@ -436,6 +732,272 @@ impl Library {
         pl.track_ids.shuffle(&mut rng);
         true
     }
+
+    // --- Curated Collections ---
+    pub fn create_collection(
+        &mut self,
+        name: String,
+        description: String,
+        accent_index: u8,
+    ) -> u64 {
+        let trimmed = name.trim();
+        let final_name = if trimmed.is_empty() {
+            format!("Collection {}", self.collections.len() + 1)
+        } else {
+            trimmed.to_string()
+        };
+        let id = unique_id(&final_name, self.collections.len() as u64 + 500);
+        self.collections.push(Collection {
+            id,
+            name: final_name,
+            description: description.trim().to_string(),
+            accent_index: accent_index % 6,
+            track_ids: Vec::new(),
+        });
+        id
+    }
+
+    pub fn collection(&self, id: u64) -> Option<&Collection> {
+        self.collections.iter().find(|c| c.id == id)
+    }
+
+    pub fn delete_collection(&mut self, id: u64) -> Option<String> {
+        let pos = self.collections.iter().position(|c| c.id == id)?;
+        Some(self.collections.remove(pos).name)
+    }
+
+    pub fn add_tracks_to_collection(&mut self, collection_id: u64, track_ids: &[u64]) -> usize {
+        let Some(col) = self.collections.iter_mut().find(|c| c.id == collection_id) else {
+            return 0;
+        };
+        let mut added = 0;
+        for &tid in track_ids {
+            if !col.track_ids.contains(&tid) {
+                col.track_ids.push(tid);
+                added += 1;
+            }
+        }
+        added
+    }
+
+    pub fn remove_tracks_from_collection(&mut self, collection_id: u64, track_ids: &[u64]) -> usize {
+        let Some(col) = self.collections.iter_mut().find(|c| c.id == collection_id) else {
+            return 0;
+        };
+        let id_set: HashSet<u64> = track_ids.iter().copied().collect();
+        let before = col.track_ids.len();
+        col.track_ids.retain(|tid| !id_set.contains(tid));
+        before - col.track_ids.len()
+    }
+
+    // --- Custom Saved Views (Database Queries) ---
+    pub fn upsert_saved_view(&mut self, view: SavedView) -> u64 {
+        if let Some(existing) = self.saved_views.iter_mut().find(|v| v.id == view.id) {
+            let id = existing.id;
+            *existing = view;
+            return id;
+        }
+        let id = if view.id == 0 {
+            unique_id(&view.name, self.saved_views.len() as u64 + 900)
+        } else {
+            view.id
+        };
+        let mut v = view;
+        v.id = id;
+        self.saved_views.push(v);
+        id
+    }
+
+    pub fn saved_view(&self, id: u64) -> Option<&SavedView> {
+        self.saved_views.iter().find(|v| v.id == id)
+    }
+
+    pub fn delete_saved_view(&mut self, id: u64) -> Option<String> {
+        let pos = self.saved_views.iter().position(|v| v.id == id)?;
+        Some(self.saved_views.remove(pos).name)
+    }
+
+    pub fn add_custom_tag(&mut self, ids: &[u64], raw_tag: &str) -> usize {
+        let clean = raw_tag.trim().trim_start_matches('#').to_lowercase();
+        if clean.is_empty() {
+            return 0;
+        }
+        let mut updated = 0;
+        for &id in ids {
+            if let Some(t) = self.get_by_id_mut(id)
+                && !t.custom_tags.iter().any(|x| x.eq_ignore_ascii_case(&clean))
+            {
+                t.custom_tags.push(clean.clone());
+                updated += 1;
+            }
+        }
+        updated
+    }
+
+    /// Computes full database analytics (codecs, sample-rate distribution, composers, DR & RG coverage).
+    pub fn compute_stats(&self) -> LibraryStats {
+        let mut albums = HashSet::new();
+        let mut artists = HashSet::new();
+        let mut composers = HashSet::new();
+        let mut genres = HashSet::new();
+        let mut labels = HashSet::new();
+        let mut codecs: HashMap<String, usize> = HashMap::new();
+        let mut rates: HashMap<&'static str, usize> = HashMap::new();
+
+        let mut total_duration_secs = 0.0_f64;
+        let mut hires_tracks = 0usize;
+        let mut lossless_tracks = 0usize;
+        let mut dsd_tracks = 0usize;
+        let mut rg_scanned_tracks = 0usize;
+        let mut dr_analyzed_tracks = 0usize;
+        let mut dr_sum = 0.0_f32;
+        let mut verified_hires_tracks = 0usize;
+
+        for t in &self.tracks {
+            if !t.album.trim().is_empty() {
+                albums.insert((t.album.to_lowercase(), t.artist.to_lowercase()));
+            }
+            if !t.artist.trim().is_empty() {
+                artists.insert(t.artist.to_lowercase());
+            }
+            if let Some(ref c) = t.composer
+                && !c.trim().is_empty()
+            {
+                composers.insert(c.trim().to_lowercase());
+            }
+            if let Some(ref g) = t.genre
+                && !g.trim().is_empty()
+            {
+                genres.insert(g.trim().to_lowercase());
+            }
+            if let Some(ref l) = t.label
+                && !l.trim().is_empty()
+            {
+                labels.insert(l.trim().to_lowercase());
+            }
+            if let Some(d) = t.duration {
+                total_duration_secs += d;
+            }
+            if t.is_hires() {
+                hires_tracks += 1;
+            }
+            if t.is_lossless() {
+                lossless_tracks += 1;
+            }
+            if t.codec.starts_with("DSD") {
+                dsd_tracks += 1;
+            }
+            if t.rg_track_gain_db.is_some() || t.rg_album_gain_db.is_some() {
+                rg_scanned_tracks += 1;
+            }
+            if let Some(dr) = t.dr_score {
+                dr_analyzed_tracks += 1;
+                dr_sum += dr as f32;
+            }
+            if t.authenticity.as_deref() == Some("AuthenticHiRes") {
+                verified_hires_tracks += 1;
+            }
+            *codecs.entry(t.codec.clone()).or_insert(0) += 1;
+            let bucket = if t.codec.starts_with("DSD") {
+                "DSD (1-bit)"
+            } else {
+                match t.sample_rate.unwrap_or(0) {
+                    r if r >= 176_400 => "≥ 176.4 kHz",
+                    r if r >= 88_200 => "88.2 – 96 kHz",
+                    r if r >= 44_100 => "44.1 – 48 kHz",
+                    _ => "Other",
+                }
+            };
+            *rates.entry(bucket).or_insert(0) += 1;
+        }
+
+        let mut codec_counts: Vec<(String, usize)> = codecs.into_iter().collect();
+        codec_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        let bucket_order = ["DSD (1-bit)", "≥ 176.4 kHz", "88.2 – 96 kHz", "44.1 – 48 kHz", "Other"];
+        let mut rate_buckets = Vec::new();
+        for b in bucket_order {
+            if let Some(&cnt) = rates.get(b) {
+                rate_buckets.push((b.to_string(), cnt));
+            }
+        }
+
+        LibraryStats {
+            total_tracks: self.tracks.len(),
+            total_albums: albums.len(),
+            total_artists: artists.len(),
+            total_composers: composers.len(),
+            total_genres: genres.len(),
+            total_labels: labels.len(),
+            total_duration_secs,
+            hires_tracks,
+            lossless_tracks,
+            dsd_tracks,
+            rg_scanned_tracks,
+            dr_analyzed_tracks,
+            avg_dr: if dr_analyzed_tracks > 0 {
+                Some(dr_sum / dr_analyzed_tracks as f32)
+            } else {
+                None
+            },
+            verified_hires_tracks,
+            collections_count: self.collections.len(),
+            saved_views_count: self.saved_views.len(),
+            playlists_count: self.playlists.len(),
+            codec_counts,
+            rate_buckets,
+        }
+    }
+
+    /// Exports the active library catalog to RFC-4180 CSV for spreadsheets & archival.
+    pub fn export_csv(&self, path: &Path) -> std::io::Result<usize> {
+        let esc = |s: &str| -> String {
+            if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.to_string()
+            }
+        };
+        let mut out = String::from(
+            "Title,Artist,Album,Composer,Conductor,Orchestra,Genre,Year,Label,Disc,Track,Duration_s,Codec,SampleRate_Hz,BitDepth,DR,LUFS,TruePeak_dBTP,Authenticity,RG_Track_dB,RG_Album_dB,Rating,PlayCount,Tags,Path\n",
+        );
+        for t in &self.tracks {
+            let opt_s = |o: &Option<String>| esc(o.as_deref().unwrap_or(""));
+            let opt_u = |o: Option<u32>| o.map(|v| v.to_string()).unwrap_or_default();
+            let opt_f = |o: Option<f32>| o.map(|v| format!("{v:.2}")).unwrap_or_default();
+            let tags_joined = esc(&t.custom_tags.join(";"));
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                esc(&t.title),
+                esc(&t.artist),
+                esc(&t.album),
+                opt_s(&t.composer),
+                opt_s(&t.conductor),
+                opt_s(&t.orchestra),
+                opt_s(&t.genre),
+                opt_s(&t.year),
+                opt_s(&t.label),
+                opt_u(t.disc_number),
+                opt_u(t.track_number),
+                t.duration.map(|d| format!("{d:.1}")).unwrap_or_default(),
+                esc(&t.codec),
+                opt_u(t.sample_rate),
+                opt_u(t.bit_depth),
+                t.dr_score.map(|v| v.to_string()).unwrap_or_default(),
+                opt_f(t.integrated_lufs),
+                opt_f(t.true_peak_dbtp),
+                opt_s(&t.authenticity),
+                opt_f(t.rg_track_gain_db),
+                opt_f(t.rg_album_gain_db),
+                t.rating,
+                t.play_count,
+                tags_joined,
+                esc(&t.path.to_string_lossy()),
+            ));
+        }
+        std::fs::write(path, out)?;
+        Ok(self.tracks.len())
+    }
 }
 
 /// Moves the elements at `moving_indices` (in their existing relative order) to `insert_before`
@@ -489,8 +1051,16 @@ pub fn reorder_vec_indices<T: Clone>(
     Some((insert_at, moved_len))
 }
 
+const DB_SCHEMA_VERSION: u32 = 2;
+
+fn default_schema_version() -> u32 {
+    DB_SCHEMA_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryStore {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub active_id: u64,
     pub libraries: Vec<Library>,
 }
@@ -499,6 +1069,7 @@ impl Default for LibraryStore {
     fn default() -> Self {
         let main = Library::default();
         Self {
+            schema_version: DB_SCHEMA_VERSION,
             active_id: main.id,
             libraries: vec![main],
         }
@@ -531,11 +1102,18 @@ impl LibraryStore {
             }
             lib.rebuild_index();
             return Self {
+                schema_version: DB_SCHEMA_VERSION,
                 active_id: lib.id,
                 libraries: vec![lib],
             };
         }
         Self::default()
+    }
+
+    pub fn export_backup_json(&self, path: &Path) -> std::io::Result<()> {
+        let pretty = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        std::fs::write(path, pretty)
     }
 
     /// Non-blocking save: enqueues snapshot onto a single coalescing background writer thread
@@ -617,8 +1195,7 @@ fn background_saver() -> &'static Sender<LibraryStore> {
     })
 }
 
-/// Cross-platform safe atomic replacement (fixes Windows `std::fs::rename` failing with
-/// `ERROR_ALREADY_EXISTS` when destination `libraries.json` already exists!).
+/// Cross-platform safe atomic replacement with rolling `.bak` database backup.
 fn save_store_to_path(store: &LibraryStore, path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -626,6 +1203,10 @@ fn save_store_to_path(store: &LibraryStore, path: &Path) {
     let Ok(data) = serde_json::to_vec(store) else {
         return;
     };
+    if path.exists() {
+        let bak = path.with_extension("json.bak");
+        let _ = std::fs::copy(path, &bak);
+    }
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, &data).is_ok() {
         if std::fs::rename(&tmp, path).is_ok() {
@@ -793,10 +1374,84 @@ mod tests {
             rg_album_gain_db: None,
             rg_album_peak: None,
             lyrics: None,
+            composer: Some("Frédéric Chopin".into()),
+            conductor: None,
+            orchestra: None,
+            work: None,
+            label: Some("Deutsche Grammophon".into()),
+            catalog_number: None,
+            comment: None,
+            custom_tags: Vec::new(),
+            dr_score: Some(13),
+            integrated_lufs: Some(-18.4),
+            true_peak_dbtp: Some(-1.2),
+            effective_bandwidth_hz: Some(38_000.0),
+            authenticity: Some("AuthenticHiRes".into()),
             play_count: 0,
+            last_played_at: None,
             rating: 0,
             added_at: 0,
         }
+    }
+
+    #[test]
+    fn collections_saved_views_and_stats_work_end_to_end() {
+        let mut lib = Library::default();
+        let mut t1 = sample_track(1, "/music/beethoven_op27.flac", "Moonlight Sonata");
+        t1.composer = Some("Ludwig van Beethoven".into());
+        t1.sample_rate = Some(192_000);
+        t1.dr_score = Some(14);
+        t1.rating = 5;
+        let mut t2 = sample_track(2, "/music/chopin_nocturne.dsf", "Nocturne Op.9 No.2");
+        t2.codec = "DSD64".into();
+        t2.sample_rate = Some(2_822_400);
+        t2.dr_score = Some(11);
+        t2.rating = 4;
+        lib.upsert(t1);
+        lib.upsert(t2);
+        assert_eq!(lib.add_custom_tag(&[1], "#reference"), 1);
+
+        let cid = lib.create_collection("Audiophile Piano".into(), "Best piano masters".into(), 2);
+        assert_eq!(lib.add_tracks_to_collection(cid, &[1, 2]), 2);
+        assert_eq!(lib.collection(cid).unwrap().track_ids.len(), 2);
+
+        let vid = lib.upsert_saved_view(SavedView {
+            id: 0,
+            name: "High-DR Beethoven".into(),
+            match_all: true,
+            rules: vec![
+                QueryRule {
+                    field: QueryField::Composer,
+                    op: QueryOp::Contains,
+                    value: "Beethoven".into(),
+                },
+                QueryRule {
+                    field: QueryField::DynamicRange,
+                    op: QueryOp::GreaterOrEq,
+                    value: "12".into(),
+                },
+                QueryRule {
+                    field: QueryField::CustomTag,
+                    op: QueryOp::Equals,
+                    value: "reference".into(),
+                },
+            ],
+        });
+        let sv = lib.saved_view(vid).unwrap();
+        let matched: Vec<u64> = lib
+            .tracks
+            .iter()
+            .filter(|t| sv.matches(t))
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(matched, vec![1]);
+
+        let stats = lib.compute_stats();
+        assert_eq!(stats.total_tracks, 2);
+        assert_eq!(stats.total_composers, 2);
+        assert_eq!(stats.dsd_tracks, 1);
+        assert_eq!(stats.verified_hires_tracks, 2);
+        assert!((stats.avg_dr.unwrap() - 12.5).abs() < 0.01);
     }
 
     #[test]

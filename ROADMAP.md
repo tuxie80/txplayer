@@ -55,14 +55,14 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
 
 ---
 
-## Wave 5 — Master Library Database, Collections & Smart Views (`v1.4.0` Next Up)
-- [ ] **Rich Relational Library Database & Schema Indexing:**
-  - Persist full classical & audiophile metadata per track (`composer`, `conductor`, `orchestra`, `work`, `label`, `catalog_number`, `comment`, freeform `#custom-tags`, `last_played_at`) plus **persisted audio analysis results** (`dr_score`, `integrated_lufs`, `true_peak_dbtp`, `effective_bandwidth_hz`, `authenticity_verdict`) so DR/TrueHz audits live permanently in the database!
-  - Automatic rolling backup (`.bak`), schema versioning, and **1-click Database Export / Backup** (full JSON snapshot + CSV spreadsheet catalog).
-- [ ] **Curated Collections (Multi-Album / Multi-Track Boxes & Themes):**
-  - Create named Collections with descriptions & color badges (e.g. *Beethoven Complete Sonatas*, *Reference Audiophile Demos*, *Deutsche Grammophon Originals*, *Late-Night Piano*).
-  - Right-click any track or entire album → **Add to Collection…**, with dedicated Collections browser in the sidebar.
-- [ ] **Custom Saved Views & Visual Smart Query Builder:**
-  - Build & save unlimited dynamic rule-based database views (`Match All` / `Match Any`) over any field: `Composer`, `Artist`, `Album`, `Genre`, `Label`, `Codec`, `Sample Rate`, `Bit Depth`, `Dynamic Range (DR)`, `Rating`, `Year`, `Play Count`, `Custom Tag`, `Authenticity`, `Has ReplayGain`, plus saved sort order & layout (`Tracks | Albums | Composers | Genres`).
-- [ ] **Dedicated Classical & Facet Browsers + Library Insights Dashboard:**
-  - **Composers** browser, **Genres / Years / Labels** facet browser, and a **Library Insights Dashboard** (format breakdown FLAC/DSD/ALAC/WAV, sample-rate distribution, total listening hours, average DR, verified Hi-Res share, and duplicate/missing file audit).
+## Wave 5 — Master Library Database, Collections & Smart Views (`v1.4.0` Completed)
+- [x] **Rich Relational Library Database & Schema Indexing:**
+  - Persist full classical & audiophile metadata per track (`composer`, `conductor`, `orchestra`, `work`, `label`, `catalog_number`, `comment`, freeform `#custom-tags`, `last_played_at`) plus **persisted audio analysis results** (`dr_score`, `integrated_lufs`, `true_peak_dbtp`, `effective_bandwidth_hz`, `authenticity`) so DR/TrueHz audits live permanently in the database!
+  - Automatic rolling backup (`libraries.json.bak`), schema versioning (v2), and **1-click Database Export / Backup** (full JSON backup + RFC-4180 CSV spreadsheet catalog).
+- [x] **Curated Collections (Multi-Album / Multi-Track Boxes & Themes):**
+  - Create named Collections with descriptions & 6 curated color badges (e.g. *Beethoven Complete Sonatas*, *Reference Audiophile Demos*, *Deutsche Grammophon Originals*, *Late-Night Piano*).
+  - Right-click any track or multi-selection → **Add to Collection…**, with dedicated Collections section in the sidebar.
+- [x] **Custom Saved Views & Visual Smart Query Builder:**
+  - Build & save unlimited dynamic rule-based database views (`Match ALL` / `Match ANY`) over 16 fields (`Composer`, `Artist`, `Album`, `Title`, `Genre`, `Label`, `Codec`, `Custom Tag`, `Sample Rate`, `Bit Depth`, `DR Score`, `Rating`, `Play Count`, `Year`, `Has ReplayGain`, `TrueHz Verdict`) with live match-count preview & 1-click audiophile presets.
+- [x] **Dedicated Classical & Facet Browsers + Library Insights Dashboard:**
+  - **Composers** browser, **Genres** browser, and a **Library Database & Insights Dashboard** (format breakdown FLAC/DSD/ALAC/WAV, sample-rate distribution, total listening hours, average DR, verified Hi-Res share, ReplayGain coverage, and CSV/JSON export).

@@ -25,6 +25,7 @@ pub struct ParsedCue {
     pub album_performer: Option<String>,
     pub year: Option<String>,
     pub genre: Option<String>,
+    pub composer: Option<String>,
     pub disc_number: Option<u32>,
     pub entries: Vec<CueEntry>,
 }
@@ -111,6 +112,7 @@ pub fn parse_cue_text(text: &str) -> ParsedCue {
     let mut album_performer: Option<String> = None;
     let mut year: Option<String> = None;
     let mut genre: Option<String> = None;
+    let mut composer: Option<String> = None;
     let mut disc_number: Option<u32> = None;
 
     let mut current_file: Option<String> = None;
@@ -149,10 +151,13 @@ pub fn parse_cue_text(text: &str) -> ParsedCue {
                 if let Some(num) = val.split('/').next().and_then(|s| s.trim().parse::<u32>().ok()) {
                     disc_number = Some(num);
                 }
-            } else if rest_up.starts_with("COMPOSER ") && album_performer.is_none() {
+            } else if rest_up.starts_with("COMPOSER ") {
                 let val = unquote(rest[9..].trim());
                 if !val.is_empty() {
-                    album_performer = Some(val);
+                    composer = Some(val.clone());
+                    if album_performer.is_none() {
+                        album_performer = Some(val);
+                    }
                 }
             }
             continue;
@@ -248,6 +253,7 @@ pub fn parse_cue_text(text: &str) -> ParsedCue {
         album_performer,
         year,
         genre,
+        composer,
         disc_number,
         entries,
     }
@@ -358,6 +364,9 @@ fn build_virtual_cue_track(
     if parsed.genre.is_some() {
         tr.genre = parsed.genre.clone();
     }
+    if parsed.composer.is_some() {
+        tr.composer = parsed.composer.clone();
+    }
     tr.duration = track_dur;
     tr.cue_start = Some(entry.start_secs);
     tr.cue_end = entry.end_secs;
@@ -410,7 +419,21 @@ fn read_raw_cd_bin_base(path: &Path, parsed: &ParsedCue) -> Result<Track> {
         rg_album_gain_db: None,
         rg_album_peak: None,
         lyrics: None,
+        composer: parsed.composer.clone(),
+        conductor: None,
+        orchestra: None,
+        work: None,
+        label: None,
+        catalog_number: None,
+        comment: None,
+        custom_tags: Vec::new(),
+        dr_score: None,
+        integrated_lufs: None,
+        true_peak_dbtp: None,
+        effective_bandwidth_hz: None,
+        authenticity: None,
         play_count: 0,
+        last_played_at: None,
         rating: 0,
         added_at: now_unix,
     })
@@ -501,6 +524,7 @@ fn extract_embedded_flac_cue(path: &Path) -> Option<ParsedCue> {
             album_performer: None,
             year: None,
             genre: None,
+            composer: None,
             disc_number: None,
             entries,
         });

@@ -47,9 +47,39 @@ pub struct Track {
     // Embedded synced/unsynced lyrics (sidecar .lrc also supported dynamically)
     #[serde(default)]
     pub lyrics: Option<String>,
+    // Classical & collector database metadata
+    #[serde(default)]
+    pub composer: Option<String>,
+    #[serde(default)]
+    pub conductor: Option<String>,
+    #[serde(default)]
+    pub orchestra: Option<String>,
+    #[serde(default)]
+    pub work: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub catalog_number: Option<String>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub custom_tags: Vec<String>,
+    // Persisted Audio Quality & TrueHz Authenticity results (saved permanently in DB)
+    #[serde(default)]
+    pub dr_score: Option<u8>,
+    #[serde(default)]
+    pub integrated_lufs: Option<f32>,
+    #[serde(default)]
+    pub true_peak_dbtp: Option<f32>,
+    #[serde(default)]
+    pub effective_bandwidth_hz: Option<f32>,
+    #[serde(default)]
+    pub authenticity: Option<String>,
     // Listening stats & user rating (0..=5)
     #[serde(default)]
     pub play_count: u32,
+    #[serde(default)]
+    pub last_played_at: Option<u64>,
     #[serde(default)]
     pub rating: u8,
     #[serde(default)]
@@ -118,14 +148,26 @@ impl Track {
     }
 
     pub fn search_text(&self) -> String {
-        format!(
-            "{} {} {} {} {}",
+        let mut s = format!(
+            "{} {} {} {} {} {} {} {} {} {}",
             self.title.to_lowercase(),
             self.artist.to_lowercase(),
             self.album.to_lowercase(),
             self.genre.as_deref().unwrap_or_default().to_lowercase(),
-            self.codec.to_lowercase()
-        )
+            self.codec.to_lowercase(),
+            self.composer.as_deref().unwrap_or_default().to_lowercase(),
+            self.conductor.as_deref().unwrap_or_default().to_lowercase(),
+            self.orchestra.as_deref().unwrap_or_default().to_lowercase(),
+            self.work.as_deref().unwrap_or_default().to_lowercase(),
+            self.label.as_deref().unwrap_or_default().to_lowercase(),
+        );
+        if !self.custom_tags.is_empty() {
+            for tag in &self.custom_tags {
+                s.push(' ');
+                s.push_str(&tag.to_lowercase());
+            }
+        }
+        s
     }
 }
 
@@ -139,6 +181,13 @@ struct Tags {
     disc_number: Option<u32>,
     year: Option<String>,
     genre: Option<String>,
+    composer: Option<String>,
+    conductor: Option<String>,
+    orchestra: Option<String>,
+    work: Option<String>,
+    label: Option<String>,
+    catalog_number: Option<String>,
+    comment: Option<String>,
     rg_track_gain_db: Option<f32>,
     rg_track_peak: Option<f32>,
     rg_album_gain_db: Option<f32>,
@@ -211,7 +260,21 @@ pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
             rg_album_gain_db: None,
             rg_album_peak: None,
             lyrics: None,
+            composer: None,
+            conductor: None,
+            orchestra: None,
+            work: None,
+            label: None,
+            catalog_number: None,
+            comment: None,
+            custom_tags: Vec::new(),
+            dr_score: None,
+            integrated_lufs: None,
+            true_peak_dbtp: None,
+            effective_bandwidth_hz: None,
+            authenticity: None,
             play_count: 0,
+            last_played_at: None,
             rating: 0,
             added_at: now_unix,
         });
@@ -296,7 +359,21 @@ pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
         rg_album_gain_db: tags.rg_album_gain_db,
         rg_album_peak: tags.rg_album_peak,
         lyrics: tags.lyrics,
+        composer: tags.composer,
+        conductor: tags.conductor,
+        orchestra: tags.orchestra,
+        work: tags.work,
+        label: tags.label,
+        catalog_number: tags.catalog_number,
+        comment: tags.comment,
+        custom_tags: Vec::new(),
+        dr_score: None,
+        integrated_lufs: None,
+        true_peak_dbtp: None,
+        effective_bandwidth_hz: None,
+        authenticity: None,
         play_count: 0,
+        last_played_at: None,
         rating: 0,
         added_at: now_unix,
     })
@@ -343,6 +420,13 @@ fn read_tags(tags: &[symphonia::core::meta::Tag], output: &mut Tags) {
             Some(StandardTagKey::DiscNumber) => output.disc_number = parse_number(&value),
             Some(StandardTagKey::Date | StandardTagKey::OriginalDate) => output.year = Some(value),
             Some(StandardTagKey::Genre) => output.genre = Some(value),
+            Some(StandardTagKey::Composer) => output.composer = Some(value),
+            Some(StandardTagKey::Conductor) => output.conductor = Some(value),
+            Some(StandardTagKey::Ensemble) => output.orchestra = Some(value),
+            Some(StandardTagKey::ContentGroup) => output.work = Some(value),
+            Some(StandardTagKey::Label) => output.label = Some(value),
+            Some(StandardTagKey::IdentCatalogNumber) => output.catalog_number = Some(value),
+            Some(StandardTagKey::Comment) => output.comment = Some(value),
             Some(StandardTagKey::ReplayGainTrackGain) => {
                 output.rg_track_gain_db = parse_gain_db(&value);
             }
@@ -377,6 +461,27 @@ fn read_tags(tags: &[symphonia::core::meta::Tag], output: &mut Tags) {
                     }
                     "LYRICS" | "UNSYNCEDLYRICS" | "USLT" | "SYLT" if output.lyrics.is_none() => {
                         output.lyrics = Some(value);
+                    }
+                    "COMPOSER" | "TCOM" if output.composer.is_none() => {
+                        output.composer = Some(value);
+                    }
+                    "CONDUCTOR" | "TPE3" if output.conductor.is_none() => {
+                        output.conductor = Some(value);
+                    }
+                    "ORCHESTRA" | "ENSEMBLE" | "PERFORMER" if output.orchestra.is_none() => {
+                        output.orchestra = Some(value);
+                    }
+                    "WORK" | "GROUPING" | "TIT1" if output.work.is_none() => {
+                        output.work = Some(value);
+                    }
+                    "LABEL" | "ORGANIZATION" | "PUBLISHER" | "TPUB" if output.label.is_none() => {
+                        output.label = Some(value);
+                    }
+                    "CATALOGNUMBER" | "CATALOG" if output.catalog_number.is_none() => {
+                        output.catalog_number = Some(value);
+                    }
+                    "COMMENT" | "DESCRIPTION" if output.comment.is_none() => {
+                        output.comment = Some(value);
                     }
                     _ => {}
                 }

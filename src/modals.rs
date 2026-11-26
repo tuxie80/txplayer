@@ -11,7 +11,7 @@ use crate::analyzer::{AudioAnalysis, HiResVerdict};
 use crate::audio::{default_output_device_name, list_output_devices};
 use crate::dsp::compute_eq_response_curve;
 use crate::icons::{self, Icon};
-use crate::library::cover_directory;
+use crate::library::{LibraryStats, QueryField, QueryOp, QueryRule, SavedView, cover_directory};
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{
     AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, open_file_with_default_app, reveal_in_file_manager,
@@ -4238,6 +4238,604 @@ pub fn show_artwork_gallery_window(
         open = false;
     }
     open
+}
+
+/// Curated studio swatch colors for user Collections.
+pub fn collection_accent_color(idx: u8, palette: &Palette) -> Color32 {
+    match idx % 6 {
+        0 => palette.accent,
+        1 => palette.hires_gold,
+        2 => palette.accent_secondary,
+        3 => Color32::from_rgb(0x4E, 0xB8, 0x89),
+        4 => Color32::from_rgb(0xD9, 0x77, 0x57),
+        _ => Color32::from_rgb(0x9A, 0x7E, 0xE6),
+    }
+}
+
+/// Modal to create a new curated Collection (with name, description, and color badge).
+#[allow(clippy::too_many_arguments)]
+pub fn show_new_collection_modal(
+    context: &egui::Context,
+    open: &mut bool,
+    name: &mut String,
+    description: &mut String,
+    accent_idx: &mut u8,
+    pending_tracks_count: usize,
+    palette: &Palette,
+) -> bool {
+    if !*open {
+        return false;
+    }
+    let mut create = false;
+    let mut cancel = false;
+    let sub = if pending_tracks_count > 0 {
+        Some(format!("+ {pending_tracks_count} track(s)"))
+    } else {
+        None
+    };
+    themed_modal_window(
+        context,
+        "new_collection_modal",
+        "New Collection",
+        Icon::Grid,
+        sub.as_deref(),
+        [420.0, 265.0],
+        Some([360.0, 240.0]),
+        false,
+        open,
+        palette,
+        |ui| {
+            ui.label(
+                RichText::new("Collection Name")
+                    .size(10.5)
+                    .color(palette.muted),
+            );
+            let name_resp = ui.add(
+                egui::TextEdit::singleline(name)
+                    .hint_text("e.g. Beethoven Complete Sonatas, Reference Demos…")
+                    .desired_width(ui.available_width()),
+            );
+            if name_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                create = true;
+            }
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Description (optional)")
+                    .size(10.5)
+                    .color(palette.muted),
+            );
+            ui.add(
+                egui::TextEdit::singleline(description)
+                    .hint_text("Notes, label series, recording era…")
+                    .desired_width(ui.available_width()),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Badge Color:").size(10.5).color(palette.muted));
+                for idx in 0..6u8 {
+                    let col = collection_accent_color(idx, palette);
+                    let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                    ui.painter().circle_filled(r.center(), 7.5, col);
+                    if *accent_idx == idx {
+                        ui.painter()
+                            .circle_stroke(r.center(), 9.5, Stroke::new(1.5, palette.text));
+                    }
+                    if resp.clicked() {
+                        *accent_idx = idx;
+                    }
+                }
+            });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, "Create Collection", None, PillStyle::Accent, palette)
+                        .clicked()
+                    {
+                        create = true;
+                    }
+                    if pill_button(ui, "Cancel", None, PillStyle::Secondary, palette).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        },
+    );
+    if cancel || create {
+        *open = false;
+    }
+    create
+}
+
+/// Editable draft for the Visual Database Smart View Query Builder modal.
+#[derive(Debug, Clone)]
+pub struct SmartViewDraft {
+    pub id: u64,
+    pub name: String,
+    pub match_all: bool,
+    pub rules: Vec<QueryRule>,
+}
+
+impl Default for SmartViewDraft {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: String::new(),
+            match_all: true,
+            rules: vec![QueryRule {
+                field: QueryField::Composer,
+                op: QueryOp::Contains,
+                value: String::new(),
+            }],
+        }
+    }
+}
+
+/// Visual Rule-Based Smart View Query Builder modal.
+/// Returns `(keep_open, saved_view_if_submitted)`.
+pub fn show_smart_view_builder_modal(
+    context: &egui::Context,
+    draft: &mut SmartViewDraft,
+    live_match_count: usize,
+    palette: &Palette,
+) -> (bool, Option<SavedView>) {
+    let mut open = true;
+    let mut save_clicked = false;
+    let mut cancel_clicked = false;
+    let sub = format!("Matches {live_match_count} track(s)");
+
+    themed_modal_window(
+        context,
+        "smart_view_builder_modal",
+        if draft.id == 0 {
+            "New Smart Database View"
+        } else {
+            "Edit Smart Database View"
+        },
+        Icon::Sliders,
+        Some(sub.as_str()),
+        [620.0, 440.0],
+        Some([500.0, 340.0]),
+        true,
+        &mut open,
+        palette,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("View Name:").size(11.0).color(palette.muted));
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .hint_text("e.g. High-DR Beethoven, DSD Masters, Unplayed Hi-Res…")
+                        .desired_width((ui.available_width() - 180.0).max(180.0)),
+                );
+                if pill_button(
+                    ui,
+                    "Match ALL",
+                    None,
+                    if draft.match_all {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    palette,
+                )
+                .clicked()
+                {
+                    draft.match_all = true;
+                }
+                if pill_button(
+                    ui,
+                    "Match ANY",
+                    None,
+                    if !draft.match_all {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    palette,
+                )
+                .clicked()
+                {
+                    draft.match_all = false;
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Quick Presets:").size(10.0).color(palette.faint));
+                for (lbl, preset_name, field, op, val) in [
+                    ("High-DR ≥12", "High-DR Audiophile (DR ≥ 12)", QueryField::DynamicRange, QueryOp::GreaterOrEq, "12"),
+                    ("Hi-Res ≥96k", "Hi-Res ≥ 96 kHz", QueryField::SampleRateHz, QueryOp::GreaterOrEq, "96000"),
+                    ("DSD Masters", "DSD Masters", QueryField::Codec, QueryOp::Contains, "DSD"),
+                    ("Unplayed", "Unplayed Tracks", QueryField::PlayCount, QueryOp::Equals, "0"),
+                    ("Verified Hi-Res", "Verified Authentic Hi-Res", QueryField::Authenticity, QueryOp::Contains, "AuthenticHiRes"),
+                    ("Needs ReplayGain", "Needs ReplayGain Scan", QueryField::HasReplayGain, QueryOp::IsFalse, ""),
+                ] {
+                    if pill_button(ui, lbl, None, PillStyle::Secondary, palette).clicked() {
+                        draft.name = preset_name.into();
+                        draft.match_all = true;
+                        draft.rules = vec![QueryRule {
+                            field,
+                            op,
+                            value: val.into(),
+                        }];
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            let mut remove_idx: Option<usize> = None;
+            ScrollArea::vertical()
+                .id_salt("smart_view_rules_scroll")
+                .max_height(210.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (idx, rule) in draft.rules.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt(("sv_field", idx))
+                                .width(138.0)
+                                .selected_text(rule.field.label())
+                                .show_ui(ui, |ui| {
+                                    for &f in QueryField::ALL {
+                                        if ui.selectable_value(&mut rule.field, f, f.label()).changed() {
+                                            if f.is_bool() {
+                                                rule.op = QueryOp::IsTrue;
+                                                rule.value.clear();
+                                            } else if f.is_numeric()
+                                                && matches!(rule.op, QueryOp::Contains | QueryOp::IsTrue | QueryOp::IsFalse)
+                                            {
+                                                rule.op = QueryOp::GreaterOrEq;
+                                            }
+                                        }
+                                    }
+                                });
+
+                            egui::ComboBox::from_id_salt(("sv_op", idx))
+                                .width(92.0)
+                                .selected_text(rule.op.label())
+                                .show_ui(ui, |ui| {
+                                    for &op in QueryOp::ALL {
+                                        ui.selectable_value(&mut rule.op, op, op.label());
+                                    }
+                                });
+
+                            if !matches!(rule.op, QueryOp::IsTrue | QueryOp::IsFalse) {
+                                let hint = match rule.field {
+                                    QueryField::SampleRateHz => "e.g. 96000",
+                                    QueryField::BitDepth => "e.g. 24",
+                                    QueryField::DynamicRange => "e.g. 12",
+                                    QueryField::Rating => "1..5",
+                                    QueryField::Year => "e.g. 1975",
+                                    QueryField::Codec => "FLAC / DSD / ALAC",
+                                    _ => "Value…",
+                                };
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut rule.value)
+                                        .hint_text(hint)
+                                        .desired_width((ui.available_width() - 40.0).max(120.0)),
+                                );
+                            }
+                            if pill_button(ui, "×", None, PillStyle::Danger, palette).clicked() {
+                                remove_idx = Some(idx);
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+            if let Some(i) = remove_idx
+                && i < draft.rules.len()
+            {
+                draft.rules.remove(i);
+            }
+
+            ui.add_space(4.0);
+            if pill_button(ui, "+ Add Rule", Some(Icon::Plus), PillStyle::Secondary, palette)
+                .clicked()
+            {
+                draft.rules.push(QueryRule {
+                    field: QueryField::Genre,
+                    op: QueryOp::Contains,
+                    value: String::new(),
+                });
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("Live preview: {live_match_count} matching track(s)"))
+                        .size(10.5)
+                        .monospace()
+                        .color(palette.accent_bright),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, "Save Smart View", None, PillStyle::Accent, palette)
+                        .clicked()
+                    {
+                        save_clicked = true;
+                    }
+                    if pill_button(ui, "Cancel", None, PillStyle::Secondary, palette).clicked() {
+                        cancel_clicked = true;
+                    }
+                });
+            });
+        },
+    );
+
+    if cancel_clicked {
+        return (false, None);
+    }
+    if save_clicked {
+        let name = if draft.name.trim().is_empty() {
+            "Custom Smart View".to_string()
+        } else {
+            draft.name.trim().to_string()
+        };
+        return (
+            false,
+            Some(SavedView {
+                id: draft.id,
+                name,
+                match_all: draft.match_all,
+                rules: draft.rules.clone(),
+            }),
+        );
+    }
+    (open, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryInsightsAction {
+    ExportCsv,
+    BackupJson,
+    OpenDbFolder,
+}
+
+/// Library Database Analytics, Format Distribution & Backup Dashboard modal.
+pub fn show_library_insights_modal(
+    context: &egui::Context,
+    library_name: &str,
+    stats: &LibraryStats,
+    schema_version: u32,
+    palette: &Palette,
+) -> (bool, Option<LibraryInsightsAction>) {
+    let mut open = true;
+    let mut close_clicked = false;
+    let mut action: Option<LibraryInsightsAction> = None;
+    let sub = format!("Schema v{schema_version} · Rolling .bak enabled");
+
+    themed_modal_window(
+        context,
+        "library_insights_modal",
+        &format!("Library Database & Insights — {library_name}"),
+        Icon::Sliders,
+        Some(sub.as_str()),
+        [680.0, 520.0],
+        Some([520.0, 400.0]),
+        true,
+        &mut open,
+        palette,
+        |ui| {
+            // 1) Top KPI Grid
+            let total_hours = stats.total_duration_secs / 3600.0;
+            let kpi = |ui: &mut Ui, label: &str, value: String, col: Color32| {
+                Frame::new()
+                    .fill(palette.background)
+                    .stroke(Stroke::new(1.0, palette.border))
+                    .corner_radius(6.0)
+                    .inner_margin(Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(116.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(label).size(9.0).strong().color(palette.faint));
+                            ui.label(
+                                RichText::new(value)
+                                    .size(13.0)
+                                    .strong()
+                                    .monospace()
+                                    .color(col),
+                            );
+                        });
+                    });
+            };
+            ui.horizontal_wrapped(|ui| {
+                kpi(ui, "TRACKS", stats.total_tracks.to_string(), palette.text);
+                kpi(ui, "ALBUMS", stats.total_albums.to_string(), palette.text);
+                kpi(
+                    ui,
+                    "ARTISTS / COMP.",
+                    format!("{} / {}", stats.total_artists, stats.total_composers),
+                    palette.accent_bright,
+                );
+                kpi(
+                    ui,
+                    "RUNTIME",
+                    format!("{total_hours:.1} hrs"),
+                    palette.text,
+                );
+                kpi(
+                    ui,
+                    "HI-RES / DSD",
+                    format!("{} / {}", stats.hires_tracks, stats.dsd_tracks),
+                    palette.hires_gold,
+                );
+            });
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                kpi(
+                    ui,
+                    "AVG DR",
+                    stats
+                        .avg_dr
+                        .map(|d| format!("DR{d:.1}"))
+                        .unwrap_or_else(|| "—".into()),
+                    palette.hires_gold,
+                );
+                kpi(
+                    ui,
+                    "VERIFIED HI-RES",
+                    format!("{}/{}", stats.verified_hires_tracks, stats.dr_analyzed_tracks),
+                    palette.accent_bright,
+                );
+                kpi(
+                    ui,
+                    "REPLAYGAIN",
+                    format!("{}/{}", stats.rg_scanned_tracks, stats.total_tracks),
+                    palette.accent,
+                );
+                kpi(
+                    ui,
+                    "COLLECTIONS",
+                    stats.collections_count.to_string(),
+                    palette.accent_secondary,
+                );
+                kpi(
+                    ui,
+                    "SMART VIEWS",
+                    stats.saved_views_count.to_string(),
+                    palette.accent,
+                );
+            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} lossless tracks  ·  {} genres  ·  {} record labels  ·  {} playlists",
+                    stats.lossless_tracks,
+                    stats.total_genres,
+                    stats.total_labels,
+                    stats.playlists_count
+                ))
+                .size(10.0)
+                .monospace()
+                .color(palette.muted),
+            );
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            // 2) Codec & Sample Rate Distribution Bars side-by-side
+            let bar_chart = |ui: &mut Ui, heading: &str, rows: &[(String, usize)], max_n: usize, col: Color32| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(heading)
+                            .size(10.0)
+                            .strong()
+                            .color(palette.faint),
+                    );
+                    ui.add_space(4.0);
+                    if rows.is_empty() {
+                        ui.label(RichText::new("No tracks yet").size(10.5).color(palette.muted));
+                        return;
+                    }
+                    let denom = max_n.max(1) as f32;
+                    for (lbl, cnt) in rows.iter().take(7) {
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [92.0, 16.0],
+                                egui::Label::new(
+                                    RichText::new(lbl)
+                                        .size(10.0)
+                                        .monospace()
+                                        .color(palette.text_secondary),
+                                ),
+                            );
+                            let frac = (*cnt as f32 / denom).clamp(0.02, 1.0);
+                            let (bar_r, _) =
+                                ui.allocate_exact_size(vec2(140.0, 10.0), Sense::hover());
+                            ui.painter().rect_filled(bar_r, 3.0, palette.background);
+                            ui.painter().rect_filled(
+                                Rect::from_min_max(
+                                    bar_r.min,
+                                    pos2(bar_r.left() + bar_r.width() * frac, bar_r.bottom()),
+                                ),
+                                3.0,
+                                col,
+                            );
+                            ui.label(
+                                RichText::new(format!("{cnt}"))
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(palette.muted),
+                            );
+                        });
+                    }
+                });
+            };
+
+            ui.columns(2, |cols| {
+                bar_chart(
+                    &mut cols[0],
+                    "CODEC BREAKDOWN",
+                    &stats.codec_counts,
+                    stats.total_tracks,
+                    palette.accent,
+                );
+                bar_chart(
+                    &mut cols[1],
+                    "SAMPLE RATE DISTRIBUTION",
+                    &stats.rate_buckets,
+                    stats.total_tracks,
+                    palette.hires_gold,
+                );
+            });
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            // 3) Database Export & Backup Actions
+            ui.horizontal_wrapped(|ui| {
+                if pill_button(
+                    ui,
+                    "Export Catalog (.csv)",
+                    Some(Icon::List),
+                    PillStyle::Accent,
+                    palette,
+                )
+                .on_hover_text("Export complete track metadata, DR, LUFS, and tags to a CSV spreadsheet")
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::ExportCsv);
+                }
+                if pill_button(
+                    ui,
+                    "Backup Database (.json)",
+                    Some(Icon::Folder),
+                    PillStyle::Secondary,
+                    palette,
+                )
+                .on_hover_text("Save a full portable backup of all libraries, collections, playlists & smart views")
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::BackupJson);
+                }
+                if pill_button(
+                    ui,
+                    "Open DB Folder",
+                    None,
+                    PillStyle::Secondary,
+                    palette,
+                )
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::OpenDbFolder);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, "Close", None, PillStyle::Secondary, palette).clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+        },
+    );
+
+    if close_clicked {
+        open = false;
+    }
+    (open, action)
 }
 
 /// Audirvana-inspired Signal Path Inspector + Quick DSP Popover anchored directly above telemetry.
