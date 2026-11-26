@@ -2022,6 +2022,12 @@ pub fn show_settings_window(
                         );
                         aligned_checkbox_row(
                             ui,
+                            &mut plugins.visualizers.enable_spectrogram,
+                            "Live Acoustic Spectrogram (2D scrolling sonogram)",
+                            palette,
+                        );
+                        aligned_checkbox_row(
+                            ui,
                             &mut plugins.visualizers.enable_stereo_scope,
                             "Stereo Scope & M/S Phase Goniometer",
                             palette,
@@ -4962,7 +4968,7 @@ pub fn show_smart_view_builder_modal(
     (open, None)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LibraryInsightsAction {
     ExportCsv,
     BackupJson,
@@ -4970,6 +4976,8 @@ pub enum LibraryInsightsAction {
     OpenDbHealth,
     InspectSacdIso,
     OpenDbFolder,
+    FilterSearch(String),
+    OpenYearsBrowser,
 }
 
 /// Library Database Analytics, Format Distribution, Listening History & Backup Dashboard modal.
@@ -5092,96 +5100,215 @@ pub fn show_library_insights_modal(
                 .color(palette.muted),
             );
 
-            ui.add_space(10.0);
-            ui.separator();
             ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
 
-            // 2) Codec & Sample Rate Distribution Bars side-by-side
-            let bar_chart = |ui: &mut Ui, heading: &str, rows: &[(String, usize)], max_n: usize, col: Color32| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(heading)
-                            .size(10.0)
-                            .strong()
-                            .color(palette.faint),
-                    );
-                    ui.add_space(4.0);
-                    if rows.is_empty() {
-                        ui.label(RichText::new("No tracks yet").size(10.5).color(palette.muted));
-                        return;
-                    }
-                    let denom = max_n.max(1) as f32;
-                    for (lbl, cnt) in rows.iter().take(7) {
-                        ui.horizontal(|ui| {
-                            ui.add_sized(
-                                [92.0, 16.0],
-                                egui::Label::new(
-                                    RichText::new(lbl)
-                                        .size(10.0)
-                                        .monospace()
-                                        .color(palette.text_secondary),
-                                ),
-                            );
-                            let frac = (*cnt as f32 / denom).clamp(0.02, 1.0);
-                            let (bar_r, _) =
-                                ui.allocate_exact_size(vec2(140.0, 10.0), Sense::hover());
-                            ui.painter().rect_filled(bar_r, 3.0, palette.background);
-                            ui.painter().rect_filled(
-                                Rect::from_min_max(
-                                    bar_r.min,
-                                    pos2(bar_r.left() + bar_r.width() * frac, bar_r.bottom()),
-                                ),
-                                3.0,
-                                col,
-                            );
+            // 2) Interactive Collector Analytics (Codec, Sample Rate, Decades, DR Health, Top Composers & Labels)
+            let mut clicked_action: Option<LibraryInsightsAction> = None;
+            ScrollArea::vertical()
+                .id_salt("insights_charts_scroll")
+                .max_height(265.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut interactive_bars = |ui: &mut Ui,
+                                                heading: &str,
+                                                rows: &[(String, usize)],
+                                                max_n: usize,
+                                                col: Color32,
+                                                make_action: &dyn Fn(&str) -> Option<LibraryInsightsAction>| {
+                        ui.vertical(|ui| {
                             ui.label(
-                                RichText::new(format!("{cnt}"))
-                                    .size(10.0)
-                                    .monospace()
-                                    .color(palette.muted),
+                                RichText::new(heading)
+                                    .size(9.5)
+                                    .strong()
+                                    .color(palette.faint),
+                            );
+                            ui.add_space(3.0);
+                            if rows.is_empty() {
+                                ui.label(
+                                    RichText::new("No data yet").size(10.0).color(palette.muted),
+                                );
+                                return;
+                            }
+                            let denom = max_n.max(1) as f32;
+                            for (lbl, cnt) in rows.iter().take(6) {
+                                let act_opt = make_action(lbl);
+                                let resp = ui
+                                    .horizontal(|ui| {
+                                        let short_lbl = if lbl.chars().count() > 14 {
+                                            format!(
+                                                "{}…",
+                                                lbl.chars().take(13).collect::<String>()
+                                            )
+                                        } else {
+                                            lbl.clone()
+                                        };
+                                        let lresp = ui.add_sized(
+                                            [96.0, 16.0],
+                                            egui::Label::new(
+                                                RichText::new(short_lbl)
+                                                    .size(9.8)
+                                                    .monospace()
+                                                    .color(palette.text_secondary),
+                                            )
+                                            .sense(Sense::click()),
+                                        );
+                                        let frac = (*cnt as f32 / denom).clamp(0.03, 1.0);
+                                        let (bar_r, bresp) = ui.allocate_exact_size(
+                                            vec2(132.0, 10.0),
+                                            Sense::click(),
+                                        );
+                                        let hov = lresp.hovered() || bresp.hovered();
+                                        ui.painter().rect_filled(
+                                            bar_r,
+                                            3.0,
+                                            if hov && act_opt.is_some() {
+                                                palette.hover
+                                            } else {
+                                                palette.background
+                                            },
+                                        );
+                                        ui.painter().rect_filled(
+                                            Rect::from_min_max(
+                                                bar_r.min,
+                                                pos2(
+                                                    bar_r.left() + bar_r.width() * frac,
+                                                    bar_r.bottom(),
+                                                ),
+                                            ),
+                                            3.0,
+                                            if hov && act_opt.is_some() {
+                                                palette.accent_bright
+                                            } else {
+                                                col
+                                            },
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{cnt}"))
+                                                .size(9.8)
+                                                .monospace()
+                                                .color(palette.muted),
+                                        );
+                                        lresp.clicked() || bresp.clicked()
+                                    })
+                                    .inner;
+                                if resp && let Some(a) = act_opt {
+                                    clicked_action = Some(a);
+                                }
+                            }
+                        });
+                    };
+
+                    ui.columns(2, |cols| {
+                        interactive_bars(
+                            &mut cols[0],
+                            "CODEC BREAKDOWN (CLICK TO FILTER)",
+                            &stats.codec_counts,
+                            stats.total_tracks,
+                            palette.accent,
+                            &|lbl| Some(LibraryInsightsAction::FilterSearch(format!("codec:{lbl}"))),
+                        );
+                        interactive_bars(
+                            &mut cols[1],
+                            "SAMPLE RATE DISTRIBUTION",
+                            &stats.rate_buckets,
+                            stats.total_tracks,
+                            palette.hires_gold,
+                            &|lbl| match lbl {
+                                "DSD (1-bit)" => {
+                                    Some(LibraryInsightsAction::FilterSearch("codec:dsd".into()))
+                                }
+                                "≥ 176.4 kHz" => {
+                                    Some(LibraryInsightsAction::FilterSearch("rate>=176".into()))
+                                }
+                                "88.2 – 96 kHz" => {
+                                    Some(LibraryInsightsAction::FilterSearch("rate>=88".into()))
+                                }
+                                _ => None,
+                            },
+                        );
+                    });
+
+                    if !stats.decade_counts.is_empty() || !stats.dr_buckets.is_empty() {
+                        ui.add_space(8.0);
+                        ui.columns(2, |cols| {
+                            interactive_bars(
+                                &mut cols[0],
+                                "RECORDING DECADES TIMELINE",
+                                &stats.decade_counts,
+                                stats.decade_counts.iter().map(|(_, c)| *c).max().unwrap_or(1),
+                                palette.accent_secondary,
+                                &|_| Some(LibraryInsightsAction::OpenYearsBrowser),
+                            );
+                            interactive_bars(
+                                &mut cols[1],
+                                "DYNAMIC RANGE (DR) HEALTH",
+                                &stats.dr_buckets,
+                                stats.dr_analyzed_tracks.max(1),
+                                palette.hires_gold,
+                                &|lbl| {
+                                    if lbl.starts_with("DR 14+") {
+                                        Some(LibraryInsightsAction::FilterSearch("dr>=14".into()))
+                                    } else if lbl.starts_with("DR 11") {
+                                        Some(LibraryInsightsAction::FilterSearch("dr>=11".into()))
+                                    } else if lbl.starts_with("DR 8") {
+                                        Some(LibraryInsightsAction::FilterSearch("dr>=8".into()))
+                                    } else {
+                                        Some(LibraryInsightsAction::FilterSearch("dr<=7".into()))
+                                    }
+                                },
                             );
                         });
                     }
-                });
-            };
 
-            ui.columns(2, |cols| {
-                bar_chart(
-                    &mut cols[0],
-                    "CODEC BREAKDOWN",
-                    &stats.codec_counts,
-                    stats.total_tracks,
-                    palette.accent,
-                );
-                bar_chart(
-                    &mut cols[1],
-                    "SAMPLE RATE DISTRIBUTION",
-                    &stats.rate_buckets,
-                    stats.total_tracks,
-                    palette.hires_gold,
-                );
-            });
+                    if !stats.top_composers.is_empty() || !stats.top_labels.is_empty() {
+                        ui.add_space(8.0);
+                        ui.columns(2, |cols| {
+                            interactive_bars(
+                                &mut cols[0],
+                                "TOP COMPOSERS (CLICK TO FILTER)",
+                                &stats.top_composers,
+                                stats.top_composers.first().map(|(_, c)| *c).unwrap_or(1),
+                                palette.accent_bright,
+                                &|lbl| {
+                                    let tok = lbl.split_whitespace().last().unwrap_or(lbl);
+                                    Some(LibraryInsightsAction::FilterSearch(format!(
+                                        "composer:{tok}"
+                                    )))
+                                },
+                            );
+                            interactive_bars(
+                                &mut cols[1],
+                                "TOP RECORD LABELS (CLICK TO FILTER)",
+                                &stats.top_labels,
+                                stats.top_labels.first().map(|(_, c)| *c).unwrap_or(1),
+                                palette.accent,
+                                &|lbl| {
+                                    let tok = lbl.split_whitespace().next().unwrap_or(lbl);
+                                    Some(LibraryInsightsAction::FilterSearch(format!(
+                                        "label:{tok}"
+                                    )))
+                                },
+                            );
+                        });
+                    }
 
-            if !recent_history.is_empty() {
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(format!(
-                        "RECENT LISTENING HISTORY ({} LOGGED PLAYS)",
-                        recent_history.len()
-                    ))
-                    .size(9.5)
-                    .strong()
-                    .color(palette.faint),
-                );
-                ui.add_space(3.0);
-                ScrollArea::vertical()
-                    .id_salt("insights_history_scroll")
-                    .max_height(88.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for ev in recent_history.iter().rev().take(20) {
+                    if !recent_history.is_empty() {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "RECENT LISTENING HISTORY ({} LOGGED PLAYS)",
+                                recent_history.len()
+                            ))
+                            .size(9.5)
+                            .strong()
+                            .color(palette.faint),
+                        );
+                        ui.add_space(3.0);
+                        for ev in recent_history.iter().rev().take(15) {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(&ev.title)
@@ -5195,7 +5322,10 @@ pub fn show_library_insights_modal(
                                 );
                             });
                         }
-                    });
+                    }
+                });
+            if let Some(ca) = clicked_action {
+                action = Some(ca);
             }
 
             ui.add_space(10.0);
@@ -6108,6 +6238,10 @@ pub enum PaletteCommand {
     VerifyCurrentAlbumAudit,
     ScanCurrentAlbumReplayGain,
     StartLocalRadio,
+    SetLoopA,
+    SetLoopB,
+    ClearAbLoop,
+    CopyCurrentTrackSpecs,
 }
 
 pub struct PaletteEntry {

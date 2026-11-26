@@ -304,6 +304,10 @@ pub struct LibraryStats {
     pub playlists_count: usize,
     pub codec_counts: Vec<(String, usize)>,
     pub rate_buckets: Vec<(String, usize)>,
+    pub decade_counts: Vec<(String, usize)>,
+    pub dr_buckets: Vec<(String, usize)>,
+    pub top_composers: Vec<(String, usize)>,
+    pub top_labels: Vec<(String, usize)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1070,6 +1074,13 @@ impl Library {
         let mut labels = HashSet::new();
         let mut codecs: HashMap<String, usize> = HashMap::new();
         let mut rates: HashMap<&'static str, usize> = HashMap::new();
+        let mut decades: HashMap<u32, usize> = HashMap::new();
+        let mut composer_tally: HashMap<String, (String, usize)> = HashMap::new();
+        let mut label_tally: HashMap<String, (String, usize)> = HashMap::new();
+        let mut dr_ref = 0usize;
+        let mut dr_dyn = 0usize;
+        let mut dr_mod = 0usize;
+        let mut dr_loud = 0usize;
 
         let mut total_duration_secs = 0.0_f64;
         let mut hires_tracks = 0usize;
@@ -1090,7 +1101,13 @@ impl Library {
             if let Some(ref c) = t.composer
                 && !c.trim().is_empty()
             {
-                composers.insert(c.trim().to_lowercase());
+                let trimmed = c.trim();
+                let key = trimmed.to_lowercase();
+                composers.insert(key.clone());
+                let entry = composer_tally
+                    .entry(key)
+                    .or_insert_with(|| (trimmed.to_string(), 0));
+                entry.1 += 1;
             }
             if let Some(ref g) = t.genre
                 && !g.trim().is_empty()
@@ -1100,7 +1117,22 @@ impl Library {
             if let Some(ref l) = t.label
                 && !l.trim().is_empty()
             {
-                labels.insert(l.trim().to_lowercase());
+                let trimmed = l.trim();
+                let key = trimmed.to_lowercase();
+                labels.insert(key.clone());
+                let entry = label_tally
+                    .entry(key)
+                    .or_insert_with(|| (trimmed.to_string(), 0));
+                entry.1 += 1;
+            }
+            if let Some(ref y_str) = t.year
+                && let Some(y) = y_str
+                    .trim()
+                    .get(0..4)
+                    .and_then(|s| s.parse::<u32>().ok())
+                && (1900..=2100).contains(&y)
+            {
+                *decades.entry((y / 10) * 10).or_insert(0) += 1;
             }
             if let Some(d) = t.duration {
                 total_duration_secs += d;
@@ -1120,6 +1152,15 @@ impl Library {
             if let Some(dr) = t.dr_score {
                 dr_analyzed_tracks += 1;
                 dr_sum += dr as f32;
+                if dr >= 14 {
+                    dr_ref += 1;
+                } else if dr >= 11 {
+                    dr_dyn += 1;
+                } else if dr >= 8 {
+                    dr_mod += 1;
+                } else {
+                    dr_loud += 1;
+                }
             }
             if t.authenticity.as_deref() == Some("AuthenticHiRes") {
                 verified_hires_tracks += 1;
@@ -1149,6 +1190,35 @@ impl Library {
             }
         }
 
+        let mut decade_pairs: Vec<(u32, usize)> = decades.into_iter().collect();
+        decade_pairs.sort_by_key(|(dec, _)| *dec);
+        let decade_counts: Vec<(String, usize)> = decade_pairs
+            .into_iter()
+            .map(|(dec, cnt)| (format!("{dec}s"), cnt))
+            .collect();
+
+        let mut dr_buckets = Vec::new();
+        if dr_analyzed_tracks > 0 {
+            for (lbl, cnt) in [
+                ("DR 14+ Ref", dr_ref),
+                ("DR 11–13 Dyn", dr_dyn),
+                ("DR 8–10 Mod", dr_mod),
+                ("DR ≤7 Loud", dr_loud),
+            ] {
+                if cnt > 0 {
+                    dr_buckets.push((lbl.to_string(), cnt));
+                }
+            }
+        }
+
+        let mut top_composers: Vec<(String, usize)> = composer_tally.into_values().collect();
+        top_composers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_composers.truncate(6);
+
+        let mut top_labels: Vec<(String, usize)> = label_tally.into_values().collect();
+        top_labels.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_labels.truncate(6);
+
         LibraryStats {
             total_tracks: self.tracks.len(),
             total_albums: albums.len(),
@@ -1173,6 +1243,10 @@ impl Library {
             playlists_count: self.playlists.len(),
             codec_counts,
             rate_buckets,
+            decade_counts,
+            dr_buckets,
+            top_composers,
+            top_labels,
         }
     }
 
@@ -1865,5 +1939,44 @@ mod tests {
         for id in 1..=5u64 {
             assert_eq!(lib.get_by_id(id).unwrap().id, id);
         }
+    }
+
+    #[test]
+    fn compute_stats_builds_decades_dr_histogram_and_top_composers_labels() {
+        let mut store = LibraryStore::default();
+        let lib = store.active_mut();
+        let mut t1 = sample_track(1, "/m/1.flac", "Sonata 1");
+        t1.year = Some("1974".into());
+        t1.composer = Some("Ludwig van Beethoven".into());
+        t1.label = Some("Deutsche Grammophon".into());
+        t1.dr_score = Some(15);
+
+        let mut t2 = sample_track(2, "/m/2.flac", "Sonata 2");
+        t2.year = Some("1978-05-12".into());
+        t2.composer = Some("Ludwig van Beethoven".into());
+        t2.label = Some("Deutsche Grammophon".into());
+        t2.dr_score = Some(12);
+
+        let mut t3 = sample_track(3, "/m/3.flac", "Pop Track");
+        t3.year = Some("2022".into());
+        t3.composer = Some("Frédéric Chopin".into());
+        t3.label = Some("Decca".into());
+        t3.dr_score = Some(6);
+
+        lib.upsert(t1);
+        lib.upsert(t2);
+        lib.upsert(t3);
+
+        let stats = lib.compute_stats();
+        assert_eq!(
+            stats.decade_counts,
+            vec![("1970s".to_string(), 2), ("2020s".to_string(), 1)]
+        );
+        assert_eq!(stats.top_composers[0], ("Ludwig van Beethoven".to_string(), 2));
+        assert_eq!(stats.top_labels[0], ("Deutsche Grammophon".to_string(), 2));
+        assert_eq!(stats.dr_buckets.len(), 3);
+        assert_eq!(stats.dr_buckets[0], ("DR 14+ Ref".to_string(), 1));
+        assert_eq!(stats.dr_buckets[1], ("DR 11–13 Dyn".to_string(), 1));
+        assert_eq!(stats.dr_buckets[2], ("DR ≤7 Loud".to_string(), 1));
     }
 }

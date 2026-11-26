@@ -19,6 +19,7 @@ pub const SPECTRUM_BANDS: usize = 64;
 const SCOPE_SAMPLES: usize = 512;
 const GONIO_POINTS: usize = 280;
 const PIANO_ROLL_HISTORY: usize = 92;
+const SPECTROGRAM_HISTORY: usize = 96;
 
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
@@ -30,6 +31,7 @@ pub enum VisualizerMode {
     PianoHarmonic,
     PianoRoll,
     ConcertSpectrum,
+    Spectrogram,
     StereoScope,
     MasteringVu,
 }
@@ -39,6 +41,7 @@ impl VisualizerMode {
         VisualizerMode::PianoHarmonic,
         VisualizerMode::PianoRoll,
         VisualizerMode::ConcertSpectrum,
+        VisualizerMode::Spectrogram,
         VisualizerMode::StereoScope,
         VisualizerMode::MasteringVu,
     ];
@@ -48,6 +51,7 @@ impl VisualizerMode {
             VisualizerMode::PianoHarmonic => "88-Key Piano Spectrum",
             VisualizerMode::PianoRoll => "88-Key Piano Roll",
             VisualizerMode::ConcertSpectrum => "64-Band Spectrum RTA",
+            VisualizerMode::Spectrogram => "Live Acoustic Spectrogram",
             VisualizerMode::StereoScope => "Stereo Scope & Vectorscope",
             VisualizerMode::MasteringVu => "Mastering VU & Phase",
         }
@@ -58,6 +62,7 @@ impl VisualizerMode {
             VisualizerMode::PianoHarmonic => "Piano",
             VisualizerMode::PianoRoll => "Roll",
             VisualizerMode::ConcertSpectrum => "RTA",
+            VisualizerMode::Spectrogram => "Sonogram",
             VisualizerMode::StereoScope => "Scope",
             VisualizerMode::MasteringVu => "VU",
         }
@@ -73,6 +78,9 @@ impl VisualizerMode {
             }
             VisualizerMode::ConcertSpectrum => {
                 "64-band logarithmic real-time spectrum analyzer (27.5 Hz – 18 kHz) with dB scale."
+            }
+            VisualizerMode::Spectrogram => {
+                "Scrolling 2D time-frequency acoustic sonogram (27.5 Hz – 18 kHz) with live peak frequency readout."
             }
             VisualizerMode::StereoScope => {
                 "Zero-crossing triggered stereo oscilloscope paired with an M/S vectorscope."
@@ -737,6 +745,10 @@ pub struct VisualizerState {
     /// 64-band high-definition logarithmic spectrum (27.5 Hz .. 18 kHz)
     spectrum_bands: [f32; SPECTRUM_BANDS],
     spectrum_peaks: [f32; SPECTRUM_BANDS],
+    /// Rolling 2D time-frequency spectrogram columns (oldest -> newest)
+    spectrogram: VecDeque<[u8; SPECTRUM_BANDS]>,
+    spectro_accum_dt: f32,
+    peak_freq_hz: f32,
     /// Stereo waveform buffers
     scope_l: Vec<f32>,
     scope_r: Vec<f32>,
@@ -795,6 +807,9 @@ impl VisualizerState {
             detected_harmony: String::new(),
             spectrum_bands: [0.0; SPECTRUM_BANDS],
             spectrum_peaks: [0.0; SPECTRUM_BANDS],
+            spectrogram: VecDeque::with_capacity(SPECTROGRAM_HISTORY + 2),
+            spectro_accum_dt: 0.0,
+            peak_freq_hz: 0.0,
             scope_l: vec![0.0; SCOPE_SAMPLES],
             scope_r: vec![0.0; SCOPE_SAMPLES],
             vu_left: 0.0,
@@ -819,6 +834,9 @@ impl VisualizerState {
         self.detected_harmony.clear();
         self.spectrum_bands = [0.0; SPECTRUM_BANDS];
         self.spectrum_peaks = [0.0; SPECTRUM_BANDS];
+        self.spectrogram.clear();
+        self.spectro_accum_dt = 0.0;
+        self.peak_freq_hz = 0.0;
         self.scope_l.fill(0.0);
         self.scope_r.fill(0.0);
         self.vu_left = 0.0;
@@ -931,7 +949,10 @@ impl VisualizerState {
             self.mode,
             VisualizerMode::PianoHarmonic | VisualizerMode::PianoRoll
         );
-        let needs_spectrum = self.mode == VisualizerMode::ConcertSpectrum;
+        let needs_spectrum = matches!(
+            self.mode,
+            VisualizerMode::ConcertSpectrum | VisualizerMode::Spectrogram
+        );
         let needs_scope = self.mode == VisualizerMode::StereoScope;
         let needs_vu = self.mode == VisualizerMode::MasteringVu;
 
@@ -1126,6 +1147,37 @@ impl VisualizerState {
                         (self.spectrum_peaks[band] - peak_drop).max(self.spectrum_bands[band]);
                 }
             }
+            // Track dominant acoustic frequency for live Spectrogram readout
+            let min_bin = ((min_f / bin_hz).floor() as usize).clamp(1, FFT_SIZE / 2 - 2);
+            let max_bin = ((max_f / bin_hz).ceil() as usize).clamp(min_bin + 1, FFT_SIZE / 2 - 1);
+            let mut best_bin = min_bin;
+            let mut best_mag = 0.0_f32;
+            for (offset, &m) in self.mag_db[min_bin..max_bin].iter().enumerate() {
+                if m > best_mag {
+                    best_mag = m;
+                    best_bin = min_bin + offset;
+                }
+            }
+            self.peak_freq_hz = if best_mag > 0.004 {
+                best_bin as f32 * bin_hz
+            } else {
+                0.0
+            };
+
+            if self.mode == VisualizerMode::Spectrogram {
+                self.spectro_accum_dt += dt;
+                if self.spectro_accum_dt >= 0.026 {
+                    self.spectro_accum_dt = 0.0;
+                    let mut col = [0u8; SPECTRUM_BANDS];
+                    for (b, slot) in col.iter_mut().enumerate() {
+                        *slot = (self.spectrum_bands[b].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                    if self.spectrogram.len() >= SPECTROGRAM_HISTORY {
+                        self.spectrogram.pop_front();
+                    }
+                    self.spectrogram.push_back(col);
+                }
+            }
         }
 
         let elapsed_ms = t_start.elapsed().as_secs_f32() * 1000.0;
@@ -1196,6 +1248,9 @@ impl VisualizerState {
             VisualizerMode::ConcertSpectrum => {
                 self.paint_concert_spectrum(painter, inner, palette, false)
             }
+            VisualizerMode::Spectrogram => {
+                self.paint_spectrogram(painter, inner, palette, false)
+            }
             VisualizerMode::StereoScope => self.paint_oscilloscope(painter, inner, palette),
             VisualizerMode::MasteringVu => self.paint_vu_compact(painter, inner, palette),
         }
@@ -1243,6 +1298,9 @@ impl VisualizerState {
             }
             VisualizerMode::ConcertSpectrum => {
                 self.paint_concert_spectrum(painter, inner, palette, true);
+            }
+            VisualizerMode::Spectrogram => {
+                self.paint_spectrogram(painter, inner, palette, true);
             }
             VisualizerMode::StereoScope => {
                 let gonio_w = (inner.height() * 1.15).clamp(100.0, inner.width() * 0.34);
@@ -1849,6 +1907,129 @@ impl VisualizerState {
                     } else {
                         palette.accent_bright
                     },
+                );
+            }
+        }
+    }
+
+    /// Real-time scrolling 2D time-frequency acoustic sonogram (27.5 Hz – 18 kHz).
+    fn paint_spectrogram(
+        &self,
+        painter: &egui::Painter,
+        inner: Rect,
+        palette: &Palette,
+        detailed: bool,
+    ) {
+        let axis_w = if detailed { 40.0 } else { 0.0 };
+        let plot = Rect::from_min_max(
+            pos2(inner.left() + axis_w, inner.top()),
+            inner.max,
+        );
+        if plot.width() < 8.0 || plot.height() < 6.0 {
+            return;
+        }
+
+        let cols = if detailed {
+            SPECTROGRAM_HISTORY
+        } else {
+            40
+        };
+        let rows = if detailed { SPECTRUM_BANDS } else { 24 };
+        let col_w = plot.width() / cols as f32;
+        let row_h = plot.height() / rows as f32;
+        let hist_len = self.spectrogram.len();
+        let take_n = hist_len.min(cols);
+        let start_col = cols.saturating_sub(take_n);
+        let skip_hist = hist_len.saturating_sub(take_n);
+
+        // Acoustic intensity color ramp: silence -> deep accent -> warm accent -> hires gold -> luminous peak
+        let heat_color = |v: f32| -> Color32 {
+            let v = v.clamp(0.0, 1.0);
+            if v < 0.06 {
+                return Color32::TRANSPARENT;
+            }
+            if v < 0.35 {
+                let t = (v - 0.06) / 0.29;
+                let base = lerp_color(palette.surface, palette.accent_secondary, t);
+                Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (40.0 + t * 145.0) as u8)
+            } else if v < 0.72 {
+                let t = (v - 0.35) / 0.37;
+                lerp_color(palette.accent, palette.hires_gold, t)
+            } else {
+                let t = (v - 0.72) / 0.28;
+                lerp_color(palette.hires_gold, Color32::from_rgb(255, 250, 232), t)
+            }
+        };
+
+        for (i, slice) in self.spectrogram.iter().skip(skip_hist).enumerate() {
+            let x0 = plot.left() + (start_col + i) as f32 * col_w;
+            let x1 = (x0 + col_w + 0.6).min(plot.right());
+            for r in 0..rows {
+                let b_idx = if detailed {
+                    r
+                } else {
+                    (r * SPECTRUM_BANDS / rows).min(SPECTRUM_BANDS - 1)
+                };
+                let val = slice[b_idx] as f32 / 255.0;
+                if val < 0.06 {
+                    continue;
+                }
+                let y1 = plot.bottom() - r as f32 * row_h;
+                let y0 = (y1 - row_h - 0.5).max(plot.top());
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(x0, y0), pos2(x1, y1)),
+                    0.0,
+                    heat_color(val),
+                );
+            }
+        }
+
+        if detailed {
+            // Subtle logarithmic frequency ticks along the left axis (27.5 Hz .. 18 kHz)
+            let min_f = 27.5_f32;
+            let max_f = 18_000.0_f32;
+            let log_span = (max_f / min_f).ln();
+            for (lbl, freq) in [
+                ("16k", 16_000.0_f32),
+                ("8k", 8_000.0),
+                ("2k", 2_000.0),
+                ("500", 500.0),
+                ("100", 100.0),
+            ] {
+                let frac = ((freq / min_f).ln() / log_span).clamp(0.0, 1.0);
+                let y = plot.bottom() - frac * plot.height();
+                painter.line_segment(
+                    [pos2(plot.left(), y), pos2(plot.right(), y)],
+                    Stroke::new(0.5, palette.border.gamma_multiply(0.35)),
+                );
+                painter.text(
+                    pos2(plot.left() - 5.0, y),
+                    Align2::RIGHT_CENTER,
+                    lbl,
+                    FontId::monospace(8.5),
+                    palette.faint,
+                );
+            }
+
+            // Live peak frequency readout pill in upper-right corner
+            if self.peak_freq_hz >= 27.5 {
+                let freq_str = if self.peak_freq_hz >= 1000.0 {
+                    format!("PEAK {:.2} kHz", self.peak_freq_hz / 1000.0)
+                } else {
+                    format!("PEAK {:.0} Hz", self.peak_freq_hz)
+                };
+                let badge = Rect::from_min_max(
+                    pos2(plot.right() - 102.0, plot.top() + 2.0),
+                    pos2(plot.right() - 2.0, plot.top() + 19.0),
+                );
+                painter.rect_filled(badge, 4.0, palette.surface.gamma_multiply(0.88));
+                painter.rect_stroke(badge, 4.0, Stroke::new(0.8, palette.border), StrokeKind::Inside);
+                painter.text(
+                    badge.center(),
+                    Align2::CENTER_CENTER,
+                    freq_str,
+                    FontId::monospace(9.0),
+                    palette.hires_gold,
                 );
             }
         }
@@ -2667,6 +2848,37 @@ mod tests {
             (meter.true_peak_dbtp - (-14.0)).abs() < 0.35,
             "Expected True Peak near -14.0 dBTP, got {}",
             meter.true_peak_dbtp
+        );
+    }
+
+    #[test]
+    fn spectrogram_records_time_frequency_slice_for_1khz_sine() {
+        let sr = 48_000_u32;
+        let tap = VisualTap::new();
+        tap.set_sample_rate(sr);
+        tap.set_active(true);
+        let mut l = vec![0.0_f32; FFT_SIZE];
+        let mut r = vec![0.0_f32; FFT_SIZE];
+        for i in 0..FFT_SIZE {
+            let s = 0.55 * (TAU * 1000.0 * i as f32 / sr as f32).sin();
+            l[i] = s;
+            r[i] = s;
+        }
+        tap.push_stereo(&l, &r);
+
+        let mut vis = VisualizerState::new(VisualizerMode::Spectrogram, true, 1.2);
+        let cfg = VisualizerPluginConfig::default();
+        for _ in 0..5 {
+            vis.update(&tap, 0.03, &cfg, false);
+        }
+        assert!(
+            !vis.spectrogram.is_empty(),
+            "Spectrogram should record time-frequency slices"
+        );
+        assert!(
+            (vis.peak_freq_hz - 1000.0).abs() < 40.0,
+            "Expected dominant spectrogram peak near 1000 Hz, got {} Hz",
+            vis.peak_freq_hz
         );
     }
 }

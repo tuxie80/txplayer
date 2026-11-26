@@ -99,3 +99,11 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
 - [x] **Studio Mastering Console (`L/R Balance`, `Mono Fold-Down`, `Ø Polarity Invert`, `L ↔ R Swap`):** Constant-power stereo balance with double-click center reset plus instant mastering check switches directly in **Settings → Audio & DSP**.
 - [x] **100% Local "Similar Radio" Queue Generator:** Zero-cloud Roon-Radio-style similarity ranker combining Composer, Genre, Artist, shared `#Custom Tags`, Record Label, Era/Decade, Hi-Res Tier, and Rating with same-album diversity scoring — accessible from Track right-click menus and `Cmd/Ctrl+K` Command Palette.
 - [x] **Inline Persisted `DR` Quality Pill:** Displays color-coded Dynamic Range badges (`DR14` gold, `DR9` accent, `DR6` warning) right beside the Track Table Format pill whenever persisted audit scores exist in the Library Database.
+
+---
+
+## Wave 10 — Live Acoustic Spectrogram, Collector Analytics & Critical Listening Pack (`v1.9.0` Completed)
+- [x] **Live Real-Time Acoustic Spectrogram / Sonogram (`VisualizerMode::Spectrogram`):** 6th flagship Concert Visualizer mode featuring a scrolling 2D time-frequency waterfall (`96` frames × `64` logarithmic frequency bands, `27.5 Hz – 18 kHz`) with an acoustic thermal-gold heatmap, logarithmic frequency grid (`100 Hz – 16 kHz`), and live peak frequency badge (`PEAK 440 Hz`).
+- [x] **Interactive Collector Analytics & 1-Click Drill-Down in Library Insights:** Added chronological **Recording Decades Timeline**, **Dynamic Range (`DR`) Health Histogram**, **Top Composers**, and **Top Record Labels** bar charts inside a scrollable Insights dashboard where clicking any Codec, Sample Rate, DR tier, Composer, Label, or Decade row jumps directly to those filtered tracks.
+- [x] **Instant Studio DSP A/B Comparison (`D` hotkey) & Active A–B Loop Transport Pill:** Press `D` (or via `Cmd/Ctrl+K`) to flip instantly between your active DSP chain and bit-identical bypass; active A–B section loops (`[` / `]` / `\`) now display a clickable golden `A–B 01:12–01:28 ×` transport badge and full Command Palette entries.
+- [x] **1-Click Copy Track Audiophile Specs:** Right-click any track (or use `Cmd/Ctrl+K`) to copy a clean formatted audiophile summary (`Title — Artist · Album [FLAC · 24-bit/96 kHz · DR13 · -16.4 LUFS · Verified TrueHz Hi-Res]`) straight to the clipboard.

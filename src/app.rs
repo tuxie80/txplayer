@@ -1015,6 +1015,7 @@ impl TxPlayerApp {
                 "piano" => app.visualizer.mode = VisualizerMode::PianoHarmonic,
                 "roll" => app.visualizer.mode = VisualizerMode::PianoRoll,
                 "spectrum" => app.visualizer.mode = VisualizerMode::ConcertSpectrum,
+                "spectrogram" | "sonogram" => app.visualizer.mode = VisualizerMode::Spectrogram,
                 "scope" => app.visualizer.mode = VisualizerMode::StereoScope,
                 "vu" => app.visualizer.mode = VisualizerMode::MasteringVu,
                 _ => {}
@@ -2529,6 +2530,64 @@ impl TxPlayerApp {
         self.audio.set_ab_loop(None);
     }
 
+    /// Instant Studio DSP A/B comparison toggle (Active Chain vs Bit-Identical Bypass).
+    fn toggle_dsp_ab(&mut self) {
+        if self.plugins.dsp.enabled && !self.plugins.dsp.bit_perfect_mode {
+            self.plugins.dsp.enabled = false;
+            self.audio.update_dsp(&self.plugins.dsp);
+            self.set_status("DSP A/B → B (Bit-Identical Bypass)".into());
+        } else {
+            self.plugins.dsp.bit_perfect_mode = false;
+            self.plugins.dsp.enabled = true;
+            self.audio.update_dsp(&self.plugins.dsp);
+            self.set_status(format!(
+                "DSP A/B → A (Active: {})",
+                self.plugins.dsp.summary()
+            ));
+        }
+    }
+
+    /// Formats a clean, shareable audiophile technical summary for a track & copies to clipboard.
+    fn copy_track_audiophile_specs(&mut self, ctx: &egui::Context, id: u64) {
+        let Some(t) = self.track(id).cloned() else {
+            return;
+        };
+        let mut specs = vec![t.quality_full()];
+        if let Some(dr) = t.dr_score {
+            specs.push(format!("DR{dr}"));
+        }
+        if let Some(lufs) = t.integrated_lufs {
+            specs.push(format!("{lufs:.1} LUFS"));
+        }
+        if let Some(tp) = t.true_peak_dbtp {
+            specs.push(format!("{tp:+.1} dBTP"));
+        }
+        if let Some(ref auth) = t.authenticity
+            && auth == "AuthenticHiRes"
+        {
+            specs.push("Verified TrueHz Hi-Res".into());
+        }
+        if let Some(ref comp) = t.composer
+            && !comp.trim().is_empty()
+        {
+            specs.push(format!("Composer: {}", comp.trim()));
+        }
+        if let Some(ref lbl) = t.label
+            && !lbl.trim().is_empty()
+        {
+            specs.push(format!("Label: {}", lbl.trim()));
+        }
+        let line = format!(
+            "{} — {} · {} [{}]",
+            t.title,
+            t.artist,
+            t.album,
+            specs.join(" · ")
+        );
+        ctx.copy_text(line);
+        self.set_status(format!("Copied audiophile specs for \"{}\"", t.title));
+    }
+
     fn start_current(&mut self) {
         let Some(track) = self.current_track().cloned() else {
             self.playing = false;
@@ -3657,6 +3716,9 @@ impl TxPlayerApp {
         if !cmd && context.input(|i| i.key_pressed(egui::Key::Backslash)) {
             self.clear_ab_loop();
             self.set_status("A-B Loop cleared".into());
+        }
+        if !cmd && context.input(|i| i.key_pressed(egui::Key::D)) {
+            self.toggle_dsp_ab();
         }
         if cmd && context.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::M)) {
             let next = !self.compact_mode;
@@ -7233,6 +7295,10 @@ impl TxPlayerApp {
                         ctx_action = Some(ContextMenuAction::TrackInfo(tid));
                         ui.close();
                     }
+                    if ui.button("Copy Audiophile Specs").clicked() {
+                        ctx_action = Some(ContextMenuAction::CopyAudiophileSpecs(tid));
+                        ui.close();
+                    }
                     if ui
                         .button(format!("Reveal in {FILE_MANAGER_NAME}"))
                         .clicked()
@@ -7354,11 +7420,16 @@ impl TxPlayerApp {
             self.open_tag_editor_for_ids(&[tid]);
         }
         if let Some(act) = ctx_action {
-            self.run_context_action(act, tracks);
+            self.run_context_action(ui.ctx(), act, tracks);
         }
     }
 
-    fn run_context_action(&mut self, action: ContextMenuAction, visible: &[Track]) {
+    fn run_context_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: ContextMenuAction,
+        visible: &[Track],
+    ) {
         match action {
             ContextMenuAction::PlaySelected => self.play_selected(visible),
             ContextMenuAction::PlayNext => {
@@ -7425,6 +7496,9 @@ impl TxPlayerApp {
                 self.open_tag_editor_for_ids(&ids);
             }
             ContextMenuAction::TrackInfo(id) => self.inspect_track_id = Some(id),
+            ContextMenuAction::CopyAudiophileSpecs(id) => {
+                self.copy_track_audiophile_specs(ctx, id);
+            }
             ContextMenuAction::VerifyAlbumAudit(id) => {
                 let sel_ids = self.selected_ordered_ids(visible);
                 if sel_ids.len() > 1 {
@@ -8390,7 +8464,7 @@ impl TxPlayerApp {
             }
         }
         if let Some(act) = pending {
-            self.run_context_action(act, &visible);
+            self.run_context_action(context, act, &visible);
         }
         if clear_sel {
             self.clear_selection();
@@ -8684,6 +8758,24 @@ impl TxPlayerApp {
                                 RepeatMode::One => RepeatMode::Off,
                             };
                             self.preload_next_track();
+                        }
+                        if self.loop_a.is_some() || self.loop_b.is_some() {
+                            let ab_lbl = match (self.loop_a, self.loop_b) {
+                                (Some(a), Some(b)) => format!(
+                                    "A–B {}–{} ×",
+                                    format_duration(Some(a)),
+                                    format_duration(Some(b))
+                                ),
+                                (Some(a), None) => format!("A {}… ×", format_duration(Some(a))),
+                                _ => "A–B ×".to_string(),
+                            };
+                            if pill_button(ui, &ab_lbl, None, PillStyle::Active, &p)
+                                .on_hover_text("Active A–B Section Loop · Click to clear (\\)")
+                                .clicked()
+                            {
+                                self.clear_ab_loop();
+                                self.set_status("A-B Loop cleared".into());
+                            }
                         }
                     });
 
@@ -9420,6 +9512,21 @@ impl TxPlayerApp {
                     LibraryInsightsAction::OpenDbFolder => {
                         reveal_in_file_manager(&data_directory());
                     }
+                    LibraryInsightsAction::FilterSearch(query) => {
+                        self.show_library_insights = false;
+                        self.view = View::Library;
+                        self.browse_mode = BrowseMode::Tracks;
+                        self.folder_filter = None;
+                        self.search = query.clone();
+                        self.mark_library_dirty();
+                        self.set_status(format!("Filtered library by \"{query}\""));
+                    }
+                    LibraryInsightsAction::OpenYearsBrowser => {
+                        self.show_library_insights = false;
+                        self.view = View::Library;
+                        self.browse_mode = BrowseMode::Years;
+                        self.folder_filter = None;
+                    }
                 }
             }
         }
@@ -10034,6 +10141,32 @@ impl TxPlayerApp {
                 subtitle: "100% offline similar-track queue (composer, tags, genre, era)".into(),
                 action: PaletteCommand::StartLocalRadio,
             });
+            entries.push(PaletteEntry {
+                category: "LOOP",
+                label: "Set A–B Loop Point A at Current Position".into(),
+                subtitle: "Shortcut: [ (critical listening section loop)".into(),
+                action: PaletteCommand::SetLoopA,
+            });
+            entries.push(PaletteEntry {
+                category: "LOOP",
+                label: "Set A–B Loop Point B at Current Position".into(),
+                subtitle: "Shortcut: ] (activate A–B section repeat)".into(),
+                action: PaletteCommand::SetLoopB,
+            });
+            if self.loop_a.is_some() || self.loop_b.is_some() {
+                entries.push(PaletteEntry {
+                    category: "LOOP",
+                    label: "Clear Active A–B Section Loop".into(),
+                    subtitle: "Shortcut: \\".into(),
+                    action: PaletteCommand::ClearAbLoop,
+                });
+            }
+            entries.push(PaletteEntry {
+                category: "SHARE",
+                label: "Copy Current Track Audiophile Specs".into(),
+                subtitle: "Format, sample rate, bit depth, DR, LUFS & TrueHz badge".into(),
+                action: PaletteCommand::CopyCurrentTrackSpecs,
+            });
         }
         for (lbl, preset) in [
             ("Sleep Timer: 15 Minutes (Fade-Out)", SleepTimerPreset::Minutes(15)),
@@ -10162,11 +10295,7 @@ impl TxPlayerApp {
                 self.audio.update_dsp(&self.plugins.dsp);
                 self.set_status(format!("EQ Preset: {}", preset.name()));
             }
-            PaletteCommand::ToggleDsp => {
-                self.plugins.dsp.enabled = !self.plugins.dsp.enabled;
-                self.audio.update_dsp(&self.plugins.dsp);
-                self.set_status(format!("Audio DSP: {}", self.plugins.dsp.summary()));
-            }
+            PaletteCommand::ToggleDsp => self.toggle_dsp_ab(),
             PaletteCommand::ToggleVisualizer => {
                 self.show_concert_visualizer = !self.show_concert_visualizer;
             }
@@ -10274,6 +10403,19 @@ impl TxPlayerApp {
                     self.start_local_radio(cid);
                 } else {
                     self.set_status("Play a track first to start Local Radio".into());
+                }
+            }
+            PaletteCommand::SetLoopA => self.set_loop_a(),
+            PaletteCommand::SetLoopB => self.set_loop_b(),
+            PaletteCommand::ClearAbLoop => {
+                self.clear_ab_loop();
+                self.set_status("A-B Loop cleared".into());
+            }
+            PaletteCommand::CopyCurrentTrackSpecs => {
+                if let Some(cid) = self.current_id() {
+                    self.copy_track_audiophile_specs(ctx, cid);
+                } else {
+                    self.set_status("Play a track first to copy specs".into());
                 }
             }
         }
@@ -11606,6 +11748,11 @@ impl TxPlayerApp {
                                             ctx_action = Some(ContextMenuAction::TrackInfo(tid));
                                             ui.close();
                                         }
+                                        if ui.button("Copy Audiophile Specs").clicked() {
+                                            ctx_action =
+                                                Some(ContextMenuAction::CopyAudiophileSpecs(tid));
+                                            ui.close();
+                                        }
                                         if ui.button("Verify Album TrueHz / DR…").clicked() {
                                             ctx_action = Some(ContextMenuAction::VerifyAlbumAudit(tid));
                                             ui.close();
@@ -11676,7 +11823,7 @@ impl TxPlayerApp {
                         }
                     }
                     if let Some(act) = ctx_action {
-                        self.run_context_action(act, &tracks);
+                        self.run_context_action(ctx, act, &tracks);
                     }
                 });
         }
@@ -12232,6 +12379,7 @@ enum ContextMenuAction {
     AddCustomTag(String),
     EditTags,
     TrackInfo(u64),
+    CopyAudiophileSpecs(u64),
     VerifyAlbumAudit(u64),
     ScanReplayGain(u64),
     RevealInFinder(u64),

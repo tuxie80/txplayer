@@ -198,6 +198,16 @@ impl VisualTap {
         self.peak_right.store(peak_r.to_bits(), Ordering::Relaxed);
         self.correlation.store(corr.to_bits(), Ordering::Relaxed);
     }
+
+    #[cfg(test)]
+    pub(crate) fn push_stereo(&self, left: &[f32], right: &[f32]) {
+        let mut cursor = self.write_pos.load(Ordering::Relaxed);
+        let n = left.len().min(right.len());
+        for i in 0..n {
+            self.push_callback_frame(&mut cursor, left[i], right[i]);
+        }
+        self.write_pos.store(cursor, Ordering::Release);
+    }
 }
 
 impl Default for VisualTap {

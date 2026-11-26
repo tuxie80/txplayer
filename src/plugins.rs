@@ -932,6 +932,8 @@ pub struct VisualizerPluginConfig {
     #[serde(default = "default_true")]
     pub enable_concert_spectrum: bool,
     #[serde(default = "default_true")]
+    pub enable_spectrogram: bool,
+    #[serde(default = "default_true")]
     pub enable_stereo_scope: bool,
     #[serde(default = "default_true")]
     pub enable_mastering_vu: bool,
@@ -949,6 +951,7 @@ impl Default for VisualizerPluginConfig {
             enable_piano_harmonic: true,
             enable_piano_roll: true,
             enable_concert_spectrum: true,
+            enable_spectrogram: true,
             enable_stereo_scope: true,
             enable_mastering_vu: true,
             piano_engine: PianoEngineId::PrecisionCqt,
@@ -964,6 +967,7 @@ impl VisualizerPluginConfig {
             VisualizerMode::PianoHarmonic => self.enable_piano_harmonic,
             VisualizerMode::PianoRoll => self.enable_piano_roll,
             VisualizerMode::ConcertSpectrum => self.enable_concert_spectrum,
+            VisualizerMode::Spectrogram => self.enable_spectrogram,
             VisualizerMode::StereoScope => self.enable_stereo_scope,
             VisualizerMode::MasteringVu => self.enable_mastering_vu,
         }
@@ -1100,6 +1104,7 @@ mod tests {
         let vis = VisualizerPluginConfig {
             enable_piano_roll: false,
             enable_concert_spectrum: false,
+            enable_spectrogram: false,
             ..Default::default()
         };
         assert_eq!(

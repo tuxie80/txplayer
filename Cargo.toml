@@ -1,6 +1,6 @@
 [package]
 name = "txplayer"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2024"
 rust-version = "1.95"
 description = "A calm, capable high-resolution music player for macOS, Windows, and Linux"
