@@ -53,6 +53,14 @@ pub struct EditableTags {
     pub artist: String,
     pub album: String,
     pub album_artist: String,
+    pub composer: String,
+    pub conductor: String,
+    pub orchestra: String,
+    pub work: String,
+    pub label: String,
+    pub catalog_number: String,
+    pub comment: String,
+    pub custom_tags: String,
     pub year: String,
     pub genre: String,
     pub track_number: String,
@@ -66,6 +74,14 @@ impl EditableTags {
             artist: track.artist.clone(),
             album: track.album.clone(),
             album_artist: track.album_artist.clone().unwrap_or_default(),
+            composer: track.composer.clone().unwrap_or_default(),
+            conductor: track.conductor.clone().unwrap_or_default(),
+            orchestra: track.orchestra.clone().unwrap_or_default(),
+            work: track.work.clone().unwrap_or_default(),
+            label: track.label.clone().unwrap_or_default(),
+            catalog_number: track.catalog_number.clone().unwrap_or_default(),
+            comment: track.comment.clone().unwrap_or_default(),
+            custom_tags: track.custom_tags.join(", "),
             year: track.year.clone().unwrap_or_default(),
             genre: track.genre.clone().unwrap_or_default(),
             track_number: track
@@ -91,6 +107,44 @@ impl EditableTags {
         }
         if !self.album_artist.trim().is_empty() || !batch_mode {
             track.album_artist = non_empty(&self.album_artist);
+        }
+        if !self.composer.trim().is_empty() || !batch_mode {
+            track.composer = non_empty(&self.composer);
+        }
+        if !self.conductor.trim().is_empty() || !batch_mode {
+            track.conductor = non_empty(&self.conductor);
+        }
+        if !self.orchestra.trim().is_empty() || !batch_mode {
+            track.orchestra = non_empty(&self.orchestra);
+        }
+        if !self.work.trim().is_empty() || !batch_mode {
+            track.work = non_empty(&self.work);
+        }
+        if !self.label.trim().is_empty() || !batch_mode {
+            track.label = non_empty(&self.label);
+        }
+        if !self.catalog_number.trim().is_empty() || !batch_mode {
+            track.catalog_number = non_empty(&self.catalog_number);
+        }
+        if !self.comment.trim().is_empty() || !batch_mode {
+            track.comment = non_empty(&self.comment);
+        }
+        if !self.custom_tags.trim().is_empty() || !batch_mode {
+            let parsed: Vec<String> = self
+                .custom_tags
+                .split([',', ';'])
+                .map(|s| s.trim().trim_start_matches('#').to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !batch_mode {
+                track.custom_tags = parsed;
+            } else {
+                for tag in parsed {
+                    if !track.custom_tags.iter().any(|x| x.eq_ignore_ascii_case(&tag)) {
+                        track.custom_tags.push(tag);
+                    }
+                }
+            }
         }
         if !self.year.trim().is_empty() || !batch_mode {
             track.year = non_empty(&self.year);
@@ -753,6 +807,21 @@ fn build_ffmpeg_metadata_args(track: &Track, clear_empty_optionals: bool) -> Vec
         push("disc", &disc.to_string());
     } else if clear_empty_optionals {
         push("disc", "");
+    }
+    for (key, val) in [
+        ("composer", &track.composer),
+        ("conductor", &track.conductor),
+        ("orchestra", &track.orchestra),
+        ("grouping", &track.work),
+        ("publisher", &track.label),
+        ("catalognumber", &track.catalog_number),
+        ("comment", &track.comment),
+    ] {
+        if let Some(v) = val {
+            push(key, v);
+        } else if clear_empty_optionals {
+            push(key, "");
+        }
     }
     args
 }

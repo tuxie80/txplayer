@@ -670,6 +670,8 @@ pub struct DspConfig {
     pub resampler_quality: ResamplerQuality,
     #[serde(default)]
     pub direct_volume_lock: bool,
+    #[serde(default)]
+    pub dsd_dop: bool,
     // Parametric EQ / AutoEQ Headphone Correction Engine
     #[serde(default)]
     pub peq_enabled: bool,
@@ -727,6 +729,7 @@ impl Default for DspConfig {
             oversampling: OversamplingMode::Native,
             resampler_quality: ResamplerQuality::LinearPhaseStudio,
             direct_volume_lock: false,
+            dsd_dop: false,
             peq_enabled: false,
             peq_profile_name: String::new(),
             peq_preamp_db: 0.0,

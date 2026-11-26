@@ -26,10 +26,10 @@ use crate::metadata::{
     QualityTier, SUPPORTED_EXTENSIONS, Track, format_duration, format_sample_rate,
 };
 use crate::modals::{
-    self, CommandPaletteState, FolderModalAction, LibraryInsightsAction, PaletteCommand,
-    PaletteEntry, PillStyle, ProgressBarStyle, RowDensity, SettingsTab, SignalPathDisplay,
-    SleepTimerPreset, SmartViewDraft, TagEditorState, TagWorkerEvent, TrackInfoAction,
-    collection_accent_color, pill_button,
+    self, CommandPaletteState, DbHealthAction, FolderModalAction, LibraryInsightsAction,
+    PaletteCommand, PaletteEntry, PillStyle, ProgressBarStyle, RowDensity, SettingsTab,
+    SignalPathDisplay, SleepTimerPreset, SmartViewDraft, TagEditorState, TagWorkerEvent,
+    TrackInfoAction, collection_accent_color, pill_button,
 };
 use crate::platform::{
     FILE_MANAGER_NAME, MOD_SHORT, open_file_with_default_app, reveal_in_file_manager,
@@ -223,6 +223,7 @@ enum BrowseMode {
     Artists,
     Composers,
     Genres,
+    Labels,
     Folders,
 }
 
@@ -398,6 +399,7 @@ enum DialogEvent {
     ImportAutoEq(Option<PathBuf>),
     ExportCsv(Option<PathBuf>),
     BackupDatabaseJson(Option<PathBuf>),
+    RestoreDatabaseJson(Option<PathBuf>),
 }
 
 #[derive(Clone)]
@@ -498,6 +500,7 @@ struct TrackDragState {
     label: String,
     insert_before: Option<usize>,
     hover_playlist_id: Option<u64>,
+    hover_collection_id: Option<u64>,
     hover_queue: bool,
 }
 
@@ -531,6 +534,7 @@ struct VisibleCacheKey {
     artist_filter: Option<String>,
     composer_filter: Option<String>,
     genre_filter: Option<String>,
+    label_filter: Option<String>,
     quality_filter: QualityFilter,
     sort: SortMode,
     sort_ascending: bool,
@@ -570,6 +574,7 @@ pub struct TxPlayerApp {
     artist_filter: Option<String>,
     composer_filter: Option<String>,
     genre_filter: Option<String>,
+    label_filter: Option<String>,
     quality_filter: QualityFilter,
     sort: SortMode,
     sort_ascending: bool,
@@ -602,6 +607,7 @@ pub struct TxPlayerApp {
     cached_artists: Arc<Vec<(String, usize, usize)>>,
     cached_composers: Arc<Vec<(String, usize, usize)>>,
     cached_genres: Arc<Vec<(String, usize, usize)>>,
+    cached_labels: Arc<Vec<(String, usize, usize)>>,
     cached_dirs: Arc<Vec<(PathBuf, usize)>>,
     cached_stats_rev: u64,
     cached_stats_lib_id: u64,
@@ -687,6 +693,7 @@ pub struct TxPlayerApp {
     pending_collection_tracks: Vec<u64>,
     smart_view_draft: Option<SmartViewDraft>,
     show_library_insights: bool,
+    show_db_health: bool,
     rename_playlist_modal: Option<(u64, String)>,
     inspect_track_id: Option<u64>,
     inspect_file_size: Option<(u64, Option<u64>)>,
@@ -837,6 +844,7 @@ impl TxPlayerApp {
             artist_filter: None,
             composer_filter: None,
             genre_filter: None,
+            label_filter: None,
             quality_filter: QualityFilter::All,
             sort: preferences.sort_mode,
             sort_ascending: preferences.sort_ascending,
@@ -863,6 +871,7 @@ impl TxPlayerApp {
             cached_artists: Arc::new(Vec::new()),
             cached_composers: Arc::new(Vec::new()),
             cached_genres: Arc::new(Vec::new()),
+            cached_labels: Arc::new(Vec::new()),
             cached_dirs: Arc::new(Vec::new()),
             cached_stats_rev: 0,
             cached_stats_lib_id: 0,
@@ -935,6 +944,7 @@ impl TxPlayerApp {
             pending_collection_tracks: Vec::new(),
             smart_view_draft: None,
             show_library_insights: false,
+            show_db_health: false,
             rename_playlist_modal: None,
             inspect_track_id: None,
             inspect_file_size: None,
@@ -1141,6 +1151,7 @@ impl TxPlayerApp {
             artist_filter: self.artist_filter.clone(),
             composer_filter: self.composer_filter.clone(),
             genre_filter: self.genre_filter.clone(),
+            label_filter: self.label_filter.clone(),
             quality_filter: self.quality_filter,
             sort: self.sort,
             sort_ascending: self.sort_ascending,
@@ -1158,6 +1169,7 @@ impl TxPlayerApp {
         let mut artist_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
         let mut composer_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
         let mut genre_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+        let mut label_counts: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
         let mut dir_counts: HashMap<PathBuf, usize> = HashMap::new();
         for tr in &tracks {
             let akey = (tr.album.clone(), tr.artist.clone());
@@ -1192,6 +1204,15 @@ impl TxPlayerApp {
                 ge.0 += 1;
                 ge.1.insert(tr.album.clone());
             }
+            if let Some(ref lbl) = tr.label
+                && !lbl.trim().is_empty()
+            {
+                let le = label_counts
+                    .entry(lbl.trim().to_string())
+                    .or_insert_with(|| (0, HashSet::new()));
+                le.0 += 1;
+                le.1.insert(tr.album.clone());
+            }
             if let Some(parent) = tr.path.parent() {
                 *dir_counts.entry(parent.to_path_buf()).or_insert(0) += 1;
             }
@@ -1212,6 +1233,11 @@ impl TxPlayerApp {
             .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
             .collect();
         genres.sort_by_key(|a| a.0.to_lowercase());
+        let mut labels: Vec<(String, usize, usize)> = label_counts
+            .into_iter()
+            .map(|(name, (t_cnt, albs))| (name, t_cnt, albs.len()))
+            .collect();
+        labels.sort_by_key(|a| a.0.to_lowercase());
         let mut dirs: Vec<(PathBuf, usize)> = dir_counts.into_iter().collect();
         dirs.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1219,6 +1245,7 @@ impl TxPlayerApp {
         self.cached_artists = Arc::new(artists);
         self.cached_composers = Arc::new(composers);
         self.cached_genres = Arc::new(genres);
+        self.cached_labels = Arc::new(labels);
         self.cached_dirs = Arc::new(dirs);
         self.cached_visible = Arc::new(tracks);
         self.visible_cache_key = Some(key);
@@ -1260,6 +1287,11 @@ impl TxPlayerApp {
                     self.genre_filter
                         .as_ref()
                         .is_none_or(|g| track.genre.as_deref().map(str::trim) == Some(g.as_str()))
+                })
+                .filter(|track| {
+                    self.label_filter
+                        .as_ref()
+                        .is_none_or(|l| track.label.as_deref().map(str::trim) == Some(l.as_str()))
                 })
                 .filter(|track| {
                     self.album_filter.is_some() || self.quality_filter.matches(track)
@@ -3130,6 +3162,25 @@ impl TxPlayerApp {
                         }
                     }
                 }
+                DialogEvent::RestoreDatabaseJson(maybe_path) => {
+                    if let Some(src) = maybe_path {
+                        match LibraryStore::import_backup_json(&src) {
+                            Ok(restored) => {
+                                let count = restored.active().tracks.len();
+                                self.store = restored;
+                                self.view = View::Library;
+                                self.clear_selection();
+                                self.mark_library_dirty();
+                                self.store.save();
+                                self.watcher.set_folders(self.store.active().folders.clone());
+                                self.set_status(format!(
+                                    "Restored library database ({count} track(s) in active library)"
+                                ));
+                            }
+                            Err(err) => self.set_status(format!("Restore failed: {err}")),
+                        }
+                    }
+                }
             }
         }
 
@@ -4126,13 +4177,28 @@ impl TxPlayerApp {
                     for (cid, cname, caccent, ccount) in collections_snap {
                         let selected = self.view == View::Collection(cid);
                         let dot_col = collection_accent_color(caccent, &p);
+                        let drag_active = self.drag_tracks.is_some();
                         ui.horizontal(|ui| {
                             ui.add_space(10.0);
                             let (rect, resp) = ui.allocate_exact_size(
                                 vec2(SIDEBAR_WIDTH - 20.0, 24.0),
                                 Sense::click(),
                             );
-                            if selected {
+                            let pointer_over = drag_pointer_pos(ui.ctx())
+                                .is_some_and(|pt| rect.contains(pt));
+                            let drop_hover = drag_active && pointer_over;
+                            if drop_hover && let Some(ref mut d) = self.drag_tracks {
+                                d.hover_collection_id = Some(cid);
+                            }
+                            if drop_hover {
+                                ui.painter().rect_filled(rect, 6.0, p.accent_subtle);
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    6.0,
+                                    Stroke::new(1.4, dot_col),
+                                    StrokeKind::Inside,
+                                );
+                            } else if selected {
                                 ui.painter().rect_filled(rect, 6.0, p.selected);
                                 let bar = Rect::from_min_max(
                                     pos2(rect.left() + 2.0, rect.top() + 5.0),
@@ -4907,7 +4973,8 @@ impl TxPlayerApp {
                     || self.album_filter.is_some()
                     || self.artist_filter.is_some()
                     || self.composer_filter.is_some()
-                    || self.genre_filter.is_some())
+                    || self.genre_filter.is_some()
+                    || self.label_filter.is_some())
                 && pill_button(ui, "× All Tracks", None, PillStyle::Active, &p).clicked()
             {
                 self.folder_filter = None;
@@ -4915,6 +4982,7 @@ impl TxPlayerApp {
                 self.artist_filter = None;
                 self.composer_filter = None;
                 self.genre_filter = None;
+                self.label_filter = None;
             }
 
             if let View::Playlist(pl_id) = self.view {
@@ -5312,6 +5380,12 @@ impl TxPlayerApp {
                         .color(p.accent)
                         .size(10.5),
                 );
+            } else if let Some(ref lbl) = self.label_filter {
+                ui.label(
+                    RichText::new(format!("·  Label: {lbl}"))
+                        .color(p.accent)
+                        .size(10.5),
+                );
             } else if let Some(folder) = &self.folder_filter {
                 ui.label(
                     RichText::new(format!("·  {}", folder.display()))
@@ -5322,10 +5396,11 @@ impl TxPlayerApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Library Browse Mode switcher (Tracks | Albums | Artists | Composers | Genres | Folders)
+                // Library Browse Mode switcher (Tracks | Albums | Artists | Composers | Genres | Labels | Folders)
                 if self.view == View::Library {
                     for (mode, label, icon) in [
                         (BrowseMode::Folders, "Folders", Icon::Folder),
+                        (BrowseMode::Labels, "Labels", Icon::Info),
                         (BrowseMode::Genres, "Genres", Icon::Sliders),
                         (BrowseMode::Composers, "Composers", Icon::Playlist),
                         (BrowseMode::Artists, "Artists", Icon::Playlist),
@@ -5351,6 +5426,7 @@ impl TxPlayerApp {
                                 self.artist_filter = None;
                                 self.composer_filter = None;
                                 self.genre_filter = None;
+                                self.label_filter = None;
                             }
                         }
                     }
@@ -5380,6 +5456,7 @@ impl TxPlayerApp {
             && self.artist_filter.is_none()
             && self.composer_filter.is_none()
             && self.genre_filter.is_none()
+            && self.label_filter.is_none()
             && self.browse_mode != BrowseMode::Tracks;
 
         if show_grid_browser {
@@ -5388,6 +5465,7 @@ impl TxPlayerApp {
                 BrowseMode::Artists => self.artists_browser_view(ui, &tracks, list_h),
                 BrowseMode::Composers => self.composers_browser_view(ui, &tracks, list_h),
                 BrowseMode::Genres => self.genres_browser_view(ui, &tracks, list_h),
+                BrowseMode::Labels => self.labels_browser_view(ui, &tracks, list_h),
                 BrowseMode::Folders => self.folders_tree_view(ui, &tracks, list_h),
                 BrowseMode::Tracks => {}
             }
@@ -5542,6 +5620,14 @@ impl TxPlayerApp {
         let mut play_album: Option<(String, String)> = None;
         let mut audit_album: Option<(String, String)> = None;
         let mut rg_album: Option<(String, String)> = None;
+        let mut add_album_to_col: Option<(String, String, Option<u64>)> = None;
+        let collections_snap: Vec<(u64, String)> = self
+            .store
+            .active()
+            .collections
+            .iter()
+            .map(|c| (c.id, c.name.clone()))
+            .collect();
 
         ScrollArea::vertical()
             .id_salt("albums_grid_scroll")
@@ -5664,6 +5750,23 @@ impl TxPlayerApp {
                                     rg_album = Some((alb.clone(), art.clone()));
                                     ui.close();
                                 }
+                                ui.separator();
+                                ui.menu_button("Add Album to Collection", |ui| {
+                                    for (cid, cname) in &collections_snap {
+                                        if ui.button(cname).clicked() {
+                                            add_album_to_col =
+                                                Some((alb.clone(), art.clone(), Some(*cid)));
+                                            ui.close();
+                                        }
+                                    }
+                                    if !collections_snap.is_empty() {
+                                        ui.separator();
+                                    }
+                                    if ui.button("+ New Collection…").clicked() {
+                                        add_album_to_col = Some((alb.clone(), art.clone(), None));
+                                        ui.close();
+                                    }
+                                });
                             });
                         }
                     });
@@ -5697,6 +5800,29 @@ impl TxPlayerApp {
                 .map(|t| t.id)
                 .collect();
             self.start_replaygain_scan(format!("{alb} — {art}"), ids, true);
+        } else if let Some((alb, art, maybe_cid)) = add_album_to_col {
+            let ids: Vec<u64> = tracks
+                .iter()
+                .filter(|t| t.album == alb && t.artist == art)
+                .map(|t| t.id)
+                .collect();
+            if let Some(cid) = maybe_cid {
+                let added = self.store.active_mut().add_tracks_to_collection(cid, &ids);
+                let cname = self
+                    .store
+                    .active()
+                    .collection(cid)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| "Collection".into());
+                self.mark_library_dirty();
+                self.store.save();
+                self.set_status(format!("Added {added} track(s) from \"{alb}\" to \"{cname}\""));
+            } else {
+                self.pending_collection_tracks = ids;
+                self.new_collection_name = alb;
+                self.new_collection_desc = art;
+                self.show_new_collection_modal = true;
+            }
         }
     }
 
@@ -5818,6 +5944,67 @@ impl TxPlayerApp {
             });
         if let Some(genre_name) = pick {
             self.genre_filter = Some(genre_name);
+            self.browse_mode = BrowseMode::Tracks;
+        }
+    }
+
+    fn labels_browser_view(&mut self, ui: &mut Ui, tracks: &[Track], max_h: f32) {
+        let p = self.palette;
+        if tracks.is_empty() {
+            self.empty_state(ui);
+            return;
+        }
+        let labels = Arc::clone(&self.cached_labels);
+        if labels.is_empty() {
+            ui.add_space(32.0);
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    RichText::new("No Record Label metadata found yet. Edit tags or scan albums with Publisher/Label tags.")
+                        .size(11.5)
+                        .color(p.muted),
+                );
+            });
+            return;
+        }
+        let mut pick: Option<String> = None;
+        ScrollArea::vertical()
+            .id_salt("labels_list_scroll")
+            .max_height(max_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing.y = 3.0;
+                let w = ui.available_width();
+                for (name, t_cnt, a_cnt) in labels.iter() {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    ui.painter().rect_filled(
+                        rect,
+                        6.0,
+                        if resp.hovered() { p.hover } else { p.surface },
+                    );
+                    ui.painter().text(
+                        pos2(rect.left() + 14.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        name,
+                        FontId::proportional(12.0),
+                        p.text,
+                    );
+                    ui.painter().text(
+                        pos2(rect.right() - 14.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{a_cnt} album(s) · {t_cnt} track(s)"),
+                        FontId::monospace(10.0),
+                        p.muted,
+                    );
+                    if resp.clicked() {
+                        pick = Some(name.clone());
+                    }
+                }
+            });
+        if let Some(lbl) = pick {
+            self.label_filter = Some(lbl);
             self.browse_mode = BrowseMode::Tracks;
         }
     }
@@ -6308,6 +6495,7 @@ impl TxPlayerApp {
                     label,
                     insert_before: None,
                     hover_playlist_id: None,
+                    hover_collection_id: None,
                     hover_queue: false,
                 });
             }
@@ -8547,6 +8735,12 @@ impl TxPlayerApp {
                                 ));
                             }
                         }
+                        TrackInfoAction::RemoveCustomTag(tag) => {
+                            if self.store.active_mut().remove_custom_tag(tid, &tag) {
+                                self.mark_library_dirty();
+                                self.store.save();
+                            }
+                        }
                     }
                 }
             } else {
@@ -8727,8 +8921,60 @@ impl TxPlayerApp {
                             });
                         }
                     }
+                    LibraryInsightsAction::RestoreJson => {
+                        if !self.dialog_open {
+                            self.dialog_open = true;
+                            let tx = self.dialog_sender.clone();
+                            thread::spawn(move || {
+                                let path = rfd::FileDialog::new()
+                                    .set_title("Restore Library Database Backup (JSON)")
+                                    .add_filter("JSON Database Backup", &["json"])
+                                    .pick_file();
+                                let _ = tx.send(DialogEvent::RestoreDatabaseJson(path));
+                            });
+                        }
+                    }
+                    LibraryInsightsAction::OpenDbHealth => {
+                        self.show_library_insights = false;
+                        self.show_db_health = true;
+                    }
                     LibraryInsightsAction::OpenDbFolder => {
                         reveal_in_file_manager(&data_directory());
+                    }
+                }
+            }
+        }
+
+        // 3g) Library Database Health — Duplicate Quality Audit & Missing-Files Cleaner
+        if self.show_db_health {
+            let duplicates = self.store.active().find_duplicate_groups();
+            let missing_ids = self.store.active().find_missing_track_ids();
+            let (keep, act) = modals::show_db_health_modal(
+                context,
+                &duplicates,
+                &missing_ids,
+                |id| self.track(id).cloned(),
+                &p,
+            );
+            if !keep {
+                self.show_db_health = false;
+            }
+            if let Some(action) = act {
+                match action {
+                    DbHealthAction::RemoveTrackIds(ids) => {
+                        let n = ids.len();
+                        self.remove_tracks_from_library(&ids);
+                        self.set_status(format!(
+                            "Removed {n} duplicate track(s) while preserving highest-resolution masters"
+                        ));
+                    }
+                    DbHealthAction::PruneAllMissing => {
+                        let removed = self.store.active_mut().prune_missing();
+                        let n = removed.len();
+                        self.purge_ids_from_queue(&removed);
+                        self.mark_library_dirty();
+                        self.store.save();
+                        self.set_status(format!("Pruned {n} missing file(s) from database"));
                     }
                 }
             }
@@ -10566,6 +10812,7 @@ impl TxPlayerApp {
                                             label,
                                             insert_before: None,
                                             hover_playlist_id: None,
+                                            hover_collection_id: None,
                                             hover_queue: false,
                                         });
                                     }
@@ -10896,6 +11143,26 @@ impl TxPlayerApp {
                         format!("Added {added} track(s) to \"{pl_name}\"")
                     } else {
                         format!("Already in \"{pl_name}\"")
+                    });
+                }
+            } else if let Some(col_id) = drag.hover_collection_id {
+                if drag.source_view != View::Collection(col_id) && !drag.track_ids.is_empty() {
+                    let added = self
+                        .store
+                        .active_mut()
+                        .add_tracks_to_collection(col_id, &drag.track_ids);
+                    let cname = self
+                        .store
+                        .active()
+                        .collection(col_id)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| "Collection".into());
+                    self.mark_library_dirty();
+                    self.store.save();
+                    self.set_status(if added > 0 {
+                        format!("Added {added} track(s) to collection \"{cname}\"")
+                    } else {
+                        format!("Already in collection \"{cname}\"")
                     });
                 }
             } else if drag.hover_queue {
@@ -11382,6 +11649,7 @@ impl eframe::App for TxPlayerApp {
         {
             d.insert_before = None;
             d.hover_playlist_id = None;
+            d.hover_collection_id = None;
             d.hover_queue = false;
         }
         let paused = self.demo_piano_lock || (self.current_id().is_some() && !self.playing);

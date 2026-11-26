@@ -61,6 +61,54 @@ pub fn is_raw_cd_bin(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("bin"))
 }
 
+/// Returns the DoP v1.1 PCM container sample rate (`176.4 kHz` for DSD64, `352.8 kHz` for DSD128),
+/// or `None` if the DSD rate exceeds standard DoP v1.1 transport limits.
+pub fn dop_pcm_sample_rate(dsd_rate_hz: u32) -> Option<u32> {
+    if (2_500_000..=3_200_000).contains(&dsd_rate_hz)
+        || (5_000_000..=6_400_000).contains(&dsd_rate_hz)
+    {
+        Some(dsd_rate_hz / 16) // DSD64 -> 176.4 kHz, DSD128 -> 352.8 kHz
+    } else {
+        None
+    }
+}
+
+/// Pure-Rust DSD over PCM (DoP v1.1) 24-bit integer framer.
+/// Packs pairs of 1-bit DSD bytes (MSB-first in time) into 32-bit left-aligned PCM words:
+/// `[marker (0x05 / 0xFA) << 24 | msb_dsd << 16 | lsb_dsd << 8 | 0x00]`.
+#[allow(dead_code)]
+pub struct DopFramer {
+    marker_toggle: bool,
+    lsb_first_source: bool,
+}
+
+#[allow(dead_code)]
+impl DopFramer {
+    pub fn new(lsb_first_source: bool) -> Self {
+        Self {
+            marker_toggle: false,
+            lsb_first_source,
+        }
+    }
+
+    /// Packs 2 stereo DSD bytes per channel (`l0, l1`, `r0, r1`) into one stereo pair of DoP v1.1 `i32` samples.
+    #[inline(always)]
+    pub fn pack_stereo_frame(&mut self, l0: u8, l1: u8, r0: u8, r1: u8) -> (i32, i32) {
+        let marker: u32 = if self.marker_toggle { 0xFA } else { 0x05 };
+        self.marker_toggle = !self.marker_toggle;
+        let fix = |b: u8| -> u32 {
+            if self.lsb_first_source {
+                b.reverse_bits() as u32
+            } else {
+                b as u32
+            }
+        };
+        let wl = (marker << 24) | (fix(l0) << 16) | (fix(l1) << 8);
+        let wr = (marker << 24) | (fix(r0) << 16) | (fix(r1) << 8);
+        (wl as i32, wr as i32)
+    }
+}
+
 /// Picks optimal integer decimation factor so DSD64 -> 88.2 kHz and DSD128/256/512 -> 176.4 kHz.
 fn choose_dsd_decimation(dsd_rate: u32) -> (usize, u32, &'static str) {
     if dsd_rate >= 20_000_000 {
@@ -793,5 +841,27 @@ mod tests {
         assert!(peak > 0.3 && peak <= 1.0, "Expected clean audio peak, got {peak}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dop_v11_framer_alternates_markers_and_reverses_lsb_dsf_bits() {
+        assert_eq!(dop_pcm_sample_rate(2_822_400), Some(176_400));
+        assert_eq!(dop_pcm_sample_rate(5_644_800), Some(352_800));
+        assert_eq!(dop_pcm_sample_rate(11_289_600), None);
+
+        // DSF is LSB-first, so 0b0000_0011 -> reversed MSB-first 0b1100_0000 (0xC0)
+        let mut framer = DopFramer::new(true);
+        let (l_a, r_a) = framer.pack_stereo_frame(0b0000_0011, 0b1000_0000, 0xAA, 0x55);
+        assert_eq!((l_a as u32) >> 24, 0x05);
+        assert_eq!(((l_a as u32) >> 16) & 0xFF, 0xC0);
+        assert_eq!(((l_a as u32) >> 8) & 0xFF, 0x01);
+        assert_eq!((l_a as u32) & 0xFF, 0x00);
+        assert_eq!((r_a as u32) >> 24, 0x05);
+
+        let (l_b, r_b) = framer.pack_stereo_frame(0xFF, 0x00, 0x0F, 0xF0);
+        assert_eq!((l_b as u32) >> 24, 0xFA);
+        assert_eq!((r_b as u32) >> 24, 0xFA);
+        assert_eq!(((r_b as u32) >> 16) & 0xFF, 0xF0);
+        assert_eq!(((r_b as u32) >> 8) & 0xFF, 0x0F);
     }
 }

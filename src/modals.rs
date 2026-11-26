@@ -11,7 +11,9 @@ use crate::analyzer::{AudioAnalysis, HiResVerdict};
 use crate::audio::{default_output_device_name, list_output_devices};
 use crate::dsp::compute_eq_response_curve;
 use crate::icons::{self, Icon};
-use crate::library::{LibraryStats, QueryField, QueryOp, QueryRule, SavedView, cover_directory};
+use crate::library::{
+    DuplicateGroup, LibraryStats, QueryField, QueryOp, QueryRule, SavedView, cover_directory,
+};
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{
     AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, open_file_with_default_app, reveal_in_file_manager,
@@ -180,6 +182,14 @@ impl TagEditorState {
                 artist: common(|t| &t.artist),
                 album: common(|t| &t.album),
                 album_artist: common(|t| t.album_artist.as_deref().unwrap_or("")),
+                composer: common(|t| t.composer.as_deref().unwrap_or("")),
+                conductor: common(|t| t.conductor.as_deref().unwrap_or("")),
+                orchestra: common(|t| t.orchestra.as_deref().unwrap_or("")),
+                work: common(|t| t.work.as_deref().unwrap_or("")),
+                label: common(|t| t.label.as_deref().unwrap_or("")),
+                catalog_number: common(|t| t.catalog_number.as_deref().unwrap_or("")),
+                comment: common(|t| t.comment.as_deref().unwrap_or("")),
+                custom_tags: String::new(),
                 year: common(|t| t.year.as_deref().unwrap_or("")),
                 genre: common(|t| t.genre.as_deref().unwrap_or("")),
                 track_number: String::new(),
@@ -1476,6 +1486,16 @@ pub fn show_settings_window(
                         "Direct DAC Volume Lock (0.0 dBFS fixed digital output for external hardware amp/DAC)",
                         palette,
                     );
+                    let prev_dop = plugins.dsp.dsd_dop;
+                    aligned_checkbox_row(
+                        ui,
+                        &mut plugins.dsp.dsd_dop,
+                        "Native DSD over PCM (DoP v1.1 · 0x05/0xFA framing at 176.4/352.8 kHz when Exclusive DAC locked)",
+                        palette,
+                    );
+                    if plugins.dsp.dsd_dop != prev_dop {
+                        actions.dsp_changed = true;
+                    }
                     let prev_ram = plugins.dsp.ram_playback;
                     aligned_checkbox_row(
                         ui,
@@ -2153,6 +2173,72 @@ pub fn show_tag_editor_window(
                     ui.add_sized([field_w, 24.0], egui::TextEdit::singleline(&mut state.form.genre));
                     ui.end_row();
 
+                    lbl(ui, "Composer");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.composer)
+                            .hint_text("e.g. Ludwig van Beethoven"),
+                    );
+                    if tag_narrow {
+                        ui.end_row();
+                    }
+                    lbl(ui, "Conductor");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.conductor)
+                            .hint_text("e.g. Herbert von Karajan"),
+                    );
+                    ui.end_row();
+
+                    lbl(ui, "Orchestra");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.orchestra)
+                            .hint_text("Ensemble / Orchestra"),
+                    );
+                    if tag_narrow {
+                        ui.end_row();
+                    }
+                    lbl(ui, "Work / Opus");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.work)
+                            .hint_text("e.g. Piano Sonata No. 14, Op. 27/2"),
+                    );
+                    ui.end_row();
+
+                    lbl(ui, "Record Label");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.label)
+                            .hint_text("e.g. Deutsche Grammophon"),
+                    );
+                    if tag_narrow {
+                        ui.end_row();
+                    }
+                    lbl(ui, "Catalog #");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.catalog_number),
+                    );
+                    ui.end_row();
+
+                    lbl(ui, "Comment");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.comment),
+                    );
+                    if tag_narrow {
+                        ui.end_row();
+                    }
+                    lbl(ui, "#Custom Tags");
+                    ui.add_sized(
+                        [field_w, 24.0],
+                        egui::TextEdit::singleline(&mut state.form.custom_tags)
+                            .hint_text("reference, solo-piano, late-night"),
+                    );
+                    ui.end_row();
+
                     if batch_count == 1 {
                         lbl(ui, "Track #");
                         ui.add_sized(
@@ -2551,6 +2637,47 @@ pub fn show_track_info_window(
                     if let Some(aa) = &track.album_artist {
                         row("Album Artist", aa.clone());
                     }
+                    if let Some(comp) = &track.composer {
+                        row("Composer", comp.clone());
+                    }
+                    if let Some(cond) = &track.conductor {
+                        row("Conductor", cond.clone());
+                    }
+                    if let Some(orch) = &track.orchestra {
+                        row("Orchestra", orch.clone());
+                    }
+                    if let Some(work) = &track.work {
+                        row("Work / Opus", work.clone());
+                    }
+                    if let Some(lbl) = &track.label {
+                        let cat = track
+                            .catalog_number
+                            .as_deref()
+                            .map(|c| format!(" · {c}"))
+                            .unwrap_or_default();
+                        row("Label", format!("{lbl}{cat}"));
+                    }
+                    if let Some(dr) = track.dr_score {
+                        let lufs = track
+                            .integrated_lufs
+                            .map(|l| format!(" · {l:.1} LUFS"))
+                            .unwrap_or_default();
+                        let auth = track
+                            .authenticity
+                            .as_deref()
+                            .map(|a| format!(" · {a}"))
+                            .unwrap_or_default();
+                        row("DB Quality", format!("DR{dr}{lufs}{auth}"));
+                    }
+                    if track.codec.starts_with("DSD")
+                        && let Some(sr) = track.sample_rate
+                        && let Some(dop_rate) = crate::dsd::dop_pcm_sample_rate(sr)
+                    {
+                        row(
+                            "DoP v1.1",
+                            format!("Supported ({} 24-bit 0x05/0xFA)", format_sample_rate(dop_rate)),
+                        );
+                    }
                     if track.play_count > 0 {
                         row("Plays", track.play_count.to_string());
                     }
@@ -2576,6 +2703,26 @@ pub fn show_track_info_window(
                             .map(|e| format_duration(Some(e)))
                             .unwrap_or_else(|| "End".into());
                         row("CUE Span", format!("{} → {}", format_duration(Some(cs)), end_s));
+                    }
+                    if !track.custom_tags.is_empty() {
+                        ui.label(RichText::new("Tags").size(11.0).color(palette.faint));
+                        ui.horizontal_wrapped(|ui| {
+                            for tag in &track.custom_tags {
+                                if pill_button(
+                                    ui,
+                                    &format!("#{tag} ×"),
+                                    None,
+                                    PillStyle::Secondary,
+                                    palette,
+                                )
+                                .on_hover_text("Click to remove custom tag")
+                                .clicked()
+                                {
+                                    action = Some(TrackInfoAction::RemoveCustomTag(tag.clone()));
+                                }
+                            }
+                        });
+                        ui.end_row();
                     }
                     ui.label(RichText::new("Rating").size(11.0).color(palette.faint));
                     ui.horizontal(|ui| {
@@ -2941,6 +3088,7 @@ pub enum TrackInfoAction {
     Remove,
     SetRating(u8),
     AnalyzeQuality,
+    RemoveCustomTag(String),
 }
 
 pub enum FolderModalAction {
@@ -4590,6 +4738,8 @@ pub fn show_smart_view_builder_modal(
 pub enum LibraryInsightsAction {
     ExportCsv,
     BackupJson,
+    RestoreJson,
+    OpenDbHealth,
     OpenDbFolder,
 }
 
@@ -4802,7 +4952,7 @@ pub fn show_library_insights_modal(
                 }
                 if pill_button(
                     ui,
-                    "Backup Database (.json)",
+                    "Backup (.json)",
                     Some(Icon::Folder),
                     PillStyle::Secondary,
                     palette,
@@ -4814,7 +4964,31 @@ pub fn show_library_insights_modal(
                 }
                 if pill_button(
                     ui,
-                    "Open DB Folder",
+                    "Restore (.json)",
+                    Some(Icon::Refresh),
+                    PillStyle::Secondary,
+                    palette,
+                )
+                .on_hover_text("Restore a previously saved TxPlayer JSON database backup")
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::RestoreJson);
+                }
+                if pill_button(
+                    ui,
+                    "Duplicates & Missing…",
+                    Some(Icon::Sliders),
+                    PillStyle::Active,
+                    palette,
+                )
+                .on_hover_text("Audit duplicate tracks across formats (keeps highest-res master) & missing files")
+                .clicked()
+                {
+                    action = Some(LibraryInsightsAction::OpenDbHealth);
+                }
+                if pill_button(
+                    ui,
+                    "DB Folder",
                     None,
                     PillStyle::Secondary,
                     palette,
@@ -4823,6 +4997,230 @@ pub fn show_library_insights_modal(
                 {
                     action = Some(LibraryInsightsAction::OpenDbFolder);
                 }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, "Close", None, PillStyle::Secondary, palette).clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+        },
+    );
+
+    if close_clicked {
+        open = false;
+    }
+    (open, action)
+}
+
+pub enum DbHealthAction {
+    RemoveTrackIds(Vec<u64>),
+    PruneAllMissing,
+}
+
+/// Library Database Integrity, Duplicate Quality Auditor & Missing-Files Cleaner modal.
+pub fn show_db_health_modal(
+    context: &egui::Context,
+    duplicates: &[DuplicateGroup],
+    missing_ids: &[u64],
+    lookup_track: impl Fn(u64) -> Option<Track>,
+    palette: &Palette,
+) -> (bool, Option<DbHealthAction>) {
+    let mut open = true;
+    let mut close_clicked = false;
+    let mut action: Option<DbHealthAction> = None;
+
+    let extra_dup_ids: Vec<u64> = duplicates
+        .iter()
+        .flat_map(|g| {
+            g.track_ids
+                .iter()
+                .copied()
+                .filter(move |&id| id != g.best_track_id)
+        })
+        .collect();
+    let sub = format!(
+        "{} duplicate group(s) · {} missing file(s)",
+        duplicates.len(),
+        missing_ids.len()
+    );
+
+    themed_modal_window(
+        context,
+        "db_health_modal",
+        "Library Database Health — Duplicates & Missing Files",
+        Icon::Sliders,
+        Some(sub.as_str()),
+        [720.0, 540.0],
+        Some([540.0, 380.0]),
+        true,
+        &mut open,
+        palette,
+        |ui| {
+            // Top quick-action bar
+            ui.horizontal_wrapped(|ui| {
+                if !extra_dup_ids.is_empty()
+                    && pill_button(
+                        ui,
+                        &format!("Keep Best Quality (Remove {} Lower-Res)", extra_dup_ids.len()),
+                        None,
+                        PillStyle::Accent,
+                        palette,
+                    )
+                    .clicked()
+                {
+                    action = Some(DbHealthAction::RemoveTrackIds(extra_dup_ids.clone()));
+                }
+                if !missing_ids.is_empty()
+                    && pill_button(
+                        ui,
+                        &format!("Prune {} Missing File(s)", missing_ids.len()),
+                        Some(Icon::Close),
+                        PillStyle::Danger,
+                        palette,
+                    )
+                    .clicked()
+                {
+                    action = Some(DbHealthAction::PruneAllMissing);
+                }
+                if extra_dup_ids.is_empty() && missing_ids.is_empty() {
+                    ui.label(
+                        RichText::new("✓ Library database is spotless — zero duplicates and zero missing files!")
+                            .size(11.5)
+                            .strong()
+                            .color(palette.hires_gold),
+                    );
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            ScrollArea::vertical()
+                .id_salt("db_health_scroll")
+                .max_height(390.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if !duplicates.is_empty() {
+                        ui.label(
+                            RichText::new("DUPLICATE TRACK GROUPS (RANKED BY AUDIO FIDELITY)")
+                                .size(9.5)
+                                .strong()
+                                .color(palette.faint),
+                        );
+                        ui.add_space(4.0);
+                        for group in duplicates {
+                            Frame::new()
+                                .fill(palette.background)
+                                .stroke(Stroke::new(1.0, palette.border))
+                                .corner_radius(6.0)
+                                .inner_margin(Margin::symmetric(10, 7))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(&group.key_label)
+                                            .size(11.5)
+                                            .strong()
+                                            .color(palette.text),
+                                    );
+                                    ui.add_space(3.0);
+                                    for &tid in &group.track_ids {
+                                        let Some(tr) = lookup_track(tid) else {
+                                            continue;
+                                        };
+                                        let is_best = tid == group.best_track_id;
+                                        ui.horizontal(|ui| {
+                                            if is_best {
+                                                Frame::new()
+                                                    .fill(palette.hires_bg)
+                                                    .corner_radius(3.0)
+                                                    .inner_margin(Margin::symmetric(5, 1))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new("BEST")
+                                                                .size(8.5)
+                                                                .monospace()
+                                                                .strong()
+                                                                .color(palette.hires_gold),
+                                                        );
+                                                    });
+                                            } else {
+                                                ui.add_space(38.0);
+                                            }
+                                            ui.label(
+                                                RichText::new(tr.quality_full())
+                                                    .size(10.0)
+                                                    .monospace()
+                                                    .color(if is_best {
+                                                        palette.hires_gold
+                                                    } else {
+                                                        palette.accent_bright
+                                                    }),
+                                            );
+                                            ui.label(
+                                                RichText::new(tr.path.display().to_string())
+                                                    .size(9.5)
+                                                    .monospace()
+                                                    .color(palette.muted),
+                                            );
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if !is_best
+                                                        && pill_button(
+                                                            ui,
+                                                            "Remove",
+                                                            None,
+                                                            PillStyle::Danger,
+                                                            palette,
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        action = Some(
+                                                            DbHealthAction::RemoveTrackIds(vec![
+                                                                tid,
+                                                            ]),
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                });
+                            ui.add_space(6.0);
+                        }
+                    }
+
+                    if !missing_ids.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("MISSING FILES ON DISK")
+                                .size(9.5)
+                                .strong()
+                                .color(palette.danger),
+                        );
+                        ui.add_space(4.0);
+                        for &tid in missing_ids.iter().take(80) {
+                            if let Some(tr) = lookup_track(tid) {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("{} — {}", tr.title, tr.artist))
+                                            .size(10.5)
+                                            .color(palette.text_secondary),
+                                    );
+                                    ui.label(
+                                        RichText::new(tr.path.display().to_string())
+                                            .size(9.5)
+                                            .monospace()
+                                            .color(palette.faint),
+                                    );
+                                });
+                            }
+                        }
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if pill_button(ui, "Close", None, PillStyle::Secondary, palette).clicked() {
                         close_clicked = true;

@@ -35,7 +35,7 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
   - Cross-platform graceful fallback & live hardware clock sync reporting in Signal Path Inspector.
 - [x] **Per-Output Device Audio Profiles:** Automatically apply saved Exclusive Mode, `0.0 dB` DAC Volume Lock, Oversampling policy, Crossfeed, and Headphone AutoEQ profile whenever you switch between USB DAC, Headphones, and Built-in Speakers.
 - [x] **Parametric EQ + 1-Click AutoEQ / Oratory1990 `.txt` Headphone Import:** Full 16-band 64-bit RBJ parametric biquads (Peak, Low/High Shelf, Low/High Pass with custom Frequency & Q), curated headphone targets (Harman, HD 650, HD 800 S, Sundara, Warm Tilt), live analytical 20 Hz – 20 kHz frequency-response curve preview, and 1-click AutoEQ `.txt` import.
-- [ ] **Optional Native DSD DoP (DSD over PCM v1.1)** output (`0x05/0xFA` 24-bit markers at 176.4/352.8 kHz) when a DoP-capable Exclusive DAC is locked.
+- [x] **Native DSD DoP (DSD over PCM v1.1) Framing Engine:** Pure-Rust `0x05`/`0xFA` 24-bit integer DoP v1.1 framer (`176.4 kHz` DSD64 / `352.8 kHz` DSD128 with automatic DSF LSB→MSB bit reversal) + settings toggle gated to Exclusive DAC Lock.
 
 ## Wave 3.5 — Decaud-Killer Audiophile Precision Pack (`v1.2.0` Completed)
 - [x] **TPDF & Noise-Shaped Dithered Bit-Depth Reduction:** Off / 24-bit TPDF / 16-bit TPDF / 16-bit 2nd-order psychoacoustic noise-shaped TPDF dither in 64-bit DSP chain (bypassed bit-identically in Bit-Perfect mode, saved per-device profile).
@@ -66,3 +66,11 @@ TxPlayer is a 100% free, native Rust cross-platform (`macOS`, `Windows`, `Linux`
   - Build & save unlimited dynamic rule-based database views (`Match ALL` / `Match ANY`) over 16 fields (`Composer`, `Artist`, `Album`, `Title`, `Genre`, `Label`, `Codec`, `Custom Tag`, `Sample Rate`, `Bit Depth`, `DR Score`, `Rating`, `Play Count`, `Year`, `Has ReplayGain`, `TrueHz Verdict`) with live match-count preview & 1-click audiophile presets.
 - [x] **Dedicated Classical & Facet Browsers + Library Insights Dashboard:**
   - **Composers** browser, **Genres** browser, and a **Library Database & Insights Dashboard** (format breakdown FLAC/DSD/ALAC/WAV, sample-rate distribution, total listening hours, average DR, verified Hi-Res share, ReplayGain coverage, and CSV/JSON export).
+
+---
+
+## Wave 6 — Classical Tagging, Database Health & Collector Polish (`v1.5.0` Completed)
+- [x] **Full Classical Metadata & `#Custom Tags` Editor + Track Inspector:** View, edit, and write `Composer`, `Conductor`, `Orchestra`, `Work / Opus`, `Record Label`, `Catalog #`, `Comment`, and `#custom-tags` directly into both the Library Database and embedded audio file tags, plus live persisted DB DR/LUFS/TrueHz summary & 1-click `#tag` removal inside Track Info.
+- [x] **Database Health — Duplicate Quality Audit & Missing-Files Cleaner:** Automatic duplicate group detection across formats/folders ranking copies by audio fidelity (`DSD / Hi-Res > Lossless > Lossy`), flagging `BEST` master copies with 1-click **Keep Best Quality (Remove Lower-Res Duplicates)** and **Prune Missing Files**.
+- [x] **Record Labels Facet Browser, Drag-to-Collection & Database Restore:** Dedicated **Labels** browser (`Deutsche Grammophon`, `Decca`, `ECM`, etc.), direct drag-and-drop of tracks onto sidebar Collections, right-click **Add Album to Collection**, and 1-click **Restore Backup (`.json`)**.
+- [x] **Pure-Rust DSD over PCM (DoP v1.1) Framing Engine:** Standards-compliant `0x05`/`0xFA` 24-bit integer framer (`176.4 kHz` / `352.8 kHz`) with DSF LSB→MSB bit reversal and Settings toggle.

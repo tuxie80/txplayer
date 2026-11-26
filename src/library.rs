@@ -264,6 +264,14 @@ impl SavedView {
     }
 }
 
+/// Group of duplicate tracks detected in the library database, with the highest-quality master flagged.
+#[derive(Debug, Clone)]
+pub struct DuplicateGroup {
+    pub key_label: String,
+    pub best_track_id: u64,
+    pub track_ids: Vec<u64>,
+}
+
 /// Aggregate analytics snapshot computed from the active Library database.
 #[derive(Debug, Clone, Default)]
 pub struct LibraryStats {
@@ -834,6 +842,82 @@ impl Library {
         updated
     }
 
+    pub fn remove_custom_tag(&mut self, id: u64, tag: &str) -> bool {
+        let Some(t) = self.get_by_id_mut(id) else {
+            return false;
+        };
+        let before = t.custom_tags.len();
+        t.custom_tags.retain(|x| !x.eq_ignore_ascii_case(tag));
+        t.custom_tags.len() != before
+    }
+
+    /// Detects duplicate tracks by normalized `(title, artist, album)` and ranks copies by audio fidelity
+    /// (`DSD / Hi-Res > Lossless > Lossy`, sample rate, bit depth, DR score) so users can keep the master.
+    pub fn find_duplicate_groups(&self) -> Vec<DuplicateGroup> {
+        let mut groups: HashMap<(String, String, String), Vec<u64>> = HashMap::new();
+        for t in &self.tracks {
+            let key = (
+                t.title.trim().to_lowercase(),
+                t.artist.trim().to_lowercase(),
+                t.album.trim().to_lowercase(),
+            );
+            if key.0.is_empty() {
+                continue;
+            }
+            groups.entry(key).or_default().push(t.id);
+        }
+        let quality_rank = |t: &Track| -> (u8, u32, u32, u8) {
+            let tier = if t.codec.starts_with("DSD") {
+                3
+            } else if t.is_hires() {
+                2
+            } else if t.is_lossless() {
+                1
+            } else {
+                0
+            };
+            (
+                tier,
+                t.sample_rate.unwrap_or(0),
+                t.bit_depth.unwrap_or(0),
+                t.dr_score.unwrap_or(0),
+            )
+        };
+        let mut out = Vec::new();
+        for ids in groups.into_values() {
+            if ids.len() < 2 {
+                continue;
+            }
+            let mut sorted = ids;
+            sorted.sort_by(|&a, &b| {
+                let ra = self.get_by_id(a).map(quality_rank).unwrap_or_default();
+                let rb = self.get_by_id(b).map(quality_rank).unwrap_or_default();
+                rb.cmp(&ra).then_with(|| a.cmp(&b))
+            });
+            let best_track_id = sorted[0];
+            let key_label = self
+                .get_by_id(best_track_id)
+                .map(|t| format!("{} — {} ({})", t.title, t.artist, t.album))
+                .unwrap_or_else(|| "Duplicate Track".into());
+            out.push(DuplicateGroup {
+                key_label,
+                best_track_id,
+                track_ids: sorted,
+            });
+        }
+        out.sort_by_key(|g| g.key_label.to_lowercase());
+        out
+    }
+
+    /// Returns track IDs whose underlying file path no longer exists on disk.
+    pub fn find_missing_track_ids(&self) -> Vec<u64> {
+        self.tracks
+            .iter()
+            .filter(|t| !t.path.exists())
+            .map(|t| t.id)
+            .collect()
+    }
+
     /// Computes full database analytics (codecs, sample-rate distribution, composers, DR & RG coverage).
     pub fn compute_stats(&self) -> LibraryStats {
         let mut albums = HashSet::new();
@@ -1114,6 +1198,23 @@ impl LibraryStore {
         let pretty = serde_json::to_vec_pretty(self)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, pretty)
+    }
+
+    pub fn import_backup_json(path: &Path) -> Result<Self, String> {
+        let data = std::fs::read(path).map_err(|e| format!("Reading backup failed: {e}"))?;
+        let mut store: LibraryStore =
+            serde_json::from_slice(&data).map_err(|e| format!("Invalid backup JSON: {e}"))?;
+        if store.libraries.is_empty() {
+            return Err("Backup contains no libraries".into());
+        }
+        if !store.libraries.iter().any(|l| l.id == store.active_id) {
+            store.active_id = store.libraries[0].id;
+        }
+        for lib in &mut store.libraries {
+            lib.rebuild_index();
+        }
+        store.schema_version = DB_SCHEMA_VERSION;
+        Ok(store)
     }
 
     /// Non-blocking save: enqueues snapshot onto a single coalescing background writer thread
@@ -1452,6 +1553,26 @@ mod tests {
         assert_eq!(stats.dsd_tracks, 1);
         assert_eq!(stats.verified_hires_tracks, 2);
         assert!((stats.avg_dr.unwrap() - 12.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn duplicate_finder_ranks_hires_master_above_lossy_copy() {
+        let mut lib = Library::default();
+        let mut mp3 = sample_track(10, "/music/lossy.mp3", "Moonlight Sonata");
+        mp3.codec = "MP3".into();
+        mp3.sample_rate = Some(44_100);
+        mp3.bit_depth = None;
+        let mut flac = sample_track(20, "/music/master.flac", "Moonlight Sonata");
+        flac.codec = "FLAC".into();
+        flac.sample_rate = Some(192_000);
+        flac.bit_depth = Some(24);
+        lib.upsert(mp3);
+        lib.upsert(flac);
+
+        let dups = lib.find_duplicate_groups();
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].best_track_id, 20);
+        assert_eq!(dups[0].track_ids, vec![20, 10]);
     }
 
     #[test]
