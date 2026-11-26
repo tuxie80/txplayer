@@ -153,7 +153,7 @@ impl QualityFilter {
             QualityFilter::HiRes => "Hi-Res",
             QualityFilter::Dsd => "DSD",
             QualityFilter::Lossless => "Lossless",
-            QualityFilter::TopRated => "★★★★+",
+            QualityFilter::TopRated => "Top 4.0+",
         }
     }
 
@@ -163,7 +163,7 @@ impl QualityFilter {
             QualityFilter::HiRes => t.is_hires(),
             QualityFilter::Dsd => t.codec.starts_with("DSD"),
             QualityFilter::Lossless => t.is_lossless(),
-            QualityFilter::TopRated => t.rating >= 4,
+            QualityFilter::TopRated => t.rating >= 8,
         }
     }
 }
@@ -655,6 +655,10 @@ pub struct TxPlayerApp {
     // Playback state
     current_queue: Vec<u64>,
     current_index: Option<usize>,
+    /// Keeps the active playing track alive even if the user deletes its row from the queue or library.
+    playing_track_snapshot: Option<Track>,
+    /// Next queue index to resume when a detached (deleted-from-queue) track finishes playing.
+    detached_next_index: Option<usize>,
     playing: bool,
     position: f64,
     duration: f64,
@@ -709,6 +713,10 @@ pub struct TxPlayerApp {
     show_folders: bool,
     show_libraries_modal: bool,
     new_library_name: String,
+    renaming_library: Option<(u64, String)>,
+    show_debug_console: bool,
+    debug_log_filter: String,
+    debug_log_level: Option<crate::debug_log::LogLevel>,
     show_new_playlist_modal: bool,
     new_playlist_name: String,
     pending_playlist_tracks: Vec<u64>,
@@ -934,6 +942,8 @@ impl TxPlayerApp {
             scroll_to_playing: false,
             current_queue: Vec::new(),
             current_index: None,
+            playing_track_snapshot: None,
+            detached_next_index: None,
             playing: false,
             position: 0.0,
             duration: 0.0,
@@ -979,6 +989,10 @@ impl TxPlayerApp {
             show_folders: false,
             show_libraries_modal: false,
             new_library_name: String::new(),
+            renaming_library: None,
+            show_debug_console: false,
+            debug_log_filter: String::new(),
+            debug_log_level: None,
             show_new_playlist_modal: false,
             new_playlist_name: String::new(),
             pending_playlist_tracks: Vec::new(),
@@ -1105,7 +1119,14 @@ impl TxPlayerApp {
             app.screenshot_out = Some(PathBuf::from(path));
             app.ephemeral_session = true;
         }
+        crate::debug_log::info(format!(
+            "TxPlayer v{} started on {} ({} launch path(s))",
+            crate::APP_VERSION,
+            std::env::consts::OS,
+            launch_paths.len()
+        ));
         if !launch_paths.is_empty() {
+            crate::debug_log::ipc(format!("CLI launch paths: {:?}", launch_paths));
             app.open_external_paths(launch_paths, false);
         } else if !app.ephemeral_session
             && let Some(sess) = SessionState::load()
@@ -1350,11 +1371,14 @@ impl TxPlayerApp {
     fn current_id(&self) -> Option<u64> {
         self.current_index
             .and_then(|index| self.current_queue.get(index).copied())
+            .or_else(|| self.playing_track_snapshot.as_ref().map(|t| t.id))
     }
 
     fn current_track(&self) -> Option<&Track> {
-        let id = self.current_id()?;
-        self.track(id)
+        self.current_index
+            .and_then(|index| self.current_queue.get(index).copied())
+            .and_then(|id| self.track(id))
+            .or(self.playing_track_snapshot.as_ref())
     }
 
     fn track(&self, id: u64) -> Option<&Track> {
@@ -1385,7 +1409,7 @@ impl TxPlayerApp {
             if t.play_count > 0 {
                 most_played += 1;
             }
-            if t.rating >= 4 {
+            if t.rating >= 8 {
                 top_rated += 1;
             }
         }
@@ -1668,7 +1692,7 @@ impl TxPlayerApp {
                         SmartView::RecentlyAdded => true,
                         SmartView::RecentlyPlayed => track.last_played_at.is_some(),
                         SmartView::MostPlayed => track.play_count > 0,
-                        SmartView::TopRated => track.rating >= 4,
+                        SmartView::TopRated => track.rating >= 8,
                     })
                     .filter(|track| track.matches_query(&query))
                     .cloned()
@@ -1955,12 +1979,24 @@ impl TxPlayerApp {
     }
 
     fn remove_tracks_from_library(&mut self, ids: &[u64]) {
+        // Capture snapshot of currently playing track before removal so playback continues uninterrupted!
+        let active_playing_id = self.current_id();
+        if let Some(cid) = active_playing_id
+            && ids.contains(&cid)
+            && self.playing_track_snapshot.is_none()
+            && let Some(tr) = self.track(cid).cloned()
+        {
+            self.playing_track_snapshot = Some(tr);
+        }
         let removed = self.store.active_mut().remove_tracks(ids);
         if removed.is_empty() {
             return;
         }
         for track in &removed {
-            self.waveforms.remove(&track.id);
+            // Keep waveform alive if this track is still actively playing!
+            if Some(track.id) != active_playing_id {
+                self.waveforms.remove(&track.id);
+            }
             self.selected_tracks.remove(&track.id);
             if self.inspect_track_id == Some(track.id) {
                 self.inspect_track_id = None;
@@ -2093,18 +2129,21 @@ impl TxPlayerApp {
         self.mark_queue_dirty();
 
         if was_current_removed {
-            if self.current_queue.is_empty() {
+            // Keep playing the removed track uninterrupted (detached from queue) until it finishes!
+            if self.playing || self.playing_track_snapshot.is_some() {
+                self.current_index = None;
+                self.detached_next_index = if self.current_queue.is_empty() {
+                    None
+                } else {
+                    Some(old_current_idx.unwrap_or(0).min(self.current_queue.len() - 1))
+                };
+            } else if self.current_queue.is_empty() {
                 self.stop_playback();
             } else {
                 let next_idx = old_current_idx
                     .unwrap_or(0)
                     .min(self.current_queue.len() - 1);
-                self.current_index = Some(next_idx);
-                if self.playing {
-                    self.start_current();
-                } else {
-                    self.stop_playback_keep_queue(Some(next_idx));
-                }
+                self.stop_playback_keep_queue(Some(next_idx));
             }
         } else {
             self.current_index = new_current_idx;
@@ -2120,20 +2159,29 @@ impl TxPlayerApp {
         let title = self
             .track(removed_id)
             .map(|t| t.title.clone())
+            .or_else(|| self.playing_track_snapshot.as_ref().map(|t| t.title.clone()))
             .unwrap_or_else(|| "Track".into());
 
         if let Some(cur) = self.current_index {
             if cur == queue_index {
-                if self.current_queue.is_empty() {
+                // Keep playing the deleted row uninterrupted until it finishes or user skips!
+                if self.playing || self.playing_track_snapshot.is_some() {
+                    if self.playing_track_snapshot.is_none()
+                        && let Some(tr) = self.track(removed_id).cloned()
+                    {
+                        self.playing_track_snapshot = Some(tr);
+                    }
+                    self.current_index = None;
+                    self.detached_next_index = if self.current_queue.is_empty() {
+                        None
+                    } else {
+                        Some(queue_index.min(self.current_queue.len() - 1))
+                    };
+                } else if self.current_queue.is_empty() {
                     self.stop_playback();
                 } else {
                     let next_idx = queue_index.min(self.current_queue.len() - 1);
-                    self.current_index = Some(next_idx);
-                    if self.playing {
-                        self.start_current();
-                    } else {
-                        self.stop_playback_keep_queue(Some(next_idx));
-                    }
+                    self.stop_playback_keep_queue(Some(next_idx));
                 }
             } else if cur > queue_index {
                 self.current_index = Some(cur - 1);
@@ -2590,6 +2638,8 @@ impl TxPlayerApp {
         self.visualizer.reset();
         self.playing = false;
         self.current_index = None;
+        self.playing_track_snapshot = None;
+        self.detached_next_index = None;
         self.position = 0.0;
         self.duration = 0.0;
         self.bitrate = None;
@@ -2601,6 +2651,8 @@ impl TxPlayerApp {
         self.audio.stop();
         self.playing = false;
         self.current_index = new_index;
+        self.playing_track_snapshot = None;
+        self.detached_next_index = None;
         self.position = 0.0;
         self.duration = self
             .current_track()
@@ -2851,10 +2903,21 @@ impl TxPlayerApp {
             return;
         };
         if !track.path.exists() {
-            self.set_status(format!("File not found: {}", track.path.display()));
+            let msg = format!("File not found: {}", track.path.display());
+            crate::debug_log::warn(&msg);
+            self.set_status(msg);
             self.playing = false;
             return;
         }
+        self.playing_track_snapshot = Some(track.clone());
+        self.detached_next_index = None;
+        crate::debug_log::audio(format!(
+            "Start track: \"{}\" — {} [{} · {}]",
+            track.title,
+            track.artist,
+            track.codec,
+            track.path.display()
+        ));
         self.position = 0.0;
         self.duration = track.duration.unwrap_or(0.0);
         self.bitrate = None;
@@ -2897,10 +2960,23 @@ impl TxPlayerApp {
     }
 
     fn next(&mut self, automatic: bool) {
-        if self.current_queue.is_empty() {
+        if automatic && self.repeat == RepeatMode::One && self.current_track().is_some() {
+            self.start_current();
             return;
         }
-        if automatic && self.repeat == RepeatMode::One {
+        if self.current_queue.is_empty() {
+            if automatic {
+                self.playing = false;
+                self.position = self.duration;
+                self.playing_track_snapshot = None;
+            }
+            return;
+        }
+        if self.current_index.is_none()
+            && let Some(det) = self.detached_next_index.take()
+        {
+            let target = det.min(self.current_queue.len() - 1);
+            self.current_index = Some(target);
             self.start_current();
             return;
         }
@@ -3355,6 +3431,17 @@ impl TxPlayerApp {
                     oversampling,
                     resampler_quality,
                 } => {
+                    crate::debug_log::audio(format!(
+                        "Stream started: {} · {}Hz -> {}Hz · {}ch · {} · bit_perfect={} · exclusive={} · hw_switch={}",
+                        device_name,
+                        source_sample_rate,
+                        output_sample_rate,
+                        channels,
+                        output_format,
+                        bit_perfect,
+                        exclusive_active,
+                        hw_rate_switched
+                    ));
                     self.stream_info = Some(StreamInfo {
                         source_rate: source_sample_rate,
                         output_rate: output_sample_rate,
@@ -3413,6 +3500,17 @@ impl TxPlayerApp {
                     self.position = 0.0;
                     self.clear_ab_loop();
                     self.counted_play_id = None;
+                    crate::debug_log::audio(format!(
+                        "Stream started: {} · {}Hz -> {}Hz · {}ch · {} · bit_perfect={} · exclusive={} · hw_switch={}",
+                        device_name,
+                        source_sample_rate,
+                        output_sample_rate,
+                        channels,
+                        output_format,
+                        bit_perfect,
+                        exclusive_active,
+                        hw_rate_switched
+                    ));
                     self.stream_info = Some(StreamInfo {
                         source_rate: source_sample_rate,
                         output_rate: output_sample_rate,
@@ -3448,6 +3546,7 @@ impl TxPlayerApp {
                     self.preload_next_track();
                 }
                 AudioEvent::DeviceRouted(name) => {
+                    crate::debug_log::audio(format!("Output device routed -> {name}"));
                     self.available_devices = list_output_devices();
                     if !self.apply_device_profile_if_saved(&name) {
                         self.set_status(format!("Audio output switched to {name}"));
@@ -3494,7 +3593,10 @@ impl TxPlayerApp {
                         self.next(true);
                     }
                 }
-                AudioEvent::Error(error) => self.set_status(error),
+                AudioEvent::Error(error) => {
+                    crate::debug_log::error(format!("Audio error: {error}"));
+                    self.set_status(error);
+                }
             }
         }
 
@@ -3859,6 +3961,7 @@ impl TxPlayerApp {
             context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             context.send_viewport_cmd(egui::ViewportCommand::Focus);
             for paths in ipc_batches {
+                crate::debug_log::ipc(format!("Received {} forwarded path(s): {:?}", paths.len(), paths));
                 if !paths.is_empty() {
                     let is_burst = self
                         .last_external_open_at
@@ -4099,9 +4202,13 @@ impl TxPlayerApp {
             self.start_scan(paths);
         }
 
-        // F1 toggles built-in Quick Guide & Shortcuts Reference anytime
+        // F1 toggles built-in Quick Guide; F12 toggles Admin / Debug Console anytime
         if context.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_quick_help = !self.show_quick_help;
+            return;
+        }
+        if context.input(|i| i.key_pressed(egui::Key::F12)) {
+            self.show_debug_console = !self.show_debug_console;
             return;
         }
 
@@ -4109,6 +4216,9 @@ impl TxPlayerApp {
         if context.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.command_palette.open {
                 self.command_palette.open = false;
+                return;
+            } else if self.show_debug_console {
+                self.show_debug_console = false;
                 return;
             } else if self.show_quick_help {
                 self.show_quick_help = false;
@@ -4174,8 +4284,32 @@ impl TxPlayerApp {
             return;
         }
 
-        if cmd && context.input(|i| i.key_pressed(egui::Key::J)) {
+        if cmd && (context.input(|i| i.key_pressed(egui::Key::J)) || context.input(|i| i.key_pressed(egui::Key::L))) {
             self.jump_to_playing();
+            return;
+        }
+        if cmd && context.input(|i| i.key_pressed(egui::Key::C)) {
+            let visible = self.visible_tracks();
+            let sel = self.selected_ordered_ids(&visible);
+            let lines: Vec<String> = if !sel.is_empty() {
+                sel.iter()
+                    .filter_map(|&id| self.track(id))
+                    .map(|t| format!("{} — {} [{}]", t.artist, t.title, t.album))
+                    .collect()
+            } else if let Some(t) = self.current_track() {
+                vec![format!("{} — {} [{}] ({})", t.artist, t.title, t.album, t.quality_full())]
+            } else {
+                Vec::new()
+            };
+            if !lines.is_empty() {
+                let count = lines.len();
+                context.copy_text(lines.join("\n"));
+                self.set_status(if count == 1 {
+                    "Copied track info to clipboard".into()
+                } else {
+                    format!("Copied {count} track(s) to clipboard")
+                });
+            }
             return;
         }
         if cmd && context.input(|i| i.key_pressed(egui::Key::B)) {
@@ -7698,6 +7832,8 @@ impl TxPlayerApp {
             } else if body_resp.double_clicked() {
                 play_target = Some((row_idx, track.id));
                 self.select_row_click(row_idx, track.id, tracks, false, false);
+            } else if body_resp.middle_clicked() {
+                quick_enqueue = Some(track.id);
             } else if body_resp.clicked() {
                 self.select_row_click(row_idx, track.id, tracks, cmd, shift);
             }
@@ -7850,10 +7986,30 @@ impl TxPlayerApp {
                         ui.close();
                     }
                     ui.menu_button("Rating", |ui| {
-                        for stars in (1..=5u8).rev() {
-                            let lbl = "★".repeat(stars as usize);
-                            if ui.button(lbl).clicked() {
-                                ctx_action = Some(ContextMenuAction::SetRating(tid, stars));
+                        ui.horizontal(|ui| {
+                            if let Some(next_half) = icons::interactive_half_star_rating(
+                                ui,
+                                track.rating,
+                                6.0,
+                                2.5,
+                                p.hires_gold,
+                                p.faint,
+                            ) {
+                                ctx_action = Some(ContextMenuAction::SetRating(tid, next_half));
+                                ui.close();
+                            }
+                        });
+                        ui.separator();
+                        for half in (1..=10u8).rev() {
+                            let lbl = format!("{:.1} / 5.0", half as f32 * 0.5);
+                            let selected = track.rating == half;
+                            let text = if selected {
+                                RichText::new(format!("• {lbl}")).strong().color(p.hires_gold)
+                            } else {
+                                RichText::new(lbl)
+                            };
+                            if ui.button(text).clicked() {
+                                ctx_action = Some(ContextMenuAction::SetRating(tid, half));
                                 ui.close();
                             }
                         }
@@ -9335,22 +9491,40 @@ impl TxPlayerApp {
                     ui.add_space(4.0);
                     // Acoustic Waveform / Studio Precision Scrubber
                     ui.horizontal(|ui| {
-                        let time_w = 42.0;
+                        let time_w = 46.0;
+                        let duration = self.duration.max(0.0);
                         ui.allocate_ui_with_layout(
                             vec2(time_w, 28.0),
                             Layout::right_to_left(Align::Center),
                             |ui| {
-                                ui.label(
-                                    RichText::new(format_duration(Some(self.position)))
-                                        .size(10.5)
-                                        .monospace()
-                                        .color(p.muted),
+                                let left_text = if self.show_remaining && duration > 0.0 {
+                                    format!(
+                                        "-{}",
+                                        format_duration(Some((duration - self.position).max(0.0)))
+                                    )
+                                } else {
+                                    format_duration(Some(self.position))
+                                };
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        RichText::new(left_text)
+                                            .size(10.5)
+                                            .monospace()
+                                            .color(p.muted),
+                                    )
+                                    .sense(Sense::click()),
                                 );
+                                if resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Click to toggle elapsed / remaining time")
+                                    .clicked()
+                                {
+                                    self.show_remaining = !self.show_remaining;
+                                }
                             },
                         );
 
                         let bar_w = (center_w - time_w * 2.0 - 16.0).max(90.0);
-                        let duration = self.duration.max(0.0);
                         let active = self.current_id().is_some() && duration > 0.01;
                         let waveform = self.current_id().and_then(|id| self.waveforms.get(&id));
                         if let Some(new_pos) = acoustic_timeline_scrubber(
@@ -9372,18 +9546,11 @@ impl TxPlayerApp {
                             vec2(time_w, 28.0),
                             Layout::left_to_right(Align::Center),
                             |ui| {
-                                let right_text = if self.show_remaining && duration > 0.0 {
-                                    format!(
-                                        "-{}",
-                                        format_duration(Some((duration - self.position).max(0.0)))
-                                    )
+                                let right_text = format_duration(if duration > 0.0 {
+                                    Some(duration)
                                 } else {
-                                    format_duration(if duration > 0.0 {
-                                        Some(duration)
-                                    } else {
-                                        None
-                                    })
-                                };
+                                    None
+                                });
                                 let resp = ui.add(
                                     egui::Label::new(
                                         RichText::new(right_text)
@@ -9394,7 +9561,8 @@ impl TxPlayerApp {
                                     .sense(Sense::click()),
                                 );
                                 if resp
-                                    .on_hover_text("Click to toggle remaining / total time")
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Click to toggle elapsed / remaining time")
                                     .clicked()
                                 {
                                     self.show_remaining = !self.show_remaining;
@@ -10278,6 +10446,9 @@ impl TxPlayerApp {
             let mut open = self.show_libraries_modal;
             let mut switch_to: Option<u64> = None;
             let mut delete_id: Option<u64> = None;
+            let mut commit_rename: Option<(u64, String)> = None;
+            let mut cancel_rename = false;
+            let mut start_rename: Option<(u64, String)> = None;
             let mut create_clicked = false;
             let libs: Vec<(u64, String, usize, usize)> = self
                 .store
@@ -10292,7 +10463,7 @@ impl TxPlayerApp {
                 "Libraries",
                 Icon::Library,
                 None,
-                [440.0, 320.0],
+                [480.0, 350.0],
                 None,
                 false,
                 &mut open,
@@ -10300,7 +10471,7 @@ impl TxPlayerApp {
                 |ui| {
                     ui.label(
                         RichText::new(
-                            "Separate your music collections (e.g. Classical & Piano, Jazz Hi-Res, Studio Masters).",
+                            "Rename any library (including Main Library) or create separate collections (Classical, Jazz Hi-Res, Studio Masters).",
                         )
                         .size(11.0)
                         .color(p.muted),
@@ -10308,6 +10479,10 @@ impl TxPlayerApp {
                     ui.add_space(8.0);
                     for (id, name, track_n, pl_n) in &libs {
                         let is_active = *id == self.store.active_id;
+                        let is_renaming = self
+                            .renaming_library
+                            .as_ref()
+                            .is_some_and(|(rid, _)| rid == id);
                         Frame::new()
                             .fill(if is_active { p.selected } else { p.surface })
                             .stroke(Stroke::new(
@@ -10318,54 +10493,107 @@ impl TxPlayerApp {
                             .inner_margin(Margin::symmetric(10, 6))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
-                                        ui.label(
-                                            RichText::new(name)
-                                                .size(12.5)
-                                                .strong()
-                                                .color(p.text),
-                                        );
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{track_n} tracks · {pl_n} playlists"
-                                            ))
-                                            .size(10.0)
-                                            .color(p.muted),
-                                        );
-                                    });
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if libs.len() > 1
-                                            && pill_button(
-                                                ui,
-                                                "Delete",
-                                                Some(Icon::Trash),
-                                                PillStyle::Danger,
-                                                &p,
-                                            )
-                                            .clicked()
-                                        {
-                                            delete_id = Some(*id);
-                                        }
-                                        if !is_active
-                                            && pill_button(
-                                                ui,
-                                                "Switch",
-                                                None,
-                                                PillStyle::Active,
-                                                &p,
-                                            )
-                                            .clicked()
-                                        {
-                                            switch_to = Some(*id);
-                                        } else if is_active {
-                                            ui.label(
-                                                RichText::new("Active")
-                                                    .size(10.5)
-                                                    .strong()
-                                                    .color(p.accent),
+                                    if is_renaming {
+                                        if let Some((_, ref mut draft)) = self.renaming_library {
+                                            let resp = ui.add_sized(
+                                                [230.0, 24.0],
+                                                egui::TextEdit::singleline(draft)
+                                                    .hint_text("Library name"),
                                             );
+                                            if resp.lost_focus()
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                            {
+                                                commit_rename = Some((*id, draft.clone()));
+                                            }
+                                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                                cancel_rename = true;
+                                            }
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                if pill_button(
+                                                    ui,
+                                                    "Cancel",
+                                                    None,
+                                                    PillStyle::Secondary,
+                                                    &p,
+                                                )
+                                                .clicked()
+                                                {
+                                                    cancel_rename = true;
+                                                }
+                                                if pill_button(
+                                                    ui,
+                                                    "Save",
+                                                    Some(Icon::Check),
+                                                    PillStyle::Accent,
+                                                    &p,
+                                                )
+                                                .clicked()
+                                                {
+                                                    commit_rename = Some((*id, draft.clone()));
+                                                }
+                                            });
                                         }
-                                    });
+                                    } else {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                RichText::new(name)
+                                                    .size(12.5)
+                                                    .strong()
+                                                    .color(p.text),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{track_n} tracks · {pl_n} playlists"
+                                                ))
+                                                .size(10.0)
+                                                .color(p.muted),
+                                            );
+                                        });
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            if libs.len() > 1
+                                                && pill_button(
+                                                    ui,
+                                                    "Delete",
+                                                    Some(Icon::Trash),
+                                                    PillStyle::Danger,
+                                                    &p,
+                                                )
+                                                .clicked()
+                                            {
+                                                delete_id = Some(*id);
+                                            }
+                                            if pill_button(
+                                                ui,
+                                                "Rename",
+                                                Some(Icon::Tag),
+                                                PillStyle::Secondary,
+                                                &p,
+                                            )
+                                            .clicked()
+                                            {
+                                                start_rename = Some((*id, name.clone()));
+                                            }
+                                            if !is_active
+                                                && pill_button(
+                                                    ui,
+                                                    "Switch",
+                                                    None,
+                                                    PillStyle::Active,
+                                                    &p,
+                                                )
+                                                .clicked()
+                                            {
+                                                switch_to = Some(*id);
+                                            } else if is_active {
+                                                ui.label(
+                                                    RichText::new("Active")
+                                                        .size(10.5)
+                                                        .strong()
+                                                        .color(p.accent),
+                                                );
+                                            }
+                                        });
+                                    }
                                 });
                             });
                         ui.add_space(4.0);
@@ -10373,7 +10601,7 @@ impl TxPlayerApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let resp = ui.add_sized(
-                            [280.0, 24.0],
+                            [310.0, 24.0],
                             egui::TextEdit::singleline(&mut self.new_library_name)
                                 .hint_text("New library name (e.g. Classical Piano)"),
                         );
@@ -10387,6 +10615,22 @@ impl TxPlayerApp {
                     });
                 });
             self.show_libraries_modal = open;
+            if !open {
+                self.renaming_library = None;
+            }
+            if cancel_rename {
+                self.renaming_library = None;
+            }
+            if let Some((rid, cur_name)) = start_rename {
+                self.renaming_library = Some((rid, cur_name));
+            }
+            if let Some((rid, new_name)) = commit_rename {
+                if let Some(updated) = self.store.rename_library(rid, new_name) {
+                    self.store.save();
+                    self.set_status(format!("Renamed library to \"{updated}\""));
+                }
+                self.renaming_library = None;
+            }
             if let Some(id) = switch_to {
                 self.store.active_id = id;
                 self.view = View::Library;
@@ -10397,6 +10641,9 @@ impl TxPlayerApp {
             if let Some(id) = delete_id
                 && let Some(name) = self.store.delete_library(id)
             {
+                if self.renaming_library.as_ref().is_some_and(|(rid, _)| *rid == id) {
+                    self.renaming_library = None;
+                }
                 self.view = View::Library;
                 self.folder_filter = None;
                 self.clear_selection();
@@ -10670,6 +10917,262 @@ impl TxPlayerApp {
                 self.execute_palette_command(context, cmd);
             }
         }
+
+        // 10) F12 Admin / Debug Diagnostics Console
+        if self.show_debug_console {
+            let mut open = self.show_debug_console;
+            let mut copy_dump = false;
+            let mut clear_logs = false;
+            let mut open_data_dir = false;
+            let entries = crate::debug_log::snapshot();
+
+            let stream_summary = if let Some(ref s) = self.stream_info {
+                format!(
+                    "{} · {} Hz -> {} Hz · {}ch · {} · BitPerfect={} · Exclusive={} · HwSwitch={} · RAM={}MB",
+                    s.device_name,
+                    s.source_rate,
+                    s.output_rate,
+                    s.channels,
+                    s.output_format,
+                    s.bit_perfect,
+                    s.exclusive_active,
+                    s.hw_rate_switched,
+                    s.ram_bytes.unwrap_or(0) / (1024 * 1024)
+                )
+            } else {
+                "Idle (no active stream)".into()
+            };
+            let current_summary = if let Some(t) = self.current_track() {
+                format!(
+                    "{} — {} [{} · {}Hz · {}bit] ({})",
+                    t.artist,
+                    t.title,
+                    t.codec,
+                    t.sample_rate.unwrap_or(0),
+                    t.bit_depth.unwrap_or(0),
+                    t.path.display()
+                )
+            } else {
+                "None".into()
+            };
+            let data_dir = data_directory();
+            let env_line = format!(
+                "TxPlayer v{} · OS={} ({}) · DataDir={} · Library=\"{}\" ({} tracks) · Queue={} · Playing={} · DSP={} · DoP={}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                data_dir.display(),
+                self.store.active().name,
+                self.store.active().tracks.len(),
+                self.current_queue.len(),
+                self.playing,
+                self.plugins.dsp.enabled,
+                self.plugins.dsp.dsd_dop
+            );
+
+            modals::themed_modal_window(
+                context,
+                "admin_debug_console",
+                "Admin / Debug Console (F12)",
+                Icon::Info,
+                Some("Live audio engine, DSD/DAC negotiation, IPC & diagnostic event log"),
+                [760.0, 520.0],
+                Some([560.0, 360.0]),
+                true,
+                &mut open,
+                &p,
+                |ui| {
+                    // System & Audio Engine Telemetry Card
+                    Frame::new()
+                        .fill(p.surface)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(6.0)
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(&env_line)
+                                    .size(10.5)
+                                    .monospace()
+                                    .color(p.text),
+                            );
+                            ui.label(
+                                RichText::new(format!("Stream: {stream_summary}"))
+                                    .size(10.5)
+                                    .monospace()
+                                    .color(p.accent),
+                            );
+                            ui.label(
+                                RichText::new(format!("Track:  {current_summary}"))
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(p.muted),
+                            );
+                        });
+                    ui.add_space(8.0);
+
+                    // Filter toolbar
+                    ui.horizontal(|ui| {
+                        for (lvl, label) in [
+                            (None, "All"),
+                            (Some(crate::debug_log::LogLevel::Audio), "Audio"),
+                            (Some(crate::debug_log::LogLevel::Ipc), "IPC"),
+                            (Some(crate::debug_log::LogLevel::Warn), "Warn"),
+                            (Some(crate::debug_log::LogLevel::Error), "Err"),
+                        ] {
+                            let active = self.debug_log_level == lvl;
+                            if pill_button(
+                                ui,
+                                label,
+                                None,
+                                if active {
+                                    PillStyle::Accent
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                &p,
+                            )
+                            .clicked()
+                            {
+                                self.debug_log_level = lvl;
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.add_sized(
+                            [165.0, 22.0],
+                            egui::TextEdit::singleline(&mut self.debug_log_filter)
+                                .hint_text("Filter logs…"),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if pill_button(ui, "Clear", Some(Icon::Trash), PillStyle::Secondary, &p)
+                                .clicked()
+                            {
+                                clear_logs = true;
+                            }
+                            if pill_button(
+                                ui,
+                                "Data Folder",
+                                Some(Icon::Folder),
+                                PillStyle::Secondary,
+                                &p,
+                            )
+                            .clicked()
+                            {
+                                open_data_dir = true;
+                            }
+                            if pill_button(
+                                ui,
+                                "Copy Diagnostics",
+                                Some(Icon::Check),
+                                PillStyle::Accent,
+                                &p,
+                            )
+                            .clicked()
+                            {
+                                copy_dump = true;
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+
+                    let needle = self.debug_log_filter.trim().to_lowercase();
+                    let filtered: Vec<&crate::debug_log::LogEntry> = entries
+                        .iter()
+                        .filter(|e| self.debug_log_level.is_none_or(|lvl| e.level == lvl))
+                        .filter(|e| {
+                            needle.is_empty()
+                                || e.message.to_lowercase().contains(&needle)
+                                || e.level.tag().to_lowercase().contains(&needle)
+                        })
+                        .collect();
+
+                    Frame::new()
+                        .fill(p.background)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(6.0)
+                        .inner_margin(Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            ScrollArea::vertical()
+                                .id_salt("debug_console_scroll")
+                                .max_height(310.0)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    if filtered.is_empty() {
+                                        ui.label(
+                                            RichText::new("No matching log events.")
+                                                .size(11.0)
+                                                .monospace()
+                                                .color(p.muted),
+                                        );
+                                    } else {
+                                        for e in &filtered {
+                                            let lvl_color = match e.level {
+                                                crate::debug_log::LogLevel::Info => p.muted,
+                                                crate::debug_log::LogLevel::Audio => p.accent,
+                                                crate::debug_log::LogLevel::Ipc => p.accent_secondary,
+                                                crate::debug_log::LogLevel::Warn => p.hires_gold,
+                                                crate::debug_log::LogLevel::Error => p.danger,
+                                            };
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                ui.label(
+                                                    RichText::new(&e.timestamp)
+                                                        .size(10.0)
+                                                        .monospace()
+                                                        .color(p.faint),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!("[{:5}]", e.level.tag()))
+                                                        .size(10.0)
+                                                        .monospace()
+                                                        .strong()
+                                                        .color(lvl_color),
+                                                );
+                                                ui.label(
+                                                    RichText::new(&e.message)
+                                                        .size(10.5)
+                                                        .monospace()
+                                                        .color(p.text),
+                                                );
+                                            });
+                                        }
+                                    }
+                                });
+                        });
+                },
+            );
+            self.show_debug_console = open;
+            if clear_logs {
+                crate::debug_log::clear();
+                crate::debug_log::info("Debug console log cleared");
+            }
+            if open_data_dir {
+                let dir = data_directory();
+                let _ = std::fs::create_dir_all(&dir);
+                reveal_in_file_manager(&dir);
+            }
+            if copy_dump {
+                let mut report = String::new();
+                report.push_str(&format!("{env_line}\n"));
+                report.push_str(&format!("Stream: {stream_summary}\n"));
+                report.push_str(&format!("Track: {current_summary}\n"));
+                report.push_str("Devices:\n");
+                for dev in &self.available_devices {
+                    report.push_str(&format!("  - {dev}\n"));
+                }
+                report.push_str("\n--- Event Log ---\n");
+                for e in &entries {
+                    report.push_str(&format!(
+                        "{} [{:5}] {}\n",
+                        e.timestamp,
+                        e.level.tag(),
+                        e.message
+                    ));
+                }
+                context.copy_text(report);
+                self.set_status("Copied full Admin / Debug diagnostics report to clipboard".into());
+            }
+        }
     }
 
     fn build_palette_entries(&self) -> Vec<PaletteEntry> {
@@ -10896,6 +11399,12 @@ impl TxPlayerApp {
             label: "Open Quick Guide & Shortcuts Reference (F1)".into(),
             subtitle: "First steps, shortcuts, Power-Search tokens & DSP guide".into(),
             action: PaletteCommand::OpenQuickHelp,
+        });
+        entries.push(PaletteEntry {
+            category: "DEBUG",
+            label: "Open Admin / Debug Diagnostics Console (F12)".into(),
+            subtitle: "Live audio engine, DSD/DAC stream, IPC & error logs + copy report".into(),
+            action: PaletteCommand::OpenDebugConsole,
         });
         entries.push(PaletteEntry {
             category: "AUDIO",
@@ -11163,6 +11672,7 @@ impl TxPlayerApp {
                 self.export_catalog_dialog(html, title, Some(ids));
             }
             PaletteCommand::OpenQuickHelp => self.show_quick_help = true,
+            PaletteCommand::OpenDebugConsole => self.show_debug_console = true,
             PaletteCommand::OpenAbxLab => self.abx_lab.open = true,
             PaletteCommand::ToggleLanRemote => {
                 self.plugins.lan_remote_enabled = !self.plugins.lan_remote_enabled;
@@ -11195,6 +11705,7 @@ impl TxPlayerApp {
             || self.rename_playlist_modal.is_some()
             || (self.compact_mode && self.show_lyrics)
             || self.command_palette.open
+            || self.show_debug_console
     }
 
     fn set_compact_mode(&mut self, ctx: &egui::Context, compact: bool) {
@@ -11714,7 +12225,7 @@ impl TxPlayerApp {
                 let active = self.current_id().is_some() && duration > 0.01;
                 let waveform = self.current_id().and_then(|id| self.waveforms.get(&id));
                 let full_w = ui.available_width();
-                let time_w = 38.0;
+                let time_w = 42.0;
                 let bar_w = (full_w - time_w * 2.0 - 12.0).max(120.0);
                 ui.horizontal(|ui| {
                     ui.style_mut().spacing.item_spacing.x = 6.0;
@@ -11722,12 +12233,30 @@ impl TxPlayerApp {
                         vec2(time_w, 26.0),
                         Layout::right_to_left(Align::Center),
                         |ui| {
-                            ui.label(
-                                RichText::new(format_duration(Some(self.position)))
-                                    .size(10.0)
-                                    .monospace()
-                                    .color(p.muted),
-                            );
+                            let left_text = if self.show_remaining && duration > 0.0 {
+                                format!(
+                                    "-{}",
+                                    format_duration(Some((duration - self.position).max(0.0)))
+                                )
+                            } else {
+                                format_duration(Some(self.position))
+                            };
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(left_text)
+                                            .size(10.0)
+                                            .monospace()
+                                            .color(p.muted),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .on_hover_text("Click to toggle elapsed / remaining time")
+                                .clicked()
+                            {
+                                self.show_remaining = !self.show_remaining;
+                            }
                         },
                     );
                     if let Some(new_pos) = acoustic_timeline_scrubber(
@@ -11748,18 +12277,11 @@ impl TxPlayerApp {
                         vec2(time_w, 26.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            let right_text = if self.show_remaining && duration > 0.0 {
-                                format!(
-                                    "-{}",
-                                    format_duration(Some((duration - self.position).max(0.0)))
-                                )
+                            let right_text = format_duration(if duration > 0.0 {
+                                Some(duration)
                             } else {
-                                format_duration(if duration > 0.0 {
-                                    Some(duration)
-                                } else {
-                                    None
-                                })
-                            };
+                                None
+                            });
                             if ui
                                 .add(
                                     egui::Label::new(
@@ -11770,7 +12292,8 @@ impl TxPlayerApp {
                                     )
                                     .sense(Sense::click()),
                                 )
-                                .on_hover_text("Click to toggle remaining / total time")
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .on_hover_text("Click to toggle elapsed / remaining time")
                                 .clicked()
                             {
                                 self.show_remaining = !self.show_remaining;
@@ -12882,10 +13405,15 @@ impl TxPlayerApp {
                             .color(p.muted),
                     );
                     if track.rating > 0 {
-                        ui.label(
-                            RichText::new("★".repeat(track.rating as usize))
-                                .size(10.0)
-                                .color(p.hires_gold),
+                        let (sr, _) = ui.allocate_exact_size(vec2(62.0, 14.0), Sense::hover());
+                        icons::paint_star_row(
+                            ui.painter(),
+                            pos2(sr.left(), sr.center().y),
+                            track.rating,
+                            5.0,
+                            2.0,
+                            p.hires_gold,
+                            p.faint,
                         );
                     }
                     if is_fav {
@@ -13270,7 +13798,7 @@ impl eframe::App for TxPlayerApp {
         self.status_toast(&context);
 
         #[cfg(not(target_os = "macos"))]
-        handle_borderless_resize(&context);
+        handle_borderless_resize(&context, &p);
 
         if self.scanning
             || self.dialog_open
@@ -14349,7 +14877,14 @@ fn custom_volume_bar(ui: &mut Ui, width: f32, volume: f32, p: &Palette) -> Optio
     }
 
     let pct = (volume * 100.0).round() as u32;
-    let tip_resp = response.on_hover_text(format!("Volume: {pct}%"));
+    let tip_resp = response.on_hover_text(format!("Volume: {pct}% (scroll wheel to adjust)"));
+    if tip_resp.hovered() {
+        let scroll_y = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+        if scroll_y.abs() > 1.0 {
+            let delta = if scroll_y > 0.0 { 0.04 } else { -0.04 };
+            return Some((volume + delta).clamp(0.0, 1.0));
+        }
+    }
     if (tip_resp.clicked() || tip_resp.dragged())
         && let Some(pos) = tip_resp.interact_pointer_pos()
     {
@@ -14375,34 +14910,79 @@ fn format_library_duration(seconds: f64) -> String {
     }
 }
 
-/// 8-way invisible window edge/corner resize handles for borderless Windows & Linux builds.
+/// 8-way window edge & corner resize handles + visible hover resize cursors + bottom-right grip
+/// for borderless Windows & Linux builds (`with_decorations(false)`).
 #[cfg(not(target_os = "macos"))]
-fn handle_borderless_resize(ctx: &egui::Context) {
+fn handle_borderless_resize(ctx: &egui::Context, p: &Palette) {
     use egui::ResizeDirection;
-    let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
-        return;
-    };
-    if !ctx.input(|i| i.pointer.primary_pressed()) {
+    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+    if maximized || fullscreen {
         return;
     }
+
     let rect = ctx.content_rect();
-    let edge = 6.0;
-    let left = pos.x <= rect.left() + edge;
-    let right = pos.x >= rect.right() - edge;
-    let top = pos.y <= rect.top() + edge;
-    let bottom = pos.y >= rect.bottom() - edge;
-    let dir = match (left, right, top, bottom) {
-        (true, _, true, _) => Some(ResizeDirection::NorthWest),
-        (_, true, true, _) => Some(ResizeDirection::NorthEast),
-        (true, _, _, true) => Some(ResizeDirection::SouthWest),
-        (_, true, _, true) => Some(ResizeDirection::SouthEast),
-        (true, _, _, _) => Some(ResizeDirection::West),
-        (_, true, _, _) => Some(ResizeDirection::East),
-        (_, _, true, _) => Some(ResizeDirection::North),
-        (_, _, _, true) => Some(ResizeDirection::South),
-        _ => None,
+
+    // Subtle discoverable 3-line diagonal resize grip in bottom-right corner
+    let grip_painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("borderless_resize_grip"),
+    ));
+    let grip_col = Color32::from_rgba_unmultiplied(p.muted.r(), p.muted.g(), p.muted.b(), 120);
+    for offset in [4.0_f32, 8.0, 12.0] {
+        grip_painter.line_segment(
+            [
+                pos2(rect.right() - offset, rect.bottom() - 2.0),
+                pos2(rect.right() - 2.0, rect.bottom() - offset),
+            ],
+            Stroke::new(1.1, grip_col),
+        );
+    }
+
+    let Some(pos) = ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.interact_pos())) else {
+        return;
     };
+    let edge = 7.0;
+    let corner = 16.0;
+    let near_left = pos.x <= rect.left() + edge;
+    let near_right = pos.x >= rect.right() - edge;
+    let near_top = pos.y <= rect.top() + edge;
+    let near_bottom = pos.y >= rect.bottom() - edge;
+    let corner_left = pos.x <= rect.left() + corner;
+    let corner_right = pos.x >= rect.right() - corner;
+    let corner_top = pos.y <= rect.top() + corner;
+    let corner_bottom = pos.y >= rect.bottom() - corner;
+
+    let dir = if corner_left && corner_top {
+        Some(ResizeDirection::NorthWest)
+    } else if corner_right && corner_top {
+        Some(ResizeDirection::NorthEast)
+    } else if corner_left && corner_bottom {
+        Some(ResizeDirection::SouthWest)
+    } else if corner_right && corner_bottom {
+        Some(ResizeDirection::SouthEast)
+    } else if near_left {
+        Some(ResizeDirection::West)
+    } else if near_right {
+        Some(ResizeDirection::East)
+    } else if near_top {
+        Some(ResizeDirection::North)
+    } else if near_bottom {
+        Some(ResizeDirection::South)
+    } else {
+        None
+    };
+
     if let Some(d) = dir {
-        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(d));
+        let cursor = match d {
+            ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::ResizeNwSe,
+            ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::ResizeNeSw,
+            ResizeDirection::West | ResizeDirection::East => CursorIcon::ResizeHorizontal,
+            ResizeDirection::North | ResizeDirection::South => CursorIcon::ResizeVertical,
+        };
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(d));
+        }
     }
 }

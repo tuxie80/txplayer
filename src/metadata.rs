@@ -75,7 +75,7 @@ pub struct Track {
     pub effective_bandwidth_hz: Option<f32>,
     #[serde(default)]
     pub authenticity: Option<String>,
-    // Listening stats & user rating (0..=5)
+    // Listening stats & user rating (0..=10 half-stars, representing 0.0..=5.0 stars)
     #[serde(default)]
     pub play_count: u32,
     #[serde(default)]
@@ -246,9 +246,11 @@ impl Track {
                 continue;
             }
             if let Some(rest) = low.strip_prefix("rating>=")
-                && let Ok(r) = rest.parse::<u8>()
+                && let Ok(r) = rest.parse::<f32>()
             {
-                if self.rating < r {
+                // Half-star storage (`0..=10`): `rating>=4` or `rating>=4.5` maps to `8` or `9`
+                let min_half = (r * 2.0).round().clamp(0.0, 10.0) as u8;
+                if self.rating < min_half {
                     return false;
                 }
                 continue;
@@ -738,7 +740,7 @@ fn codec_name(codec: CodecType) -> &'static str {
     }
 }
 
-fn save_cover(directory: &Path, id: u64, data: &[u8], media_type: &str) -> Result<PathBuf> {
+fn save_cover(directory: &Path, _id: u64, data: &[u8], media_type: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(directory)?;
     let extension = if media_type.contains("png") {
         "png"
@@ -747,7 +749,12 @@ fn save_cover(directory: &Path, id: u64, data: &[u8], media_type: &str) -> Resul
     } else {
         "jpg"
     };
-    let path = directory.join(format!("{id:016x}.{extension}"));
+    // Deduplicate embedded album artwork by content hash so an album of 20 tracks
+    // writes 1 shared thumbnail file instead of 20 identical copies.
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    let content_hash = hasher.finish();
+    let path = directory.join(format!("art_{content_hash:016x}.{extension}"));
     if !path.exists() {
         std::fs::write(&path, data)?;
     }
@@ -866,13 +873,30 @@ mod tests {
             authenticity: Some("AuthenticHiRes".into()),
             play_count: 3,
             last_played_at: Some(100),
-            rating: 5,
+            rating: 9, // 4.5 stars in half-star scale
             added_at: 10,
         };
         assert!(t.matches_query("composer:beethoven dr>=12 rate>=96 #reference"));
-        assert!(t.matches_query("codec:flac label:grammophon rating>=5 work:27"));
+        assert!(t.matches_query("codec:flac label:grammophon rating>=4.5 work:27"));
+        assert!(!t.matches_query("rating>=5"));
         assert!(!t.matches_query("dr>=16"));
         assert!(!t.matches_query("rate>=192"));
         assert!(!t.matches_query("#vinyl"));
+    }
+
+    #[test]
+    fn save_cover_deduplicates_identical_album_artwork() {
+        let dir = std::env::temp_dir().join(format!(
+            "txplayer_cover_dedupe_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let art = b"\xff\xd8\xff\xe0FAKE_JPEG_ALBUM_ART_BYTES";
+        let p1 = save_cover(&dir, 1001, art, "image/jpeg").unwrap();
+        let p2 = save_cover(&dir, 1002, art, "image/jpeg").unwrap();
+        assert_eq!(p1, p2);
+        let count = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

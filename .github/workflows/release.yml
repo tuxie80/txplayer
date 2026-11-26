@@ -82,10 +82,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path target/windows, release-out | Out-Null
 
-          # Embed assets/AppIcon.png directly into a valid Vista+ PNG-compressed .ico container
-          python -c "import struct; png = open('assets/AppIcon.png','rb').read(); hdr = struct.pack('<HHH', 0, 1, 1); ent = struct.pack('<BBBBHHII', 0, 0, 0, 0, 1, 32, len(png), 22); open('target/windows/TxPlayer.ico','wb').write(hdr + ent + png)"
-
-          # Build Windows Setup.exe with Inno Setup
+          # Build Windows Setup.exe with Inno Setup (uses multi-resolution assets/TxPlayer.ico)
           $iscc = Get-Command iscc -ErrorAction SilentlyContinue
           if (-not $iscc) {
             $candidates = @(

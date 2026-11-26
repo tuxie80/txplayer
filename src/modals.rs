@@ -3268,33 +3268,23 @@ pub fn show_track_info_window(
                     ui.end_row();
                     ui.label(RichText::new("Rating").size(11.0).color(palette.faint));
                     ui.horizontal(|ui| {
-                        ui.style_mut().spacing.item_spacing.x = 2.0;
-                        for star in 1..=5u8 {
-                            let filled = star <= track.rating;
-                            if icons::icon_button(
-                                ui,
-                                Vec2::splat(20.0),
-                                if filled {
-                                    Icon::StarFilled
-                                } else {
-                                    Icon::StarOutline
-                                },
-                                13.0,
-                                if filled {
-                                    palette.hires_gold
-                                } else {
-                                    palette.faint
-                                },
-                                palette.hires_gold,
-                                palette.hover,
-                                &format!("Set {star}-star rating (click active star to clear)"),
-                            )
-                            .clicked()
-                            {
-                                let next = if track.rating == star { 0 } else { star };
-                                action = Some(TrackInfoAction::SetRating(next));
-                            }
+                        ui.style_mut().spacing.item_spacing.x = 6.0;
+                        if let Some(next_half) = icons::interactive_half_star_rating(
+                            ui,
+                            track.rating,
+                            6.5,
+                            3.0,
+                            palette.hires_gold,
+                            palette.faint,
+                        ) {
+                            action = Some(TrackInfoAction::SetRating(next_half));
                         }
+                        let rating_txt = if track.rating > 0 {
+                            format!("{:.1} / 5.0", track.rating as f32 * 0.5)
+                        } else {
+                            "Unrated".to_string()
+                        };
+                        ui.label(RichText::new(rating_txt).size(10.5).monospace().color(palette.muted));
                     });
                     ui.end_row();
                     ui.label(RichText::new("Location").size(11.0).color(palette.faint));
@@ -6777,6 +6767,7 @@ pub enum PaletteCommand {
     ExportViewCatalogMarkdown,
     OpenQuickHelp,
     OpenAbxLab,
+    OpenDebugConsole,
     ToggleLanRemote,
 }
 
@@ -7478,7 +7469,7 @@ pub fn show_abx_lab_modal(
                         ui.add_space(2.0);
                         ui.label(
                             RichText::new(if sig {
-                                "★ Statistically significant audible difference detected (p < 0.05)!"
+                                "Statistically significant audible difference detected (p < 0.05)!"
                             } else {
                                 "Inconclusive (p ≥ 0.05) — indistinguishable from chance so far."
                             })

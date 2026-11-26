@@ -6,6 +6,7 @@ mod app;
 mod archive;
 mod audio;
 mod cue;
+mod debug_log;
 mod dsd;
 mod dsp;
 mod exclusive;

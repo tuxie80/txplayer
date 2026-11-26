@@ -225,7 +225,20 @@ impl QueryRule {
             QueryField::SampleRateHz => match_num(t.sample_rate.map(|v| v as i64)),
             QueryField::BitDepth => match_num(t.bit_depth.map(|v| v as i64)),
             QueryField::DynamicRange => match_num(t.dr_score.map(|v| v as i64)),
-            QueryField::Rating => match_num(Some(t.rating as i64)),
+            QueryField::Rating => {
+                // Users enter star values like 4 or 4.5; internal storage is half-stars (0..=10)
+                let Some(rhs) = self.value.trim().parse::<f32>().ok() else {
+                    return false;
+                };
+                let lhs = t.rating as f32 / 2.0;
+                match self.op {
+                    QueryOp::Equals => (lhs - rhs).abs() < 0.01,
+                    QueryOp::NotEquals => (lhs - rhs).abs() >= 0.01,
+                    QueryOp::GreaterOrEq => lhs + 0.01 >= rhs,
+                    QueryOp::LessOrEq => lhs <= rhs + 0.01,
+                    _ => false,
+                }
+            }
             QueryField::PlayCount => match_num(Some(t.play_count as i64)),
             QueryField::Year => {
                 let y = t
@@ -332,6 +345,9 @@ pub struct Library {
     pub play_history: Vec<PlayHistoryEntry>,
     #[serde(default)]
     pub album_notes: HashMap<String, String>,
+    /// `2` = half-star scale (`0..=10`, i.e. 0.0–5.0 stars in 0.5 steps); `0` = legacy `0..=5` integer stars (auto-migrated on load).
+    #[serde(default)]
+    pub rating_scale: u8,
     /// O(1) lookup index (`track.id -> index in tracks`); rebuilt automatically on load/mutate.
     #[serde(skip)]
     id_index: HashMap<u64, usize>,
@@ -358,12 +374,24 @@ impl Default for Library {
             saved_views: Vec::new(),
             play_history: Vec::new(),
             album_notes: HashMap::new(),
+            rating_scale: 2,
             id_index: HashMap::new(),
         }
     }
 }
 
 impl Library {
+    pub fn migrate_ratings_if_needed(&mut self) {
+        if self.rating_scale < 2 {
+            for tr in &mut self.tracks {
+                if tr.rating <= 5 {
+                    tr.rating = tr.rating.saturating_mul(2).min(10);
+                }
+            }
+            self.rating_scale = 2;
+        }
+    }
+
     pub fn rebuild_index(&mut self) {
         self.id_index.clear();
         self.id_index.reserve(self.tracks.len());
@@ -467,7 +495,7 @@ impl Library {
 
     pub fn set_rating(&mut self, id: u64, rating: u8) {
         if let Some(t) = self.get_by_id_mut(id) {
-            t.rating = rating.min(5);
+            t.rating = rating.min(10);
         }
     }
 
@@ -1290,7 +1318,11 @@ impl Library {
                 opt_s(&t.authenticity),
                 opt_f(t.rg_track_gain_db),
                 opt_f(t.rg_album_gain_db),
-                t.rating,
+                if t.rating == 0 {
+                    String::new()
+                } else {
+                    format!("{:.1}", t.rating as f32 / 2.0)
+                },
                 t.play_count,
                 tags_joined,
                 esc(&t.path.to_string_lossy()),
@@ -1701,6 +1733,7 @@ impl LibraryStore {
                 store.active_id = store.libraries[0].id;
             }
             for lib in &mut store.libraries {
+                lib.migrate_ratings_if_needed();
                 lib.rebuild_index();
             }
             return store;
@@ -1714,6 +1747,7 @@ impl LibraryStore {
             if lib.name.trim().is_empty() {
                 lib.name = default_library_name();
             }
+            lib.migrate_ratings_if_needed();
             lib.rebuild_index();
             return Self {
                 schema_version: DB_SCHEMA_VERSION,
@@ -1741,6 +1775,7 @@ impl LibraryStore {
             store.active_id = store.libraries[0].id;
         }
         for lib in &mut store.libraries {
+            lib.migrate_ratings_if_needed();
             lib.rebuild_index();
         }
         store.schema_version = DB_SCHEMA_VERSION;
@@ -1791,6 +1826,16 @@ impl LibraryStore {
         });
         self.active_id = id;
         id
+    }
+
+    pub fn rename_library(&mut self, id: u64, new_name: String) -> Option<String> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let lib = self.libraries.iter_mut().find(|l| l.id == id)?;
+        lib.name = trimmed.to_string();
+        Some(lib.name.clone())
     }
 
     pub fn delete_library(&mut self, id: u64) -> Option<String> {
@@ -1962,17 +2007,86 @@ pub fn scan(paths: Vec<PathBuf>, events: Sender<ScanEvent>, cover_directory: Pat
     let _ = events.send(ScanEvent::Finished { found, failed });
 }
 
+/// Determines whether an install directory on Windows should hold self-contained
+/// portable data (`<exe_dir>/data`) instead of falling back to `%LOCALAPPDATA%\TxPlayer`.
+///
+/// Custom install paths (e.g. `D:\TxPlayer`), portable ZIP extractions, and user-writable
+/// non-system directories keep ALL data & cover art inside `<exe_dir>\data` so nothing is
+/// ever scattered into `AppData\Roaming` or `AppData\Local`.
+#[allow(dead_code)]
+fn should_use_portable_exe_dir(exe_dir: &Path) -> bool {
+    if exe_dir.join("portable.txt").exists() || exe_dir.join("data").is_dir() {
+        return true;
+    }
+    let normalized = exe_dir.to_string_lossy().replace('/', "\\").to_lowercase();
+    let is_protected_system_or_build = normalized.contains("\\program files\\")
+        || normalized.ends_with("\\program files")
+        || normalized.contains("\\program files (x86)\\")
+        || normalized.ends_with("\\program files (x86)")
+        || normalized.contains("\\windows\\")
+        || normalized.ends_with("\\windows")
+        || normalized.contains("\\target\\debug")
+        || normalized.contains("\\target\\release");
+    !is_protected_system_or_build
+}
+
+#[allow(dead_code)]
+fn try_writable_data_subdir(exe_dir: &Path) -> Option<PathBuf> {
+    if !should_use_portable_exe_dir(exe_dir) {
+        return None;
+    }
+    let data_dir = exe_dir.join("data");
+    std::fs::create_dir_all(&data_dir).ok()?;
+    let probe = data_dir.join(format!(".txplayer_write_probe_{}", std::process::id()));
+    std::fs::write(&probe, b"").ok()?;
+    let _ = std::fs::remove_file(&probe);
+    Some(data_dir)
+}
+
 pub fn data_directory() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("TxPlayer")
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::OnceLock;
+        static RESOLVED: OnceLock<PathBuf> = OnceLock::new();
+        RESOLVED
+            .get_or_init(|| {
+                if let Ok(exe) = std::env::current_exe()
+                    && let Some(exe_dir) = exe.parent()
+                    && let Some(portable) = try_writable_data_subdir(exe_dir)
+                {
+                    return portable;
+                }
+                // Fallback for read-only admin installs (e.g. C:\Program Files\TxPlayer):
+                // keep everything in ONE local directory (%LOCALAPPDATA%\TxPlayer) and NEVER
+                // touch AppData\Roaming.
+                dirs::data_local_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("TxPlayer")
+            })
+            .clone()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("TxPlayer")
+    }
 }
 
 pub fn cover_directory() -> PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(data_directory)
-        .join("TxPlayer")
-        .join("covers")
+    #[cfg(target_os = "windows")]
+    {
+        // Keep extracted cover thumbnails inside the same single data directory
+        // (e.g. D:\TxPlayer\data\covers) instead of scattering files into AppData\Local.
+        data_directory().join("covers")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::cache_dir()
+            .unwrap_or_else(data_directory)
+            .join("TxPlayer")
+            .join("covers")
+    }
 }
 
 #[cfg(test)]
@@ -2032,12 +2146,12 @@ mod tests {
         t1.composer = Some("Ludwig van Beethoven".into());
         t1.sample_rate = Some(192_000);
         t1.dr_score = Some(14);
-        t1.rating = 5;
+        t1.rating = 10;
         let mut t2 = sample_track(2, "/music/chopin_nocturne.dsf", "Nocturne Op.9 No.2");
         t2.codec = "DSD64".into();
         t2.sample_rate = Some(2_822_400);
         t2.dr_score = Some(11);
-        t2.rating = 4;
+        t2.rating = 8;
         lib.upsert(t1);
         lib.upsert(t2);
         assert_eq!(lib.add_custom_tag(&[1], "#reference"), 1);
@@ -2339,5 +2453,75 @@ mod tests {
 
         let _ = std::fs::remove_file(&md_path);
         let _ = std::fs::remove_file(&html_path);
+    }
+
+    #[test]
+    fn rename_library_and_half_star_migration_work() {
+        let mut store = LibraryStore::default();
+        let main_id = store.active_id;
+        assert_eq!(store.active().name, "Main Library");
+        let renamed = store.rename_library(main_id, "  Studio Masters  ".into());
+        assert_eq!(renamed.as_deref(), Some("Studio Masters"));
+        assert_eq!(store.active().name, "Studio Masters");
+        // Empty rename is rejected
+        assert_eq!(store.rename_library(main_id, "   ".into()), None);
+
+        // Simulate legacy 0..=5 integer star library and verify automatic ×2 migration
+        let mut lib = Library {
+            rating_scale: 1,
+            ..Library::default()
+        };
+        let mut t1 = sample_track(1, "/m/a.flac", "A");
+        t1.rating = 4; // legacy 4 stars -> 8 half-stars (4.0)
+        let mut t2 = sample_track(2, "/m/b.flac", "B");
+        t2.rating = 5; // legacy 5 stars -> 10 half-stars (5.0)
+        lib.upsert(t1);
+        lib.upsert(t2);
+        lib.migrate_ratings_if_needed();
+        assert_eq!(lib.rating_scale, 2);
+        assert_eq!(lib.get_by_id(1).unwrap().rating, 8);
+        assert_eq!(lib.get_by_id(2).unwrap().rating, 10);
+
+        // Half-star precision (4.5 stars = 9) + Smart View rule `Rating >= 4.5`
+        lib.set_rating(1, 9);
+        assert_eq!(lib.get_by_id(1).unwrap().rating, 9);
+        let rule = QueryRule {
+            field: QueryField::Rating,
+            op: QueryOp::GreaterOrEq,
+            value: "4.5".into(),
+        };
+        assert!(rule.matches(lib.get_by_id(1).unwrap()));
+        assert!(rule.matches(lib.get_by_id(2).unwrap()));
+        lib.set_rating(1, 8);
+        assert!(!rule.matches(lib.get_by_id(1).unwrap()));
+    }
+
+    #[test]
+    fn windows_portable_data_dir_policy_avoids_system_and_build_dirs() {
+        assert!(should_use_portable_exe_dir(Path::new(r"D:\TxPlayer")));
+        assert!(should_use_portable_exe_dir(Path::new(r"E:\Apps\Audio\TxPlayer")));
+        assert!(!should_use_portable_exe_dir(Path::new(
+            r"C:\Program Files\TxPlayer"
+        )));
+        assert!(!should_use_portable_exe_dir(Path::new(
+            r"C:\Program Files (x86)\TxPlayer"
+        )));
+        assert!(!should_use_portable_exe_dir(Path::new(
+            r"C:\Windows\System32"
+        )));
+        assert!(!should_use_portable_exe_dir(Path::new(
+            r"C:\dev\txplayer\target\debug\deps"
+        )));
+
+        let tmp = std::env::temp_dir().join(format!(
+            "txplayer_portable_dir_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let resolved = try_writable_data_subdir(&tmp).expect("writable custom dir");
+        assert_eq!(resolved, tmp.join("data"));
+        assert!(resolved.is_dir());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

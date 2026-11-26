@@ -47,7 +47,6 @@ pub enum Icon {
     List,
     Lyrics,
     StarFilled,
-    StarOutline,
     Grid,
 }
 
@@ -597,7 +596,7 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 );
             }
         }
-        Icon::StarFilled | Icon::StarOutline => {
+        Icon::StarFilled => {
             let r_out = s * 0.40;
             let r_in = s * 0.17;
             let mut pts = Vec::with_capacity(10);
@@ -606,16 +605,9 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 let r = if i % 2 == 0 { r_out } else { r_in };
                 pts.push(pos2(c.x + r * angle.cos(), c.y + r * angle.sin()));
             }
-            if icon == Icon::StarFilled {
-                for i in 0..10 {
-                    let next = (i + 1) % 10;
-                    painter.add(Shape::convex_polygon(vec![c, pts[i], pts[next]], color, Stroke::NONE));
-                }
-            } else {
-                for i in 0..10 {
-                    let next = (i + 1) % 10;
-                    painter.line_segment([pts[i], pts[next]], stroke);
-                }
+            for i in 0..10 {
+                let next = (i + 1) % 10;
+                painter.add(Shape::convex_polygon(vec![c, pts[i], pts[next]], color, Stroke::NONE));
             }
         }
         Icon::Grid => {
@@ -848,4 +840,141 @@ pub fn icon_button(
         );
     }
     response.on_hover_text(tooltip)
+}
+
+/// Paints a single crisp vector 5-pointed star (font-independent across Windows/macOS/Linux!).
+/// `fill_state`: `0` = empty outline, `1` = left half filled, `2` = fully filled.
+pub fn paint_star(
+    painter: &Painter,
+    center: Pos2,
+    radius: f32,
+    fill_state: u8,
+    fill_color: Color32,
+    empty_color: Color32,
+) {
+    let mut pts = Vec::with_capacity(10);
+    let inner_r = radius * 0.42;
+    for i in 0..10 {
+        let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * (std::f32::consts::PI / 5.0);
+        let r = if i % 2 == 0 { radius } else { inner_r };
+        pts.push(pos2(center.x + r * angle.cos(), center.y + r * angle.sin()));
+    }
+
+    // Triangulate star around center so concave polygon fills crisply in egui
+    let fill_tri = |p: &Painter, a: Pos2, b: Pos2, col: Color32| {
+        p.add(Shape::convex_polygon(vec![center, a, b], col, Stroke::NONE));
+    };
+
+    if fill_state >= 2 {
+        for i in 0..10 {
+            fill_tri(painter, pts[i], pts[(i + 1) % 10], fill_color);
+        }
+    } else if fill_state == 1 {
+        // Left half of the 5-pointed star: vertices 5..=9 -> 0
+        for i in 5..10 {
+            fill_tri(painter, pts[i], pts[(i + 1) % 10], fill_color);
+        }
+    }
+
+    let stroke_col = if fill_state > 0 { fill_color } else { empty_color };
+    let mut outline = pts;
+    outline.push(outline[0]);
+    painter.add(Shape::line(outline, Stroke::new(1.0, stroke_col)));
+}
+
+/// Paints a compact read-only row of 5 vector stars for a half-star rating (`0..=10`).
+pub fn paint_star_row(
+    painter: &Painter,
+    left_center: Pos2,
+    rating_half_stars: u8,
+    star_radius: f32,
+    spacing: f32,
+    fill_color: Color32,
+    empty_color: Color32,
+) {
+    let clamped = rating_half_stars.min(10);
+    for i in 0..5u8 {
+        let threshold_half = i * 2 + 1;
+        let threshold_full = i * 2 + 2;
+        let state = if clamped >= threshold_full {
+            2
+        } else if clamped >= threshold_half {
+            1
+        } else {
+            0
+        };
+        let cx = left_center.x + star_radius + i as f32 * (star_radius * 2.0 + spacing);
+        paint_star(
+            painter,
+            pos2(cx, left_center.y),
+            star_radius,
+            state,
+            fill_color,
+            empty_color,
+        );
+    }
+}
+
+/// Interactive 5-star widget supporting half-star precision (`0..=10`, i.e. `0.0` to `5.0` in `0.5` steps).
+/// Returns `Some(new_half_stars)` when clicked (clicking the current rating clears to `0`).
+pub fn interactive_half_star_rating(
+    ui: &mut egui::Ui,
+    current_half_stars: u8,
+    star_radius: f32,
+    spacing: f32,
+    fill_color: Color32,
+    empty_color: Color32,
+) -> Option<u8> {
+    let step_w = star_radius * 2.0 + spacing;
+    let total_w = star_radius * 2.0 * 5.0 + spacing * 4.0 + 2.0;
+    let total_h = (star_radius * 2.0 + 4.0).max(16.0);
+    let (rect, response) = ui.allocate_exact_size(vec2(total_w, total_h), egui::Sense::click());
+
+    let hover_rating = if response.hovered()
+        && let Some(pos) = ui.ctx().pointer_hover_pos()
+    {
+        let rel_x = (pos.x - rect.left()).clamp(0.0, total_w);
+        let star_idx = ((rel_x / step_w).floor() as u8).min(4);
+        let in_star = rel_x - star_idx as f32 * step_w;
+        let is_left_half = in_star < star_radius;
+        Some((star_idx * 2 + if is_left_half { 1 } else { 2 }).min(10))
+    } else {
+        None
+    };
+
+    if ui.is_rect_visible(rect) {
+        let display = hover_rating.unwrap_or(current_half_stars.min(10));
+        paint_star_row(
+            ui.painter(),
+            pos2(rect.left() + 1.0, rect.center().y),
+            display,
+            star_radius,
+            spacing,
+            fill_color,
+            empty_color,
+        );
+    }
+
+    let clicked_rating = if response.clicked() {
+        let target = hover_rating.unwrap_or(current_half_stars);
+        if target == current_half_stars {
+            Some(0)
+        } else {
+            Some(target)
+        }
+    } else {
+        None
+    };
+
+    let tip = match hover_rating {
+        Some(h) => format!("Set rating: {:.1} / 5.0 (click again to clear)", h as f32 * 0.5),
+        None if current_half_stars > 0 => format!(
+            "Rating: {:.1} / 5.0 · Click left/right half of any star",
+            current_half_stars as f32 * 0.5
+        ),
+        None => "Click left/right half of a star to rate (0.5–5.0)".to_string(),
+    };
+    response.on_hover_text(tip);
+
+    clicked_rating
 }
