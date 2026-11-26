@@ -12,6 +12,7 @@
 pub struct ExclusiveStatus {
     pub hog_acquired: bool,
     pub hw_rate_switched: bool,
+    #[allow(dead_code)]
     pub active_hw_rate: Option<u32>,
 }
 
@@ -46,9 +47,9 @@ impl ExclusiveDeviceGuard {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl Drop for ExclusiveDeviceGuard {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
         if let Some(dev_id) = self.device_id {
             if self.status.hog_acquired {
                 macos::set_hog_mode(dev_id, -1);

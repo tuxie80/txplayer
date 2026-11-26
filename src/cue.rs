@@ -93,11 +93,11 @@ pub fn decode_cue_bytes(raw: &[u8]) -> String {
 
 fn decode_utf16_bytes(bytes: &[u8], be: bool) -> String {
     let mut u16s = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for &pair in bytes.as_chunks::<2>().0 {
         let code = if be {
-            u16::from_be_bytes([pair[0], pair[1]])
+            u16::from_be_bytes(pair)
         } else {
-            u16::from_le_bytes([pair[0], pair[1]])
+            u16::from_le_bytes(pair)
         };
         u16s.push(code);
     }

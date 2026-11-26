@@ -2183,7 +2183,7 @@ fn try_play_dsd_dop(
                 let mut pk_r = 0.0_f32;
                 let mut fcnt = 0usize;
 
-                for frame in data.chunks_exact_mut(2) {
+                for frame in data.as_chunks_mut::<2>().0 {
                     if dop_cons.occupied_len() >= 2 {
                         frame[0] = dop_cons.try_pop().unwrap_or(0x0569_6900_u32 as i32);
                         frame[1] = dop_cons.try_pop().unwrap_or(0x0569_6900_u32 as i32);

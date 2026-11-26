@@ -495,8 +495,8 @@ impl ArchivePcmDecoder {
         }
         let frames = filled / frame_bytes;
         out.reserve(frames * ch);
-        for chunk in raw[..frames * frame_bytes].chunks_exact(4) {
-            let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for &chunk in raw[..frames * frame_bytes].as_chunks::<4>().0 {
+            let v = f32::from_le_bytes(chunk);
             out.push(if v.is_finite() { v } else { 0.0 });
         }
         Ok(frames)

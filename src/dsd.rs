@@ -234,7 +234,7 @@ impl DsdDopReader {
                     filled += n;
                 }
                 self.byte_cursor += (frames * 2) as u64;
-                for chunk in raw.chunks_exact(4) {
+                for &chunk in raw.as_chunks::<4>().0 {
                     let (l0, r0, l1, r1) = (chunk[0], chunk[1], chunk[2], chunk[3]);
                     let (wl, wr) = self.framer.pack_stereo_frame(l0, l1, r0, r1);
                     out_i32.push(wl);
@@ -348,7 +348,7 @@ fn parse_sacd_stereo_tracks(toc_buf: &[u8], track_count: usize) -> Vec<SacdIsoTr
     let mut durations = vec![0.0_f64; n];
     let mut titles: Vec<String> = (1..=n).map(|i| format!("SACD Track {i:02}")).collect();
 
-    for sec in toc_buf.chunks_exact(2048) {
+    for sec in toc_buf.as_chunks::<2048>().0 {
         if &sec[0..8] == b"SACDTRL1" {
             for i in 0..n {
                 let s_off = 8 + i * 4;
@@ -468,7 +468,7 @@ impl SacdIsoPcmDecoder {
         self.cursor_byte += usable as u64;
         let frames = usable / BYTES_PER_FRAME;
         out.reserve(frames * 2);
-        for frame_bytes in raw[..usable].chunks_exact(BYTES_PER_FRAME) {
+        for frame_bytes in raw[..usable].as_chunks::<BYTES_PER_FRAME>().0 {
             self.hist_l.copy_within(BPC..8, 0);
             self.hist_r.copy_within(BPC..8, 0);
             for k in 0..BPC {
@@ -756,8 +756,8 @@ impl DsdFirLut {
         }
 
         let mut lut = Box::new([[0.0_f64; 256]; 8]);
-        for byte_pos in 0..8 {
-            for val in 0..256usize {
+        for (byte_pos, table) in lut.iter_mut().enumerate() {
+            for (val, slot) in table.iter_mut().enumerate() {
                 let mut acc = 0.0_f64;
                 for bit in 0..8 {
                     let is_one = if lsb_first {
@@ -768,7 +768,7 @@ impl DsdFirLut {
                     let sign = if is_one { 1.0 } else { -1.0 };
                     acc += sign * h[byte_pos * 8 + bit];
                 }
-                lut[byte_pos][val] = acc;
+                *slot = acc;
             }
         }
         Self { lut }
@@ -820,9 +820,7 @@ impl DsdPcmDecoder {
         let step_bytes = (self.info.decimation_factor / 8).max(1) as u64;
         let target_byte = ((dsd_sample / 8) / step_bytes) * step_bytes;
         self.byte_cursor = target_byte.min(self.total_bytes_per_ch);
-        for h in &mut self.hist {
-            *h = [0x69; 8];
-        }
+        self.hist.fill([0x69; 8]);
         self.dsf_block_idx = None;
         Ok(())
     }
@@ -870,8 +868,7 @@ impl DsdPcmDecoder {
                         }
                         self.byte_cursor += 1;
                     }
-                    for c in 0..ch {
-                        let h = &self.hist[c];
+                    for h in &self.hist[..ch] {
                         let mut acc = 0.0_f64;
                         for (pos, &b) in h.iter().enumerate() {
                             acc += self.lut.lut[pos][b as usize];
@@ -897,17 +894,15 @@ impl DsdPcmDecoder {
                 let mut idx = 0usize;
                 for _ in 0..frames {
                     for _s in 0..step_bytes {
-                        for c in 0..ch {
+                        for h in &mut self.hist[..ch] {
                             let byte = raw[idx];
                             idx += 1;
-                            let h = &mut self.hist[c];
                             h.rotate_left(1);
                             h[7] = byte;
                         }
                         self.byte_cursor += 1;
                     }
-                    for c in 0..ch {
-                        let h = &self.hist[c];
+                    for h in &self.hist[..ch] {
                         let mut acc = 0.0_f64;
                         for (pos, &b) in h.iter().enumerate() {
                             acc += self.lut.lut[pos][b as usize];
@@ -965,11 +960,11 @@ impl RawCdBinDecoder {
         let actual_frames = n / 4;
         out.reserve(actual_frames * 2);
         let inv = 1.0_f32 / 32768.0;
-        for chunk in buf[..actual_frames * 4].chunks_exact(2) {
+        for &chunk in buf[..actual_frames * 4].as_chunks::<2>().0 {
             let s = if self.big_endian {
-                i16::from_be_bytes([chunk[0], chunk[1]])
+                i16::from_be_bytes(chunk)
             } else {
-                i16::from_le_bytes([chunk[0], chunk[1]])
+                i16::from_le_bytes(chunk)
             };
             out.push(s as f32 * inv);
         }
@@ -1086,11 +1081,11 @@ fn decode_utf16(bytes: &[u8], default_be: bool) -> String {
         (default_be, bytes)
     };
     let mut u16s = Vec::with_capacity(slice.len() / 2);
-    for ch in slice.chunks_exact(2) {
+    for &ch in slice.as_chunks::<2>().0 {
         let code = if be {
-            u16::from_be_bytes([ch[0], ch[1]])
+            u16::from_be_bytes(ch)
         } else {
-            u16::from_le_bytes([ch[0], ch[1]])
+            u16::from_le_bytes(ch)
         };
         if code == 0 {
             break;
@@ -1115,8 +1110,10 @@ fn parse_id3_apic(body: &[u8]) -> Option<(Vec<u8>, String)> {
     }
     let desc = &rest[desc_start..];
     let img_rel = if enc == 1 || enc == 2 {
-        desc.chunks_exact(2)
-            .position(|c| c == [0, 0])
+        desc.as_chunks::<2>()
+            .0
+            .iter()
+            .position(|&c| c == [0, 0])
             .map(|i| i * 2 + 2)?
     } else {
         desc.iter().position(|&b| b == 0).map(|i| i + 1)?

@@ -227,7 +227,7 @@ fn is_preserved_acronym_or_roman(word: &str) -> bool {
         return false;
     }
     let upper = clean.to_uppercase();
-    if matches!(
+    matches!(
         upper.as_str(),
         "II" | "III"
             | "IV"
@@ -250,10 +250,7 @@ fn is_preserved_acronym_or_roman(word: &str) -> bool {
             | "NYP"
             | "DG"
             | "ECM"
-    ) {
-        return true;
-    }
-    false
+    )
 }
 
 fn smart_title_case(input: &str) -> String {
