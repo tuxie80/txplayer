@@ -12,6 +12,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::analyzer::{AudioAnalysis, HiResVerdict, analyze_file};
+use crate::abx::{AbxLabState, AbxSlot, compute_loudness_match_trims};
 use crate::audio::{
     AudioEvent, AudioHandle, PlaybackSpec, VisualTap, compute_waveform, default_output_device_name,
     list_output_devices,
@@ -26,10 +27,10 @@ use crate::metadata::{
     QualityTier, SUPPORTED_EXTENSIONS, Track, format_duration, format_sample_rate,
 };
 use crate::modals::{
-    self, CommandPaletteState, DbHealthAction, FolderModalAction, LibraryInsightsAction,
-    PaletteCommand, PaletteEntry, PillStyle, ProgressBarStyle, RowDensity, SettingsTab,
-    SignalPathDisplay, SleepTimerPreset, SmartViewDraft, TagEditorAction, TagEditorState,
-    TagWorkerEvent, TrackInfoAction, collection_accent_color, pill_button,
+    self, AbxLabAction, CommandPaletteState, DbHealthAction, FolderModalAction,
+    LibraryInsightsAction, PaletteCommand, PaletteEntry, PillStyle, ProgressBarStyle, QuickHelpTab,
+    RowDensity, SettingsTab, SignalPathDisplay, SleepTimerPreset, SmartViewDraft, TagEditorAction,
+    TagEditorState, TagWorkerEvent, TrackInfoAction, collection_accent_color, pill_button,
 };
 use crate::platform::{
     FILE_MANAGER_NAME, MOD_SHORT, open_file_with_default_app, reveal_in_file_manager,
@@ -39,6 +40,7 @@ use crate::plugins::{
     DeviceProfile, EqPreset, IrPreset, OversamplingMode, PianoEngineId, PluginConfig,
     ReplayGainMode, ResamplerQuality, ToolHealth, parse_autoeq_txt,
 };
+use crate::remote::{LanRemoteServer, RemoteCommand, RemoteSnapshot, RemoteTrackSummary};
 use crate::theme::{self, Palette, ThemeId};
 use crate::tray::{SystemTrayBridge, TrayCommand};
 use crate::visualizer::{VisualizerMode, VisualizerState};
@@ -716,6 +718,11 @@ pub struct TxPlayerApp {
     smart_view_draft: Option<SmartViewDraft>,
     show_library_insights: bool,
     show_db_health: bool,
+    show_quick_help: bool,
+    quick_help_tab: QuickHelpTab,
+    abx_lab: AbxLabState,
+    lan_remote: LanRemoteServer,
+    lan_remote_last_sync: Instant,
     editing_album_note: Option<(String, String, String)>,
     rename_playlist_modal: Option<(u64, String)>,
     inspect_track_id: Option<u64>,
@@ -972,6 +979,11 @@ impl TxPlayerApp {
             smart_view_draft: None,
             show_library_insights: false,
             show_db_health: false,
+            show_quick_help: false,
+            quick_help_tab: QuickHelpTab::FirstSteps,
+            abx_lab: AbxLabState::default(),
+            lan_remote: LanRemoteServer::new(),
+            lan_remote_last_sync: Instant::now(),
             editing_album_note: None,
             rename_playlist_modal: None,
             inspect_track_id: None,
@@ -1049,6 +1061,30 @@ impl TxPlayerApp {
             app.visualizer.show_piano_keys = true;
             app.visualizer.seed_demo_piano_state();
             app.demo_piano_lock = true;
+        }
+        if arguments.iter().any(|a| a == "--demo-spectrogram") {
+            app.show_concert_visualizer = true;
+            app.visualizer.seed_demo_spectrogram_state();
+            app.demo_piano_lock = true;
+        }
+        if arguments.iter().any(|a| a == "--open-insights") {
+            app.show_library_insights = true;
+        }
+        if arguments.iter().any(|a| a == "--open-help") {
+            app.show_quick_help = true;
+        }
+        if arguments.iter().any(|a| a == "--open-abx") {
+            app.abx_lab.open = true;
+            let ids: Vec<u64> = app.store.active().tracks.iter().take(2).map(|t| t.id).collect();
+            if let Some(&a) = ids.first() {
+                app.abx_lab.track_a_id = Some(a);
+            }
+            if let Some(&b) = ids.get(1) {
+                app.abx_lab.track_b_id = Some(b);
+            }
+        }
+        if app.plugins.lan_remote_enabled && !arguments.iter().any(|a| a == "--screenshot") {
+            app.lan_remote.start(app.plugins.lan_remote_port);
         }
         if let Some(index) = arguments.iter().position(|a| a == "--screenshot")
             && let Some(path) = arguments.get(index + 1)
@@ -2499,7 +2535,18 @@ impl TxPlayerApp {
         let clamped = speed.clamp(0.5, 2.0);
         self.playback_speed = clamped;
         self.audio.set_speed(clamped);
-        self.set_status(format!("Playback speed: {:.2}x", clamped));
+        self.plugins.dsp.playback_speed_hint = clamped;
+        if self.plugins.dsp.preserve_pitch && (clamped - 1.0).abs() > 0.01 {
+            self.plugins.dsp.enabled = true;
+            self.plugins.dsp.bit_perfect_mode = false;
+        }
+        self.audio.update_dsp(&self.plugins.dsp);
+        let pitch_note = if self.plugins.dsp.preserve_pitch && (clamped - 1.0).abs() > 0.01 {
+            " (Pitch-Locked)"
+        } else {
+            ""
+        };
+        self.set_status(format!("Playback speed: {:.2}x{pitch_note}", clamped));
     }
 
     fn set_loop_a(&mut self) {
@@ -3515,9 +3562,81 @@ impl TxPlayerApp {
                                 } else {
                                     format!(" · {}", info.publisher)
                                 };
-                                self.set_status(format!(
-                                    "SACD ISO: \"{title}\" — {artist}{yr}{pub_s} [{areas}]"
-                                ));
+                                if !info.tracks.is_empty() && !info.is_dst_compressed {
+                                    let mut cursor_secs = 0.0_f64;
+                                    let mut imported = 0usize;
+                                    for tr in &info.tracks {
+                                        let start = cursor_secs;
+                                        let id = crate::metadata::cue_track_id(
+                                            &src,
+                                            tr.track_number,
+                                            start,
+                                        );
+                                        let end = cursor_secs + tr.duration_secs;
+                                        cursor_secs = end;
+                                        self.store.active_mut().upsert(Track {
+                                            id,
+                                            path: src.clone(),
+                                            title: tr.title.clone(),
+                                            artist: artist.clone(),
+                                            album: title.clone(),
+                                            album_artist: Some(artist.clone()),
+                                            track_number: Some(tr.track_number),
+                                            disc_number: Some(1),
+                                            year: (info.disc_year > 0)
+                                                .then(|| info.disc_year.to_string()),
+                                            genre: Some("SACD".into()),
+                                            duration: Some(tr.duration_secs),
+                                            sample_rate: Some(2_822_400),
+                                            bit_depth: Some(1),
+                                            channels: Some(2),
+                                            codec: "DSD64".into(),
+                                            nominal_bitrate: Some(5645),
+                                            cover_path: None,
+                                            cue_start: Some(start),
+                                            cue_end: Some(end),
+                                            rg_track_gain_db: None,
+                                            rg_track_peak: None,
+                                            rg_album_gain_db: None,
+                                            rg_album_peak: None,
+                                            lyrics: None,
+                                            composer: None,
+                                            conductor: None,
+                                            orchestra: None,
+                                            work: None,
+                                            label: (!info.publisher.is_empty())
+                                                .then(|| info.publisher.clone()),
+                                            catalog_number: None,
+                                            comment: Some("Imported from SACD .iso".into()),
+                                            custom_tags: vec!["sacd".into()],
+                                            dr_score: None,
+                                            integrated_lufs: None,
+                                            true_peak_dbtp: None,
+                                            effective_bandwidth_hz: None,
+                                            authenticity: None,
+                                            play_count: 0,
+                                            last_played_at: None,
+                                            rating: 0,
+                                            added_at: 0,
+                                        });
+                                        imported += 1;
+                                    }
+                                    self.mark_library_dirty();
+                                    self.store.save();
+                                    self.set_status(format!(
+                                        "Imported {imported} SACD Stereo track(s) from \"{title}\" — {artist}{yr}{pub_s}"
+                                    ));
+                                } else {
+                                    let dst_note = if info.is_dst_compressed {
+                                        " · DST compressed"
+                                    } else {
+                                        ""
+                                    };
+                                    self.set_status(format!(
+                                        "SACD ISO: \"{title}\" — {artist}{yr}{pub_s} [{areas}, {} tracks{dst_note}]",
+                                        info.tracks.len()
+                                    ));
+                                }
                             }
                             Err(err) => self.set_status(format!("SACD ISO probe failed: {err}")),
                         }
@@ -3663,6 +3782,78 @@ impl TxPlayerApp {
                 }
             }
         }
+
+        // Local LAN Mobile Remote Control command drain & snapshot refresh
+        while let Ok(rcmd) = self.lan_remote.rx.try_recv() {
+            match rcmd {
+                RemoteCommand::TogglePlayback => self.toggle_playback(),
+                RemoteCommand::Next => self.next(false),
+                RemoteCommand::Prev => self.previous(),
+                RemoteCommand::Seek(s) => {
+                    self.audio.seek(s);
+                    self.position = s;
+                }
+                RemoteCommand::SetVolume(v) => self.set_volume(v),
+                RemoteCommand::ToggleDspAb => self.toggle_dsp_ab(),
+                RemoteCommand::PlayTrackId(id) => {
+                    let all = self.store.active().tracks.clone();
+                    self.play_from_list(id, &all);
+                }
+            }
+        }
+        if self.lan_remote.is_running()
+            && self.lan_remote_last_sync.elapsed() >= Duration::from_millis(500)
+        {
+            self.lan_remote_last_sync = Instant::now();
+            let to_summary = |t: &Track| RemoteTrackSummary {
+                id: t.id,
+                title: t.title.clone(),
+                artist: t.artist.clone(),
+                album: t.album.clone(),
+                format: t.quality_full(),
+                dr: t.dr_score,
+            };
+            let current = self.current_track().map(to_summary);
+            let signal_path = self
+                .stream_info
+                .as_ref()
+                .map(|s| {
+                    format!(
+                        "{} · {} → {} · {}",
+                        s.output_format,
+                        format_sample_rate(s.source_rate),
+                        format_sample_rate(s.output_rate),
+                        s.device_name
+                    )
+                })
+                .unwrap_or_else(|| "Standby".into());
+            let queue = self
+                .current_queue
+                .iter()
+                .take(40)
+                .filter_map(|id| self.track(*id).map(to_summary))
+                .collect();
+            let catalog_sample = self
+                .store
+                .active()
+                .tracks
+                .iter()
+                .take(300)
+                .map(to_summary)
+                .collect();
+            self.lan_remote.update_snapshot(RemoteSnapshot {
+                playing: self.playing,
+                position: self.position,
+                duration: self.duration,
+                volume: self.volume,
+                dsp_active: self.plugins.dsp.enabled && !self.plugins.dsp.bit_perfect_mode,
+                dsp_summary: self.plugins.dsp.summary(),
+                signal_path,
+                current,
+                queue,
+                catalog_sample,
+            });
+        }
     }
 
     fn process_input(&mut self, context: &egui::Context) {
@@ -3685,10 +3876,22 @@ impl TxPlayerApp {
             self.start_scan(paths);
         }
 
+        // F1 toggles built-in Quick Guide & Shortcuts Reference anytime
+        if context.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.show_quick_help = !self.show_quick_help;
+            return;
+        }
+
         // Escape ALWAYS dismisses active popovers/modals even if a child widget holds focus
         if context.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.command_palette.open {
                 self.command_palette.open = false;
+                return;
+            } else if self.show_quick_help {
+                self.show_quick_help = false;
+                return;
+            } else if self.abx_lab.open {
+                self.abx_lab.open = false;
                 return;
             } else if self.show_device_picker {
                 self.show_device_picker = false;
@@ -3843,6 +4046,7 @@ impl TxPlayerApp {
                 egui::Key::Num3,
                 egui::Key::Num4,
                 egui::Key::Num5,
+                egui::Key::Num6,
             ];
             let enabled = self.plugins.visualizers.enabled_modes();
             for (idx, key) in num_keys.iter().enumerate() {
@@ -7405,6 +7609,16 @@ impl TxPlayerApp {
                         ctx_action = Some(ContextMenuAction::CopyAudiophileSpecs(tid));
                         ui.close();
                     }
+                    ui.menu_button("Blind ABX Lab", |ui| {
+                        if ui.button("Load as Master A").clicked() {
+                            ctx_action = Some(ContextMenuAction::LoadAbxA(tid));
+                            ui.close();
+                        }
+                        if ui.button("Load as Master B").clicked() {
+                            ctx_action = Some(ContextMenuAction::LoadAbxB(tid));
+                            ui.close();
+                        }
+                    });
                     if ui
                         .button(format!("Reveal in {FILE_MANAGER_NAME}"))
                         .clicked()
@@ -7604,6 +7818,16 @@ impl TxPlayerApp {
             ContextMenuAction::TrackInfo(id) => self.inspect_track_id = Some(id),
             ContextMenuAction::CopyAudiophileSpecs(id) => {
                 self.copy_track_audiophile_specs(ctx, id);
+            }
+            ContextMenuAction::LoadAbxA(id) => {
+                self.abx_lab.track_a_id = Some(id);
+                self.abx_lab.reset_trials();
+                self.abx_lab.open = true;
+            }
+            ContextMenuAction::LoadAbxB(id) => {
+                self.abx_lab.track_b_id = Some(id);
+                self.abx_lab.reset_trials();
+                self.abx_lab.open = true;
             }
             ContextMenuAction::VerifyAlbumAudit(id) => {
                 let sel_ids = self.selected_ordered_ids(visible);
@@ -9233,6 +9457,8 @@ impl TxPlayerApp {
             &mut self.acoustid_api_key,
             &mut self.plugins,
             &self.tool_health,
+            self.lan_remote.lan_url.as_deref(),
+            self.lan_remote.last_error.as_deref(),
         );
         if let Some(tid) = settings_actions.theme_changed {
             self.set_theme(context, tid);
@@ -9270,6 +9496,17 @@ impl TxPlayerApp {
         }
         if settings_actions.import_wav_ir {
             self.import_wav_ir_dialog();
+        }
+        if settings_actions.lan_remote_changed {
+            if self.plugins.lan_remote_enabled {
+                self.lan_remote.start(self.plugins.lan_remote_port);
+                if let Some(ref url) = self.lan_remote.lan_url {
+                    self.set_status(format!("LAN Remote live at {url}"));
+                }
+            } else {
+                self.lan_remote.stop();
+                self.set_status("LAN Remote stopped".into());
+            }
         }
         if let Some(lin) = settings_actions.linear_vol_changed {
             self.audio.set_linear_volume(lin);
@@ -9686,6 +9923,97 @@ impl TxPlayerApp {
                         self.mark_library_dirty();
                         self.store.save();
                         self.set_status(format!("Pruned {n} missing file(s) from database"));
+                    }
+                }
+            }
+        }
+
+        // 3h) Built-In F1 Quick Guide & Interactive Shortcuts Reference
+        modals::show_quick_help_modal(
+            context,
+            &mut self.show_quick_help,
+            &mut self.quick_help_tab,
+            &p,
+        );
+
+        // 3i) Loudness-Matched Blind ABX Comparison Lab
+        if self.abx_lab.open {
+            let track_a = self.abx_lab.track_a_id.and_then(|id| self.track(id)).cloned();
+            let track_b = self.abx_lab.track_b_id.and_then(|id| self.track(id)).cloned();
+            if let Some(abx_act) = modals::show_abx_lab_modal(
+                context,
+                &mut self.abx_lab,
+                track_a.as_ref(),
+                track_b.as_ref(),
+                &p,
+            ) {
+                match abx_act {
+                    AbxLabAction::PlaySlot(slot) => {
+                        if let Some(tid) = self.abx_lab.resolved_track_id(slot)
+                            && let Some(t) = self.track(tid).cloned()
+                        {
+                            let resume_pos = self.position;
+                            self.abx_lab.active_slot = Some(slot);
+                            let (trim_a, trim_b) = compute_loudness_match_trims(
+                                track_a.as_ref().and_then(|x| x.integrated_lufs),
+                                track_b.as_ref().and_then(|x| x.integrated_lufs),
+                            );
+                            let is_b = Some(tid) == self.abx_lab.track_b_id;
+                            let trim_db = if self.abx_lab.loudness_matched {
+                                if is_b { trim_b } else { trim_a }
+                            } else {
+                                0.0
+                            };
+                            self.current_queue = vec![tid];
+                            self.current_index = Some(0);
+                            self.mark_queue_dirty();
+                            self.start_current();
+                            if resume_pos > 0.25 && resume_pos < t.duration.unwrap_or(0.0) {
+                                self.audio.seek(resume_pos);
+                                self.position = resume_pos;
+                            }
+                            if self.abx_lab.loudness_matched {
+                                let lin = 10.0_f32.powf(trim_db / 20.0);
+                                self.audio.set_replay_gain_linear(lin);
+                            }
+                            let lbl = match slot {
+                                AbxSlot::A => "Master A",
+                                AbxSlot::B => "Master B",
+                                AbxSlot::X => "Blind X",
+                            };
+                            self.set_status(format!("ABX Lab playing {lbl} (Trim {trim_db:+.1} dB)"));
+                        }
+                    }
+                    AbxLabAction::Guess(guessed_b) => {
+                        self.abx_lab.record_guess(guessed_b);
+                        self.abx_lab.active_slot = None;
+                        self.set_status(format!(
+                            "ABX Trial #{} recorded — X randomized for next trial",
+                            self.abx_lab.history.len()
+                        ));
+                    }
+                    AbxLabAction::ToggleReveal => {
+                        self.abx_lab.revealed = !self.abx_lab.revealed;
+                    }
+                    AbxLabAction::ResetTrials => {
+                        self.abx_lab.reset_trials();
+                        self.set_status("ABX Lab trials reset".into());
+                    }
+                    AbxLabAction::LoadCurrentAsA => {
+                        if let Some(cid) = self.current_id() {
+                            self.abx_lab.track_a_id = Some(cid);
+                            self.abx_lab.reset_trials();
+                        }
+                    }
+                    AbxLabAction::LoadCurrentAsB => {
+                        if let Some(cid) = self.current_id() {
+                            self.abx_lab.track_b_id = Some(cid);
+                            self.abx_lab.reset_trials();
+                        }
+                    }
+                    AbxLabAction::SwapAB => {
+                        std::mem::swap(&mut self.abx_lab.track_a_id, &mut self.abx_lab.track_b_id);
+                        self.abx_lab.reset_trials();
                     }
                 }
             }
@@ -10340,6 +10668,32 @@ impl TxPlayerApp {
             subtitle: "Clean Markdown tables grouped by album with liner notes".into(),
             action: PaletteCommand::ExportViewCatalogMarkdown,
         });
+        entries.push(PaletteEntry {
+            category: "HELP",
+            label: "Open Quick Guide & Shortcuts Reference (F1)".into(),
+            subtitle: "First steps, shortcuts, Power-Search tokens & DSP guide".into(),
+            action: PaletteCommand::OpenQuickHelp,
+        });
+        entries.push(PaletteEntry {
+            category: "AUDIO",
+            label: "Open Loudness-Matched Blind ABX Comparison Lab…".into(),
+            subtitle: "Compare two masters blind with EBU R128 trim & binomial p-value".into(),
+            action: PaletteCommand::OpenAbxLab,
+        });
+        entries.push(PaletteEntry {
+            category: "REMOTE",
+            label: if self.lan_remote.is_running() {
+                "Stop Local LAN Mobile Remote Server".into()
+            } else {
+                "Start Local LAN Mobile Remote Server".into()
+            },
+            subtitle: self
+                .lan_remote
+                .lan_url
+                .clone()
+                .unwrap_or_else(|| format!("100% offline Wi-Fi remote on port {}", self.plugins.lan_remote_port)),
+            action: PaletteCommand::ToggleLanRemote,
+        });
         for &m in VisualizerMode::ALL {
             entries.push(PaletteEntry {
                 category: "VISUAL",
@@ -10584,6 +10938,20 @@ impl TxPlayerApp {
                     _ => self.store.active().name.clone(),
                 };
                 self.export_catalog_dialog(html, title, Some(ids));
+            }
+            PaletteCommand::OpenQuickHelp => self.show_quick_help = true,
+            PaletteCommand::OpenAbxLab => self.abx_lab.open = true,
+            PaletteCommand::ToggleLanRemote => {
+                self.plugins.lan_remote_enabled = !self.plugins.lan_remote_enabled;
+                if self.plugins.lan_remote_enabled {
+                    self.lan_remote.start(self.plugins.lan_remote_port);
+                    if let Some(ref url) = self.lan_remote.lan_url {
+                        self.set_status(format!("LAN Remote live at {url}"));
+                    }
+                } else {
+                    self.lan_remote.stop();
+                    self.set_status("LAN Remote stopped".into());
+                }
             }
         }
     }
@@ -12547,6 +12915,8 @@ enum ContextMenuAction {
     EditTags,
     TrackInfo(u64),
     CopyAudiophileSpecs(u64),
+    LoadAbxA(u64),
+    LoadAbxB(u64),
     VerifyAlbumAudit(u64),
     ScanReplayGain(u64),
     RevealInFinder(u64),

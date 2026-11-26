@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod abx;
 mod analyzer;
 mod app;
 mod archive;
@@ -17,6 +18,7 @@ mod modals;
 mod platform;
 mod playlist_io;
 mod plugins;
+mod remote;
 mod tagger;
 mod theme;
 mod tray;

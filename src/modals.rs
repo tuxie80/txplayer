@@ -7,6 +7,7 @@ use eframe::egui::{
     Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
+use crate::abx::{AbxLabState, AbxSlot, compute_loudness_match_trims};
 use crate::analyzer::{AudioAnalysis, HiResVerdict};
 use crate::audio::{default_output_device_name, list_output_devices};
 use crate::dsp::compute_eq_response_curve;
@@ -17,12 +18,13 @@ use crate::library::{
 };
 use crate::metadata::{Track, format_duration, format_file_size, format_sample_rate};
 use crate::platform::{
-    AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, open_file_with_default_app, reveal_in_file_manager,
+    AUDIO_BACKEND_NAME, FILE_MANAGER_NAME, MOD_SHORT, open_file_with_default_app,
+    reveal_in_file_manager,
 };
 use crate::plugins::{
-    CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EQ_FREQS_HZ, EqPreset, HeadphonePreset,
-    IrPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode, ResamplerQuality,
-    TagProviderConfig, ToolHealth, TrackBookmark,
+    ConcertTuning, CrossfeedPreset, DitherMode, DspConfig, EQ_FREQ_LABELS, EQ_FREQS_HZ, EqPreset,
+    HeadphonePreset, IrPreset, OversamplingMode, PianoEngineId, PluginConfig, ReplayGainMode,
+    ResamplerQuality, TagProviderConfig, ToolHealth, TrackBookmark,
 };
 use crate::tagger::{
     BatchTagTransform, EditableTags, LookupStrategy, TagCandidate, TrackHashes,
@@ -768,6 +770,7 @@ pub struct SettingsViewActions {
     pub import_playlist: bool,
     pub import_autoeq: bool,
     pub import_wav_ir: bool,
+    pub lan_remote_changed: bool,
     pub save_device_profile: Option<String>,
     pub clear_device_profile: Option<String>,
 }
@@ -796,6 +799,8 @@ pub fn show_settings_window(
     acoustid_key: &mut String,
     plugins: &mut PluginConfig,
     tool_health: &ToolHealth,
+    lan_remote_url: Option<&str>,
+    lan_remote_err: Option<&str>,
 ) -> SettingsViewActions {
     let mut actions = SettingsViewActions {
         theme_changed: None,
@@ -811,6 +816,7 @@ pub fn show_settings_window(
         import_playlist: false,
         import_autoeq: false,
         import_wav_ir: false,
+        lan_remote_changed: false,
         save_device_profile: None,
         clear_device_profile: None,
     };
@@ -1923,6 +1929,84 @@ pub fn show_settings_window(
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
+                            RichText::new(format!(
+                                "Pitch: {:+.1} st",
+                                plugins.dsp.pitch_semitones
+                            ))
+                            .size(11.0)
+                            .color(palette.text_secondary),
+                        );
+                        let p_resp = ui
+                            .add(
+                                egui::Slider::new(&mut plugins.dsp.pitch_semitones, -12.0..=12.0)
+                                    .step_by(0.5)
+                                    .show_value(false),
+                            )
+                            .on_hover_text(
+                                "Real-time musical transpose (-12..+12 semitones, double-click to reset)",
+                            );
+                        if p_resp.double_clicked() {
+                            plugins.dsp.pitch_semitones = 0.0;
+                            actions.dsp_changed = true;
+                        } else if p_resp.changed() {
+                            if plugins.dsp.pitch_semitones.abs() >= 0.05 {
+                                plugins.dsp.enabled = true;
+                                plugins.dsp.bit_perfect_mode = false;
+                            }
+                            actions.dsp_changed = true;
+                        }
+                        if pill_button(
+                            ui,
+                            "Pitch-Lock",
+                            None,
+                            if plugins.dsp.preserve_pitch && !plugins.dsp.bit_perfect_mode {
+                                PillStyle::Active
+                            } else {
+                                PillStyle::Secondary
+                            },
+                            palette,
+                        )
+                        .on_hover_text(
+                            "Preserve original musical key when slowing down or speeding up for practice",
+                        )
+                        .clicked()
+                        {
+                            plugins.dsp.preserve_pitch = !plugins.dsp.preserve_pitch;
+                            if plugins.dsp.preserve_pitch {
+                                plugins.dsp.enabled = true;
+                                plugins.dsp.bit_perfect_mode = false;
+                            }
+                            actions.dsp_changed = true;
+                        }
+                        for &ct in ConcertTuning::ALL {
+                            if pill_button(
+                                ui,
+                                ct.name(),
+                                None,
+                                if plugins.dsp.concert_tuning == ct && !plugins.dsp.bit_perfect_mode
+                                {
+                                    PillStyle::Active
+                                } else {
+                                    PillStyle::Secondary
+                                },
+                                palette,
+                            )
+                            .on_hover_text("Concert reference pitch (Standard 440, Verdi 432, Baroque 415 Hz)")
+                            .clicked()
+                            {
+                                plugins.dsp.concert_tuning = ct;
+                                if ct != ConcertTuning::Standard440 {
+                                    plugins.dsp.enabled = true;
+                                    plugins.dsp.bit_perfect_mode = false;
+                                }
+                                actions.dsp_changed = true;
+                            }
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
                             RichText::new(format!("Crossfade: {:.1}s", plugins.dsp.crossfade_secs))
                                 .size(11.0)
                                 .color(palette.text_secondary),
@@ -2192,6 +2276,58 @@ pub fn show_settings_window(
                                 tool_health.curl_available,
                                 palette,
                             );
+                        });
+                    });
+                    ui.add_space(6.0);
+
+                    // 5. Optional 100% Local LAN Mobile Remote Control
+                    plugin_section_card(ui, "LOCAL LAN MOBILE REMOTE (ZERO CLOUD)", palette, |ui| {
+                        let prev_en = plugins.lan_remote_enabled;
+                        aligned_checkbox_row(
+                            ui,
+                            &mut plugins.lan_remote_enabled,
+                            "Enable Local Wi-Fi Web Remote (control from phone/tablet on your LAN)",
+                            palette,
+                        );
+                        if plugins.lan_remote_enabled != prev_en {
+                            actions.lan_remote_changed = true;
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("Port:")
+                                    .size(11.0)
+                                    .color(palette.text_secondary),
+                            );
+                            let mut port_val = plugins.lan_remote_port as i32;
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut port_val)
+                                        .range(1024..=65535)
+                                        .speed(1),
+                                )
+                                .changed()
+                            {
+                                plugins.lan_remote_port = port_val as u16;
+                                if plugins.lan_remote_enabled {
+                                    actions.lan_remote_changed = true;
+                                }
+                            }
+                            if let Some(url) = lan_remote_url {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new(format!("Live: {url}"))
+                                        .size(11.0)
+                                        .monospace()
+                                        .color(palette.hires_gold),
+                                );
+                                if pill_button(ui, "Copy URL", None, PillStyle::Active, palette)
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(url.to_string());
+                                }
+                            } else if let Some(err) = lan_remote_err {
+                                ui.label(RichText::new(err).size(10.5).color(palette.danger));
+                            }
                         });
                     });
                 }
@@ -6338,6 +6474,27 @@ pub fn show_signal_path_popover(
                         out.speed_changed = Some(spd);
                     }
                 }
+                if pill_button(
+                    ui,
+                    "Pitch-Lock",
+                    None,
+                    if plugins.dsp.preserve_pitch && !plugins.dsp.bit_perfect_mode {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    },
+                    palette,
+                )
+                .on_hover_text("Keep original musical key when changing speed")
+                .clicked()
+                {
+                    plugins.dsp.preserve_pitch = !plugins.dsp.preserve_pitch;
+                    if plugins.dsp.preserve_pitch {
+                        plugins.dsp.enabled = true;
+                        plugins.dsp.bit_perfect_mode = false;
+                    }
+                    out.dsp_changed = true;
+                }
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -6618,6 +6775,9 @@ pub enum PaletteCommand {
     CopyCurrentTrackSpecs,
     ExportViewCatalogHtml,
     ExportViewCatalogMarkdown,
+    OpenQuickHelp,
+    OpenAbxLab,
+    ToggleLanRemote,
 }
 
 pub struct PaletteEntry {
@@ -6816,5 +6976,521 @@ pub fn show_command_palette(
         });
 
     chosen
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickHelpTab {
+    #[default]
+    FirstSteps,
+    Shortcuts,
+    PowerSearch,
+    AudioDsp,
+}
+
+/// Built-in F1 Quick Guide, First Steps & Interactive Shortcuts Reference modal.
+pub fn show_quick_help_modal(
+    context: &egui::Context,
+    open: &mut bool,
+    tab: &mut QuickHelpTab,
+    palette: &Palette,
+) {
+    if !*open {
+        return;
+    }
+    let mut is_open = *open;
+    let ver = format!("v{} · Press F1 anytime", env!("CARGO_PKG_VERSION"));
+    themed_modal_window(
+        context,
+        "quick_help_modal",
+        "TxPlayer Quick Guide & Reference",
+        Icon::Info,
+        Some(&ver),
+        [690.0, 515.0],
+        Some([540.0, 420.0]),
+        true,
+        &mut is_open,
+        palette,
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (t, lbl) in [
+                    (QuickHelpTab::FirstSteps, "5-Min First Steps"),
+                    (QuickHelpTab::Shortcuts, "Keyboard Shortcuts"),
+                    (QuickHelpTab::PowerSearch, "Power-Search Tokens"),
+                    (QuickHelpTab::AudioDsp, "Audio, DoP & Practice"),
+                ] {
+                    if pill_button(
+                        ui,
+                        lbl,
+                        None,
+                        if *tab == t {
+                            PillStyle::Accent
+                        } else {
+                            PillStyle::Secondary
+                        },
+                        palette,
+                    )
+                    .clicked()
+                    {
+                        *tab = t;
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            ScrollArea::vertical()
+                .id_salt("quick_help_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| match *tab {
+                    QuickHelpTab::FirstSteps => {
+                        let step = |ui: &mut Ui, num: &str, title: &str, body: &str| {
+                            Frame::new()
+                                .fill(palette.background)
+                                .stroke(Stroke::new(1.0, palette.border))
+                                .corner_radius(7.0)
+                                .inner_margin(Margin::symmetric(10, 7))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(num)
+                                                .size(10.0)
+                                                .strong()
+                                                .monospace()
+                                                .color(palette.hires_gold),
+                                        );
+                                        ui.label(
+                                            RichText::new(title)
+                                                .size(12.0)
+                                                .strong()
+                                                .color(palette.text),
+                                        );
+                                    });
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        RichText::new(body)
+                                            .size(11.0)
+                                            .color(palette.text_secondary),
+                                    );
+                                });
+                            ui.add_space(5.0);
+                        };
+                        step(
+                            ui,
+                            "STEP 1",
+                            "Add Music Folders & Isolated Libraries",
+                            "Drag & drop any folder onto TxPlayer or click + Folder. Supports FLAC, ALAC, WAV, AIFF, DSF/DFF (DSD64–512), WavPack (.wv), Monkey's Audio (.ape), Opus, CUE sheets, and SACD .iso images.",
+                        );
+                        step(
+                            ui,
+                            "STEP 2",
+                            "Unlock Bit-Perfect DAC & Native DSD over PCM (DoP v1.1)",
+                            "Click the Signal Path pill (bottom-right) or open Settings → Audio & DSP. Enable Bit-Perfect + Exclusive DAC + 0.0 dBFS Direct Lock for pure hardware playback, or save a Per-Device Profile per DAC/headphone.",
+                        );
+                        step(
+                            ui,
+                            "STEP 3",
+                            "Sculpt Sound with Interactive EQ, FFT Convolution & DSP A/B",
+                            "Drag the 10 glowing frequency nodes directly on the live EQ curve (double-click to reset), load AutoEQ (.txt) or .WAV Convolution IRs, and press D anytime for instant DSP A/B bypass comparison.",
+                        );
+                        step(
+                            ui,
+                            "STEP 4",
+                            "Explore All 6 Concert Visualizers & Pitch-Locked Practice",
+                            "Press V to open the Concert Stage and 1–6 to switch between 88-Key Piano (Pause freezes chords!), Piano Roll, 64-Band RTA, Live Acoustic Spectrogram, Stereo Scope, and Mastering VU + EBU R128 LUFS.",
+                        );
+                        step(
+                            ui,
+                            "STEP 5",
+                            "Master Your Library, Audits & Portable Catalogs",
+                            "Right-click any album to Verify TrueHz/DR or Scan EBU R128 ReplayGain, start 100% Local Similar Radio, run Blind ABX comparisons, or export print-ready HTML & Markdown dossiers from Library Insights.",
+                        );
+                    }
+                    QuickHelpTab::Shortcuts => {
+                        let rows: &[(&str, &str)] = &[
+                            (&format!("{MOD_SHORT}K"), "Command Palette — fuzzy jump to any track, view, theme, or tool"),
+                            ("F1", "Open this Quick Guide & Shortcuts Reference"),
+                            (&format!("{MOD_SHORT}F"), "Focus Power-Search bar"),
+                            ("Space", "Play / Pause (freezes pressed piano keys & chord readout)"),
+                            ("D / E", "Instant DSP A/B Comparison / Toggle Audio DSP"),
+                            ("V / 1–6", "Toggle Concert Visualizer Stage / Switch Visualizer Mode (1–6)"),
+                            ("[ / ] / \\", "Set A–B Section Loop Point A / Point B / Clear Loop"),
+                            (&format!("{MOD_SHORT}B"), "Drop persistent Timestamp Bookmark at current position"),
+                            ("L", "Toggle Synced Lyrics (.lrc) drawer"),
+                            (&format!("{MOD_SHORT}T / {MOD_SHORT}I"), "Edit Tags & Batch Transforms / Track Info & TrueHz Inspector"),
+                            (&format!("{MOD_SHORT}J"), "Jump to currently playing track"),
+                            (&format!("{MOD_SHORT}Shift+M"), "Toggle Compact Mini-Player Mode"),
+                            ("← → / Cmd+← →", "Seek ±10 s / Previous & Next Track"),
+                            ("Cmd+↑ ↓ / M", "Volume ±5% / Mute"),
+                            (&format!("{MOD_SHORT},"), "Open Settings"),
+                            ("Esc", "Dismiss any modal, popover, or selection"),
+                        ];
+                        egui::Grid::new("help_shortcuts_grid")
+                            .num_columns(2)
+                            .spacing([18.0, 6.0])
+                            .show(ui, |ui| {
+                                for (k, desc) in rows {
+                                    ui.label(
+                                        RichText::new(*k)
+                                            .size(11.0)
+                                            .strong()
+                                            .monospace()
+                                            .color(palette.hires_gold),
+                                    );
+                                    ui.label(
+                                        RichText::new(*desc)
+                                            .size(11.0)
+                                            .color(palette.text_secondary),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                    QuickHelpTab::PowerSearch => {
+                        ui.label(
+                            RichText::new("Combine any tokens right inside the search bar:")
+                                .size(11.5)
+                                .color(palette.text),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("composer:beethoven dr>=12 rate>=96 codec:flac #reference")
+                                .size(11.0)
+                                .monospace()
+                                .color(palette.accent_bright),
+                        );
+                        ui.add_space(8.0);
+                        let tokens = [
+                            ("composer:<name>", "Matches Composer metadata (e.g. composer:chopin)"),
+                            ("artist:<name>", "Matches Artist or Album Artist"),
+                            ("album:<name>", "Matches Album title"),
+                            ("work:<name>", "Matches Work / Opus (e.g. work:bwv or work:op.27)"),
+                            ("label:<name>", "Matches Record Label (e.g. label:grammophon)"),
+                            ("codec:<name>", "Matches Codec (flac, dsd, alac, wv, ape, opus)"),
+                            ("dr>=N / dr<=N / dr=N", "Filter by persisted Dynamic Range score"),
+                            ("rate>=N / sr>=N", "Sample rate in kHz (e.g. rate>=96)"),
+                            ("bits>=N", "Bit depth (e.g. bits>=24)"),
+                            ("rating>=N", "Star rating 1–5 (e.g. rating>=4)"),
+                            ("#tag", "Matches custom collector hashtag (e.g. #reference)"),
+                        ];
+                        egui::Grid::new("help_tokens_grid")
+                            .num_columns(2)
+                            .spacing([16.0, 5.0])
+                            .show(ui, |ui| {
+                                for (tok, desc) in tokens {
+                                    ui.label(
+                                        RichText::new(tok)
+                                            .size(10.8)
+                                            .monospace()
+                                            .color(palette.accent),
+                                    );
+                                    ui.label(
+                                        RichText::new(desc)
+                                            .size(10.8)
+                                            .color(palette.text_secondary),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                    QuickHelpTab::AudioDsp => {
+                        ui.label(
+                            RichText::new("• Bit-Perfect & DoP v1.1: Hard-bypasses all DSP and streams native PCM or 1-bit DSD64/128 directly to your DAC.")
+                                .size(11.2)
+                                .color(palette.text_secondary),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("• Pitch-Preserving Practice & Tuning: Enable Pitch-Lock beside Speed (0.75x–1.5x) to keep exact musical pitch while practicing piano, transpose ±12 semitones, or switch concert pitch to A=432 Hz or Baroque A=415 Hz.")
+                                .size(11.2)
+                                .color(palette.text_secondary),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("• Blind ABX Comparison Lab: Load two masters of the same recording (Cmd/Ctrl+K → ABX Lab), auto-match EBU R128 loudness to 0.1 dB, and run blind A/B/X trials with live binomial p-value statistics.")
+                                .size(11.2)
+                                .color(palette.text_secondary),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("• Local LAN Mobile Remote: Enable in Settings → Plugins to control playback, Signal Path, volume, DSP A/B, and library search from any phone on your Wi-Fi (100% offline LAN).")
+                                .size(11.2)
+                                .color(palette.text_secondary),
+                        );
+                    }
+                });
+        },
+    );
+    *open = is_open;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbxLabAction {
+    PlaySlot(AbxSlot),
+    Guess(bool),
+    ToggleReveal,
+    ResetTrials,
+    LoadCurrentAsA,
+    LoadCurrentAsB,
+    SwapAB,
+}
+
+/// Loudness-Matched Blind ABX Comparison Lab modal with exact binomial p-value statistics.
+pub fn show_abx_lab_modal(
+    context: &egui::Context,
+    state: &mut AbxLabState,
+    track_a: Option<&Track>,
+    track_b: Option<&Track>,
+    palette: &Palette,
+) -> Option<AbxLabAction> {
+    if !state.open {
+        return None;
+    }
+    let mut is_open = state.open;
+    let mut action: Option<AbxLabAction> = None;
+
+    themed_modal_window(
+        context,
+        "abx_comparison_lab",
+        "Loudness-Matched Blind ABX Comparison Lab",
+        Icon::Sliders,
+        Some("Exact Binomial p-value · EBU R128 Trim"),
+        [640.0, 495.0],
+        Some([520.0, 420.0]),
+        true,
+        &mut is_open,
+        palette,
+        |ui| {
+            let lufs_a = track_a.and_then(|t| t.integrated_lufs);
+            let lufs_b = track_b.and_then(|t| t.integrated_lufs);
+            let (trim_a, trim_b) = compute_loudness_match_trims(lufs_a, lufs_b);
+
+            // Track A & Track B Master Cards
+            ui.columns(2, |cols| {
+                let draw_card = |ui: &mut Ui,
+                                 badge: &str,
+                                 t: Option<&Track>,
+                                 trim_db: f32,
+                                 load_lbl: &str|
+                 -> bool {
+                    let mut load_clicked = false;
+                    Frame::new()
+                        .fill(palette.background)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .corner_radius(7.0)
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(badge)
+                                        .size(10.0)
+                                        .strong()
+                                        .monospace()
+                                        .color(palette.hires_gold),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if pill_button(ui, load_lbl, None, PillStyle::Secondary, palette)
+                                        .clicked()
+                                    {
+                                        load_clicked = true;
+                                    }
+                                });
+                            });
+                            ui.add_space(3.0);
+                            if let Some(tr) = t {
+                                ui.label(
+                                    RichText::new(&tr.title)
+                                        .size(12.0)
+                                        .strong()
+                                        .color(palette.text),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · {}",
+                                        tr.quality_full(),
+                                        tr.dr_score
+                                            .map(|d| format!("DR{d}"))
+                                            .unwrap_or_else(|| "DR —".into())
+                                    ))
+                                    .size(10.0)
+                                    .monospace()
+                                    .color(palette.accent),
+                                );
+                                let lufs_str = tr
+                                    .integrated_lufs
+                                    .map(|l| format!("{l:.1} LUFS · Match Trim {trim_db:+.1} dB"))
+                                    .unwrap_or_else(|| {
+                                        "No LUFS yet (run ReplayGain/TrueHz audit)".into()
+                                    });
+                                ui.label(
+                                    RichText::new(lufs_str).size(9.5).color(palette.muted),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new("No master loaded — right-click a track or click 'Use Playing'")
+                                        .size(10.5)
+                                        .color(palette.faint),
+                                );
+                            }
+                        });
+                    load_clicked
+                };
+
+                if draw_card(&mut cols[0], "MASTER A", track_a, trim_a, "Use Playing") {
+                    action = Some(AbxLabAction::LoadCurrentAsA);
+                }
+                if draw_card(&mut cols[1], "MASTER B", track_b, trim_b, "Use Playing") {
+                    action = Some(AbxLabAction::LoadCurrentAsB);
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                aligned_inline_checkbox(
+                    ui,
+                    &mut state.loudness_matched,
+                    "Auto EBU R128 Loudness Match",
+                    215.0,
+                    palette,
+                );
+                if pill_button(ui, "Swap A ↔ B", None, PillStyle::Secondary, palette).clicked() {
+                    action = Some(AbxLabAction::SwapAB);
+                }
+                if pill_button(ui, "Reset Trials", None, PillStyle::Secondary, palette).clicked() {
+                    action = Some(AbxLabAction::ResetTrials);
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            let ready = track_a.is_some() && track_b.is_some();
+            ui.label(
+                RichText::new("1) AUDITION SEAMLESSLY AT IDENTICAL TIMESTAMP")
+                    .size(9.5)
+                    .strong()
+                    .color(palette.faint),
+            );
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for (slot, lbl) in [
+                    (AbxSlot::A, "Play Master A"),
+                    (AbxSlot::B, "Play Master B"),
+                    (AbxSlot::X, "Play Blind X"),
+                ] {
+                    let style = if state.active_slot == Some(slot) {
+                        PillStyle::Accent
+                    } else if slot == AbxSlot::X {
+                        PillStyle::Active
+                    } else {
+                        PillStyle::Secondary
+                    };
+                    if ui
+                        .add_enabled_ui(ready, |ui| pill_button(ui, lbl, Some(Icon::Play), style, palette))
+                        .inner
+                        .clicked()
+                    {
+                        action = Some(AbxLabAction::PlaySlot(slot));
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(format!(
+                    "2) BLIND TRIAL #{} — IDENTIFY HIDDEN MASTER X",
+                    state.history.len() + 1
+                ))
+                .size(9.5)
+                .strong()
+                .color(palette.faint),
+            );
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled_ui(ready, |ui| {
+                        pill_button(ui, "X is Master A", Some(Icon::Check), PillStyle::Active, palette)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    action = Some(AbxLabAction::Guess(false));
+                }
+                if ui
+                    .add_enabled_ui(ready, |ui| {
+                        pill_button(ui, "X is Master B", Some(Icon::Check), PillStyle::Active, palette)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    action = Some(AbxLabAction::Guess(true));
+                }
+                if pill_button(
+                    ui,
+                    if state.revealed { "Hide Score" } else { "Reveal Results" },
+                    None,
+                    PillStyle::Secondary,
+                    palette,
+                )
+                .clicked()
+                {
+                    action = Some(AbxLabAction::ToggleReveal);
+                }
+            });
+
+            ui.add_space(10.0);
+            let n = state.history.len();
+            let c = state.correct_count();
+            let pval = state.p_value();
+            Frame::new()
+                .fill(palette.background)
+                .stroke(Stroke::new(1.0, palette.border))
+                .corner_radius(7.0)
+                .inner_margin(Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    if n == 0 {
+                        ui.label(
+                            RichText::new("Complete at least 8–10 blind trials for statistical confidence (p < 0.05).")
+                                .size(11.0)
+                                .color(palette.muted),
+                        );
+                    } else if !state.revealed {
+                        ui.label(
+                            RichText::new(format!(
+                                "{n} blind trial(s) recorded — click 'Reveal Results' when finished to avoid bias."
+                            ))
+                            .size(11.5)
+                            .color(palette.accent_bright),
+                        );
+                    } else {
+                        let pct = (c as f64 / n as f64) * 100.0;
+                        let sig = n >= 5 && pval < 0.05;
+                        ui.label(
+                            RichText::new(format!(
+                                "Score: {c} / {n} ({pct:.1}%)   ·   Exact Binomial p-value = {pval:.4}"
+                            ))
+                            .size(12.5)
+                            .strong()
+                            .monospace()
+                            .color(if sig { palette.hires_gold } else { palette.text }),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(if sig {
+                                "★ Statistically significant audible difference detected (p < 0.05)!"
+                            } else {
+                                "Inconclusive (p ≥ 0.05) — indistinguishable from chance so far."
+                            })
+                            .size(11.0)
+                            .color(if sig { palette.accent_bright } else { palette.muted }),
+                        );
+                    }
+                });
+        },
+    );
+
+    state.open = is_open;
+    action
 }
 

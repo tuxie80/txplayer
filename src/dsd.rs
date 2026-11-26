@@ -250,8 +250,17 @@ impl DsdDopReader {
     }
 }
 
-/// Probed metadata from a Scarlet Book SACD `.iso` Master TOC (sector 510).
-#[allow(dead_code)]
+/// Individual stereo track entry parsed from a Scarlet Book SACD `.iso` Stereo Area TOC.
+#[derive(Debug, Clone)]
+pub struct SacdIsoTrack {
+    pub track_number: u32,
+    pub title: String,
+    pub start_lsn: u32,
+    pub length_sectors: u32,
+    pub duration_secs: f64,
+}
+
+/// Probed metadata & track list from a Scarlet Book SACD `.iso` Master TOC (sector 510) & Stereo Area TOC.
 #[derive(Debug, Clone)]
 pub struct SacdIsoInfo {
     pub album_title: String,
@@ -260,22 +269,46 @@ pub struct SacdIsoInfo {
     pub disc_year: u16,
     pub has_stereo_area: bool,
     pub has_multichannel_area: bool,
+    pub stereo_area_lsn: u32,
+    pub is_dst_compressed: bool,
+    pub tracks: Vec<SacdIsoTrack>,
 }
 
-/// Pure-Rust SACD `.iso` container inspector (parses Scarlet Book `SACDMTOC` at sector 510).
-#[allow(dead_code)]
+/// Pure-Rust SACD `.iso` container inspector (parses Scarlet Book `SACDMTOC` + Stereo `TWOCHTOC` / `SACDTRL1` / `SACDTRL2`).
 pub fn probe_sacd_iso(path: &Path) -> Result<SacdIsoInfo> {
-    const MASTER_TOC_OFFSET: u64 = 510 * 2048;
+    const SECTOR_BYTES: u64 = 2048;
+    const MASTER_TOC_OFFSET: u64 = 510 * SECTOR_BYTES;
     let mut file = File::open(path).with_context(|| format!("Opening SACD ISO {}", path.display()))?;
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
     file.seek(SeekFrom::Start(MASTER_TOC_OFFSET))
         .context("Seeking to SACD Master TOC (sector 510)")?;
     let mut sec = [0u8; 2048];
     file.read_exact(&mut sec)
         .context("Reading SACD Master TOC sector")?;
-    parse_sacd_master_toc(&sec)
+    let mut info = parse_sacd_master_toc(&sec)?;
+
+    // Parse Stereo 2-Channel Area TOC if present inside the image
+    if info.stereo_area_lsn > 0 {
+        let area_off = info.stereo_area_lsn as u64 * SECTOR_BYTES;
+        if area_off + SECTOR_BYTES <= file_len && file.seek(SeekFrom::Start(area_off)).is_ok() {
+            let mut area_hdr = [0u8; 2048];
+            if file.read_exact(&mut area_hdr).is_ok() && &area_hdr[0..8] == b"TWOCHTOC" {
+                let toc_sectors = u16::from_be_bytes([area_hdr[12], area_hdr[13]]).clamp(1, 32) as usize;
+                let frame_format = area_hdr[64] & 0x07;
+                info.is_dst_compressed = frame_format == 0;
+                let track_count = area_hdr[71] as usize;
+                let mut toc_buf = vec![0u8; toc_sectors * 2048];
+                if file.seek(SeekFrom::Start(area_off)).is_ok()
+                    && file.read_exact(&mut toc_buf).is_ok()
+                {
+                    info.tracks = parse_sacd_stereo_tracks(&toc_buf, track_count);
+                }
+            }
+        }
+    }
+    Ok(info)
 }
 
-#[allow(dead_code)]
 fn parse_sacd_master_toc(sec: &[u8]) -> Result<SacdIsoInfo> {
     if sec.len() < 2048 || &sec[0..8] != b"SACDMTOC" {
         return Err(anyhow!("Not a valid Scarlet Book SACD ISO (missing SACDMTOC signature)"));
@@ -289,7 +322,6 @@ fn parse_sacd_master_toc(sec: &[u8]) -> Result<SacdIsoInfo> {
         let nul = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
         String::from_utf8_lossy(&slice[..nul]).trim().to_string()
     };
-    // Master Text offsets (2-byte BE offsets inside Master Text sector; also check inline ASCII area)
     let album_title = read_cstr(128, 128);
     let album_artist = read_cstr(256, 128);
     let publisher = read_cstr(384, 128);
@@ -300,7 +332,160 @@ fn parse_sacd_master_toc(sec: &[u8]) -> Result<SacdIsoInfo> {
         disc_year,
         has_stereo_area: area1_start > 0,
         has_multichannel_area: area2_start > 0,
+        stereo_area_lsn: area1_start,
+        is_dst_compressed: false,
+        tracks: Vec::new(),
     })
+}
+
+fn parse_sacd_stereo_tracks(toc_buf: &[u8], track_count: usize) -> Vec<SacdIsoTrack> {
+    if track_count == 0 {
+        return Vec::new();
+    }
+    let n = track_count.min(255);
+    let mut starts = vec![0u32; n];
+    let mut lengths = vec![0u32; n];
+    let mut durations = vec![0.0_f64; n];
+    let mut titles: Vec<String> = (1..=n).map(|i| format!("SACD Track {i:02}")).collect();
+
+    for sec in toc_buf.chunks_exact(2048) {
+        if &sec[0..8] == b"SACDTRL1" {
+            for i in 0..n {
+                let s_off = 8 + i * 4;
+                let l_off = 8 + 255 * 4 + i * 4;
+                if l_off + 4 <= sec.len() {
+                    starts[i] = u32::from_be_bytes(sec[s_off..s_off + 4].try_into().unwrap());
+                    lengths[i] = u32::from_be_bytes(sec[l_off..l_off + 4].try_into().unwrap());
+                }
+            }
+        } else if &sec[0..8] == b"SACDTRL2" {
+            for (i, dur_slot) in durations.iter_mut().enumerate().take(n) {
+                // Scarlet Book SACDTRL2 stores 4-byte Track_Length (min, sec, frame, flags) at 8 + 255*4 + i*4
+                let d_off = 8 + 255 * 4 + i * 4;
+                if d_off + 4 <= sec.len() {
+                    let mins = sec[d_off] as f64;
+                    let secs = sec[d_off + 1] as f64;
+                    let frames = sec[d_off + 2] as f64;
+                    let total = mins * 60.0 + secs + frames / 75.0;
+                    if total > 0.0 {
+                        *dur_slot = total;
+                    }
+                }
+            }
+        } else if &sec[0..8] == b"SACDTTxt" {
+            for (i, slot) in titles.iter_mut().enumerate().take(n) {
+                let p_off = 8 + i * 2;
+                if p_off + 2 <= sec.len() {
+                    let text_off = u16::from_be_bytes([sec[p_off], sec[p_off + 1]]) as usize;
+                    if text_off >= 8 && text_off < sec.len() {
+                        let tail = &sec[text_off..];
+                        let nul = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+                        let name = String::from_utf8_lossy(&tail[..nul]).trim().to_string();
+                        if !name.is_empty() {
+                            *slot = name;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        // Fallback duration estimate from sector byte count (DSD64 stereo = 705,600 bytes/s)
+        let dur = if durations[i] > 0.0 {
+            durations[i]
+        } else {
+            (lengths[i] as f64 * 2048.0) / 705_600.0
+        };
+        out.push(SacdIsoTrack {
+            track_number: (i + 1) as u32,
+            title: titles[i].clone(),
+            start_lsn: starts[i],
+            length_sectors: lengths[i],
+            duration_secs: dur,
+        });
+    }
+    out
+}
+
+/// Direct uncompressed 2-channel DSD64 sector reader for Scarlet Book SACD `.iso` tracks.
+/// Decodes raw interleaved stereo DSD sector payloads cleanly into 88.2 kHz stereo `f32` PCM
+/// using the exact same 64-tap Blackman-Harris LUT FIR decimator.
+pub struct SacdIsoPcmDecoder {
+    file: File,
+    start_byte: u64,
+    total_bytes: u64,
+    cursor_byte: u64,
+    fir: DsdFirLut,
+    hist_l: [u8; 8],
+    hist_r: [u8; 8],
+}
+
+impl SacdIsoPcmDecoder {
+    pub fn open_range(path: &Path, start_lsn: u32, length_sectors: u32) -> Result<Self> {
+        let mut file = File::open(path).with_context(|| format!("Opening SACD ISO {}", path.display()))?;
+        let start_byte = start_lsn as u64 * 2048;
+        let total_bytes = (length_sectors as u64 * 2048) & !1;
+        file.seek(SeekFrom::Start(start_byte))?;
+        Ok(Self {
+            file,
+            start_byte,
+            total_bytes,
+            cursor_byte: 0,
+            fir: DsdFirLut::new(32, false), // SACD is MSB-first DSD64 -> 88.2 kHz PCM
+            hist_l: [0x69; 8],
+            hist_r: [0x69; 8],
+        })
+    }
+
+    pub fn pcm_sample_rate(&self) -> u32 {
+        88_200
+    }
+
+    pub fn seek(&mut self, seconds: f64) -> Result<()> {
+        let byte_off = ((seconds.max(0.0) * 705_600.0).round() as u64) & !1;
+        self.cursor_byte = byte_off.min(self.total_bytes);
+        self.file.seek(SeekFrom::Start(self.start_byte + self.cursor_byte))?;
+        self.hist_l = [0x69; 8];
+        self.hist_r = [0x69; 8];
+        Ok(())
+    }
+
+    pub fn read_pcm_frames(&mut self, max_frames: usize, out: &mut Vec<f32>) -> Result<usize> {
+        out.clear();
+        const BPC: usize = 4; // 32 bits / 8 = 4 bytes per channel per 88.2 kHz PCM frame
+        const BYTES_PER_FRAME: usize = BPC * 2;
+        let rem_bytes = self.total_bytes.saturating_sub(self.cursor_byte) as usize;
+        let want_bytes = (max_frames * BYTES_PER_FRAME).min(rem_bytes);
+        let aligned = (want_bytes / BYTES_PER_FRAME) * BYTES_PER_FRAME;
+        if aligned == 0 {
+            return Ok(0);
+        }
+        let mut raw = vec![0u8; aligned];
+        let n = self.file.read(&mut raw)?;
+        let usable = (n / BYTES_PER_FRAME) * BYTES_PER_FRAME;
+        self.cursor_byte += usable as u64;
+        let frames = usable / BYTES_PER_FRAME;
+        out.reserve(frames * 2);
+        for frame_bytes in raw[..usable].chunks_exact(BYTES_PER_FRAME) {
+            self.hist_l.copy_within(BPC..8, 0);
+            self.hist_r.copy_within(BPC..8, 0);
+            for k in 0..BPC {
+                self.hist_l[8 - BPC + k] = frame_bytes[k * 2];
+                self.hist_r[8 - BPC + k] = frame_bytes[k * 2 + 1];
+            }
+            let mut acc_l = 0.0_f64;
+            let mut acc_r = 0.0_f64;
+            for b in 0..8 {
+                acc_l += self.fir.lut[b][self.hist_l[b] as usize];
+                acc_r += self.fir.lut[b][self.hist_r[b] as usize];
+            }
+            out.push(acc_l.clamp(-1.0, 1.0) as f32);
+            out.push(acc_r.clamp(-1.0, 1.0) as f32);
+        }
+        Ok(frames)
+    }
 }
 
 /// Picks optimal integer decimation factor so DSD64 -> 88.2 kHz and DSD128/256/512 -> 176.4 kHz.
@@ -1075,5 +1260,77 @@ mod tests {
         assert_eq!(info.publisher, "Sony Classical");
         assert_eq!(info.disc_year, 2003);
         assert!(info.has_stereo_area && info.has_multichannel_area);
+    }
+
+    #[test]
+    fn sacd_iso_multitrack_parser_and_uncompressed_dsd_decoder_roundtrip() {
+        let dir = std::env::temp_dir().join("txplayer_sacd_iso_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let iso_path = dir.join("synthetic.iso");
+
+        // Build minimal valid 520-sector Scarlet Book ISO:
+        // sector 510: SACDMTOC pointing stereo area to sector 512
+        // sector 512: TWOCHTOC (4 sectors long, uncompressed DSD frame_format=2, 2 tracks)
+        // sector 513: SACDTRL1 (track 1 @ LSN 516 len 2, track 2 @ LSN 518 len 2)
+        // sector 514: SACDTRL2 (durations 3m12s and 4m05s)
+        // sector 515: SACDTTxt (track titles)
+        // sector 516..520: uncompressed DSD64 audio bytes
+        let mut img = vec![0u8; 520 * 2048];
+        let mtoc = &mut img[510 * 2048..511 * 2048];
+        mtoc[0..8].copy_from_slice(b"SACDMTOC");
+        mtoc[64..68].copy_from_slice(&512u32.to_be_bytes());
+        mtoc[100..102].copy_from_slice(&1981u16.to_be_bytes());
+        mtoc[128..140].copy_from_slice(b"Test SACD\0\0\0");
+
+        let atoc = &mut img[512 * 2048..513 * 2048];
+        atoc[0..8].copy_from_slice(b"TWOCHTOC");
+        atoc[12..14].copy_from_slice(&4u16.to_be_bytes());
+        atoc[64] = 2; // uncompressed DSD
+        atoc[71] = 2; // 2 stereo tracks
+
+        let trl1 = &mut img[513 * 2048..514 * 2048];
+        trl1[0..8].copy_from_slice(b"SACDTRL1");
+        trl1[8..12].copy_from_slice(&516u32.to_be_bytes());
+        trl1[12..16].copy_from_slice(&518u32.to_be_bytes());
+        trl1[8 + 255 * 4..12 + 255 * 4].copy_from_slice(&2u32.to_be_bytes());
+        trl1[12 + 255 * 4..16 + 255 * 4].copy_from_slice(&2u32.to_be_bytes());
+
+        let trl2 = &mut img[514 * 2048..515 * 2048];
+        trl2[0..8].copy_from_slice(b"SACDTRL2");
+        trl2[8 + 255 * 4] = 3;
+        trl2[9 + 255 * 4] = 12;
+        trl2[12 + 255 * 4] = 4;
+        trl2[13 + 255 * 4] = 5;
+
+        let ttxt = &mut img[515 * 2048..516 * 2048];
+        ttxt[0..8].copy_from_slice(b"SACDTTxt");
+        ttxt[8..10].copy_from_slice(&64u16.to_be_bytes());
+        ttxt[10..12].copy_from_slice(&96u16.to_be_bytes());
+        ttxt[64..74].copy_from_slice(b"Aria Da C\0");
+        ttxt[96..108].copy_from_slice(b"Variation 1\0");
+
+        // Fill track 1 sectors (516..518) with alternating 1-bit PDM +0.5 wave
+        for b in &mut img[516 * 2048..518 * 2048] {
+            *b = 0xAA;
+        }
+        std::fs::write(&iso_path, &img).unwrap();
+
+        let info = probe_sacd_iso(&iso_path).unwrap();
+        assert!(!info.is_dst_compressed);
+        assert_eq!(info.tracks.len(), 2);
+        assert_eq!(info.tracks[0].title, "Aria Da C");
+        assert_eq!(info.tracks[0].start_lsn, 516);
+        assert!((info.tracks[0].duration_secs - 192.0).abs() < 0.01);
+        assert_eq!(info.tracks[1].title, "Variation 1");
+        assert!((info.tracks[1].duration_secs - 245.0).abs() < 0.01);
+
+        let mut dec = SacdIsoPcmDecoder::open_range(&iso_path, 516, 2).unwrap();
+        assert_eq!(dec.pcm_sample_rate(), 88_200);
+        let mut pcm = Vec::new();
+        let frames = dec.read_pcm_frames(512, &mut pcm).unwrap();
+        assert_eq!(frames, 512);
+        assert_eq!(pcm.len(), 1024);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

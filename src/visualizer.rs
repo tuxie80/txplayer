@@ -886,6 +886,37 @@ impl VisualizerState {
         self.paused_freeze = true;
     }
 
+    /// Seeds a realistic harmonic piano/orchestral spectrogram waterfall for demo/screenshot capture.
+    pub fn seed_demo_spectrogram_state(&mut self) {
+        self.reset();
+        self.mode = VisualizerMode::Spectrogram;
+        for frame_i in 0..SPECTROGRAM_HISTORY {
+            let t = frame_i as f32 / SPECTROGRAM_HISTORY as f32;
+            let mut col = [0u8; SPECTRUM_BANDS];
+            // Fundamental + harmonic overtone ribbons sweeping gently like a solo cello & piano phrase
+            let fundamentals = [
+                10.0 + (t * TAU * 1.5).sin() * 2.5,
+                21.0 + (t * TAU * 0.8 + 1.0).cos() * 3.0,
+                32.0 + (t * TAU * 2.0).sin() * 2.0,
+                43.0 + (t * TAU * 1.2 + 0.5).cos() * 2.2,
+                53.0,
+            ];
+            for (b, slot) in col.iter_mut().enumerate() {
+                let mut e = 0.04_f32;
+                for (hi, &center) in fundamentals.iter().enumerate() {
+                    let dist = (b as f32 - center).abs();
+                    let w = (-(dist * dist) / (2.2 + hi as f32 * 0.6)).exp();
+                    let amp = (0.94 - hi as f32 * 0.14) * (0.72 + 0.28 * ((t * 9.0 + hi as f32).sin()));
+                    e = e.max(w * amp);
+                }
+                *slot = (e.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+            self.spectrogram.push_back(col);
+        }
+        self.peak_freq_hz = 440.0;
+        self.paused_freeze = true;
+    }
+
     pub fn update(
         &mut self,
         tap: &VisualTap,

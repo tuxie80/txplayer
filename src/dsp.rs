@@ -689,6 +689,8 @@ pub struct RealtimeDsp {
     ir_gain: f64,
     loaded_ir_key: (IrPreset, Option<std::path::PathBuf>),
     convolver: Option<Box<StereoConvolver>>,
+    pitch_ratio: f64,
+    pitch_shifter: Box<StereoPitchShifter>,
     preamp_gain: f64,
     peq_preamp_gain: f64,
     crossfeed_mix: f64,
@@ -704,6 +706,77 @@ pub struct RealtimeDsp {
     eq_r: [Biquad; 10],
     peq_l: [Biquad; MAX_PARAMETRIC_BANDS],
     peq_r: [Biquad; MAX_PARAMETRIC_BANDS],
+}
+
+/// Lock-free, zero-allocation pure-Rust dual-tap Hann-windowed stereo pitch shifter
+/// supporting real-time ±12 semitone transpose, concert tuning (`A=432/415 Hz`), and
+/// pitch-preserving practice slowdown/speedup.
+const PITCH_BUF_LEN: usize = 8192;
+const PITCH_BUF_MASK: usize = PITCH_BUF_LEN - 1;
+
+struct StereoPitchShifter {
+    buf_l: [f64; PITCH_BUF_LEN],
+    buf_r: [f64; PITCH_BUF_LEN],
+    write_pos: usize,
+    grain_len: f64,
+    phase: f64,
+}
+
+impl StereoPitchShifter {
+    fn new(sample_rate: f64) -> Self {
+        // ~44 ms grain window keeps piano attacks crisp while staying smooth on sustained strings
+        let grain_len = (sample_rate * 0.044).clamp(512.0, 3600.0);
+        Self {
+            buf_l: [0.0; PITCH_BUF_LEN],
+            buf_r: [0.0; PITCH_BUF_LEN],
+            write_pos: 0,
+            grain_len,
+            phase: 0.0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.buf_l.fill(0.0);
+        self.buf_r.fill(0.0);
+        self.write_pos = 0;
+        self.phase = 0.0;
+    }
+
+    #[inline(always)]
+    fn read_interp(buf: &[f64; PITCH_BUF_LEN], write_pos: usize, delay: f64) -> f64 {
+        let pos = (write_pos as f64) - delay;
+        let idx0 = pos.floor() as isize;
+        let frac = pos - (idx0 as f64);
+        let i0 = (idx0 as usize) & PITCH_BUF_MASK;
+        let i1 = i0.wrapping_add(1) & PITCH_BUF_MASK;
+        buf[i0] + (buf[i1] - buf[i0]) * frac
+    }
+
+    #[inline(always)]
+    fn process_stereo(&mut self, l: f64, r: f64, ratio: f64) -> (f64, f64) {
+        self.buf_l[self.write_pos] = l;
+        self.buf_r[self.write_pos] = r;
+
+        let ph_a = self.phase;
+        let ph_b = (self.phase + 0.5).fract();
+        let d_a = ph_a * self.grain_len + 4.0;
+        let d_b = ph_b * self.grain_len + 4.0;
+
+        // Complementary Hann crossfade windows (sum identically to 1.0!)
+        let w_a = 0.5 * (1.0 - (TAU * ph_a).cos());
+        let w_b = 0.5 * (1.0 - (TAU * ph_b).cos());
+
+        let out_l = Self::read_interp(&self.buf_l, self.write_pos, d_a) * w_a
+            + Self::read_interp(&self.buf_l, self.write_pos, d_b) * w_b;
+        let out_r = Self::read_interp(&self.buf_r, self.write_pos, d_a) * w_a
+            + Self::read_interp(&self.buf_r, self.write_pos, d_b) * w_b;
+
+        self.write_pos = (self.write_pos + 1) & PITCH_BUF_MASK;
+        // Delay moves at rate (1 - ratio) per input sample -> read pointer advances at `ratio`
+        let delta = (1.0 - ratio) / self.grain_len;
+        self.phase = (self.phase + delta).rem_euclid(1.0);
+        (out_l, out_r)
+    }
 }
 
 impl RealtimeDsp {
@@ -731,6 +804,8 @@ impl RealtimeDsp {
             ir_gain: 1.0,
             loaded_ir_key: (IrPreset::Off, None),
             convolver: None,
+            pitch_ratio: 1.0,
+            pitch_shifter: Box::new(StereoPitchShifter::new(sr)),
             preamp_gain: 1.0,
             peq_preamp_gain: 1.0,
             crossfeed_mix: 0.0,
@@ -781,6 +856,20 @@ impl RealtimeDsp {
         self.mono_fold = snap.mono_fold;
         self.invert_polarity = snap.invert_polarity;
         self.swap_channels = snap.swap_channels;
+
+        let total_st = (snap.pitch_semitones as f64).clamp(-12.0, 12.0)
+            + snap.concert_tuning.semitone_offset();
+        let speed_comp = if snap.preserve_pitch && snap.playback_speed_hint > 0.2 {
+            snap.playback_speed_hint as f64
+        } else {
+            1.0
+        };
+        let raw_ratio = 2.0_f64.powf(total_st / 12.0) / speed_comp;
+        self.pitch_ratio = if (raw_ratio - 1.0).abs() < 1e-4 {
+            1.0
+        } else {
+            raw_ratio.clamp(0.4, 2.5)
+        };
 
         self.ir_enabled = snap.ir_enabled && snap.ir_preset != IrPreset::Off;
         self.ir_mix = (snap.ir_mix as f64).clamp(0.0, 1.0);
@@ -851,6 +940,7 @@ impl RealtimeDsp {
         if let Some(ref mut conv) = self.convolver {
             conv.reset();
         }
+        self.pitch_shifter.reset();
     }
 
     /// Lock-free xorshift64 uniform in [-0.5, 0.5).
@@ -915,6 +1005,10 @@ impl RealtimeDsp {
                 && let Some(ref mut conv) = self.convolver
             {
                 (l, r) = conv.process_stereo(l, r, self.ir_mix, self.ir_gain);
+            }
+
+            if (self.pitch_ratio - 1.0).abs() >= 1e-4 {
+                (l, r) = self.pitch_shifter.process_stereo(l, r, self.pitch_ratio);
             }
 
             if self.swap_channels {
@@ -1155,5 +1249,35 @@ mod tests {
         // After swap: (-0.2, 0.4) -> invert: (0.2, -0.4) -> balance +1.0: (0.0, -0.4)
         assert!(l.abs() < 1e-5, "Expected left muted at +100% balance, got {l}");
         assert!((r - (-0.4)).abs() < 1e-5, "Expected inverted swapped right = -0.4, got {r}");
+    }
+
+    #[test]
+    fn pitch_shifter_transposes_440hz_up_one_octave_to_880hz() {
+        let sr = 48_000.0_f64;
+        let mut shifter = StereoPitchShifter::new(sr);
+        let n = 8192usize;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = (TAU * 440.0 * i as f64 / sr).sin();
+            let (yl, _) = shifter.process_stereo(x, x, 2.0);
+            out.push(yl);
+        }
+        // Measure dominant frequency via DFT energy at 440 Hz vs 880 Hz on settled tail
+        let tail = &out[4096..];
+        let power_at = |freq: f64| -> f64 {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (k, &v) in tail.iter().enumerate() {
+                let a = TAU * freq * k as f64 / sr;
+                re += v * a.cos();
+                im -= v * a.sin();
+            }
+            (re * re + im * im).sqrt()
+        };
+        let p440 = power_at(440.0);
+        let p880 = power_at(880.0);
+        assert!(
+            p880 > p440 * 10.0 && p880 > 200.0,
+            "Expected strong 880 Hz octave shift (p880={p880:.1}, p440={p440:.1})"
+        );
     }
 }

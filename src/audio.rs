@@ -24,7 +24,10 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
 use crate::archive::{ArchivePcmDecoder, is_archive_codec_path};
-use crate::dsd::{DsdDopReader, DsdPcmDecoder, RawCdBinDecoder, is_dsd_path, is_raw_cd_bin};
+use crate::dsd::{
+    DsdDopReader, DsdPcmDecoder, RawCdBinDecoder, SacdIsoPcmDecoder, is_dsd_path, is_raw_cd_bin,
+    probe_sacd_iso,
+};
 use crate::dsp::{RealtimeDsp, SharedDspParams};
 use crate::exclusive::ExclusiveDeviceGuard;
 use crate::plugins::{DspConfig, OversamplingMode, ResamplerQuality};
@@ -833,6 +836,7 @@ enum DecoderBackend {
         track_id: u32,
     },
     Dsd(DsdPcmDecoder),
+    SacdIso(SacdIsoPcmDecoder),
     RawCdBin(RawCdBinDecoder),
     Archive(ArchivePcmDecoder),
 }
@@ -893,6 +897,40 @@ impl DecoderState {
                 time_base: Some(TimeBase::new(1, sr)),
                 is_variable_bitrate: false,
                 nominal_kbps: Some(kbps),
+            });
+        }
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
+        {
+            let info = probe_sacd_iso(path)?;
+            if info.is_dst_compressed {
+                return Err(anyhow!(
+                    "SACD ISO uses DST compression — extract stereo tracks to .dsf with sacd_extract for playback"
+                ));
+            }
+            let first = info
+                .tracks
+                .first()
+                .ok_or_else(|| anyhow!("No stereo DSD tracks found in SACD ISO"))?;
+            let total_sectors: u32 = info
+                .tracks
+                .iter()
+                .map(|t| t.length_sectors)
+                .fold(0u32, u32::saturating_add);
+            let total_dur: f64 = info.tracks.iter().map(|t| t.duration_secs).sum();
+            let dec = SacdIsoPcmDecoder::open_range(path, first.start_lsn, total_sectors)?;
+            let sr = dec.pcm_sample_rate();
+            return Ok(Self {
+                backend: DecoderBackend::SacdIso(dec),
+                source_sample_rate: sr,
+                source_channels: 2,
+                bit_depth: Some(24),
+                duration: Some(total_dur.max(0.1)),
+                time_base: Some(TimeBase::new(1, sr)),
+                is_variable_bitrate: false,
+                nominal_kbps: Some(5645),
             });
         }
         if is_raw_cd_bin(path) {
@@ -1000,6 +1038,7 @@ impl DecoderState {
                 Ok(())
             }
             DecoderBackend::Dsd(dec) => dec.seek(clamped),
+            DecoderBackend::SacdIso(dec) => dec.seek(clamped),
             DecoderBackend::RawCdBin(dec) => dec.seek(clamped),
             DecoderBackend::Archive(dec) => dec.seek(clamped),
         }
@@ -1023,6 +1062,18 @@ impl DecoderState {
                     Ok(DecodeChunk::Frames {
                         channels: dec.info.channels,
                         packet_bytes: bytes,
+                        packet_dur: frames as u64,
+                    })
+                }
+            }
+            DecoderBackend::SacdIso(dec) => {
+                let frames = dec.read_pcm_frames(2048, pcm_out)?;
+                if frames == 0 {
+                    Ok(DecodeChunk::Eof)
+                } else {
+                    Ok(DecodeChunk::Frames {
+                        channels: 2,
+                        packet_bytes: frames * 8,
                         packet_dur: frames as u64,
                     })
                 }

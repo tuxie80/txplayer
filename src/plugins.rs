@@ -703,6 +703,53 @@ pub struct DspConfig {
     pub peq_preamp_db: f32,
     #[serde(default)]
     pub peq_bands: Vec<ParametricBand>,
+    // Pitch-Preserving Practice Mode & Musical Tuning Reference
+    #[serde(default = "default_true")]
+    pub preserve_pitch: bool,
+    #[serde(default)]
+    pub pitch_semitones: f32,
+    #[serde(default)]
+    pub concert_tuning: ConcertTuning,
+    /// Runtime playback speed hint synced from transport (used to compensate pitch when `preserve_pitch` is active)
+    #[serde(skip, default = "default_one_f32")]
+    pub playback_speed_hint: f32,
+}
+
+fn default_one_f32() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ConcertTuning {
+    #[default]
+    Standard440,
+    Verdi432,
+    Baroque415,
+}
+
+impl ConcertTuning {
+    pub const ALL: &'static [ConcertTuning] = &[
+        ConcertTuning::Standard440,
+        ConcertTuning::Verdi432,
+        ConcertTuning::Baroque415,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ConcertTuning::Standard440 => "A=440 Hz",
+            ConcertTuning::Verdi432 => "A=432 Hz",
+            ConcertTuning::Baroque415 => "A=415 Hz",
+        }
+    }
+
+    /// Semitone offset relative to A=440 Hz (`12 * log2(f / 440)`).
+    pub fn semitone_offset(self) -> f64 {
+        match self {
+            ConcertTuning::Standard440 => 0.0,
+            ConcertTuning::Verdi432 => 12.0 * (432.0_f64 / 440.0).log2(),
+            ConcertTuning::Baroque415 => 12.0 * (415.0_f64 / 440.0).log2(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -800,6 +847,10 @@ impl Default for DspConfig {
             peq_profile_name: String::new(),
             peq_preamp_db: 0.0,
             peq_bands: Vec::new(),
+            preserve_pitch: true,
+            pitch_semitones: 0.0,
+            concert_tuning: ConcertTuning::Standard440,
+            playback_speed_hint: 1.0,
         }
     }
 }
@@ -850,11 +901,15 @@ impl DspConfig {
             || self.invert_polarity
             || self.swap_channels;
         let ir_active = self.ir_enabled && self.ir_preset != IrPreset::Off && self.ir_mix > 0.01;
+        let pitch_active = self.pitch_semitones.abs() > 0.05
+            || self.concert_tuning != ConcertTuning::Standard440
+            || (self.preserve_pitch && (self.playback_speed_hint - 1.0).abs() > 0.01);
         eq_active
             || peq_active
             || (self.crossfeed_enabled && self.crossfeed_amount > 0.01)
             || console_active
             || ir_active
+            || pitch_active
     }
 
     pub fn summary(&self) -> String {
@@ -907,6 +962,15 @@ impl DspConfig {
             }
             if self.balance.abs() > 0.02 {
                 parts.push(format!("Bal {:+.0}%", self.balance * 100.0));
+            }
+            if self.pitch_semitones.abs() > 0.05 {
+                parts.push(format!("Pitch {:+.1} st", self.pitch_semitones));
+            }
+            if self.concert_tuning != ConcertTuning::Standard440 {
+                parts.push(self.concert_tuning.name().into());
+            }
+            if self.preserve_pitch && (self.playback_speed_hint - 1.0).abs() > 0.01 {
+                parts.push("Pitch-Lock".into());
             }
             if self.soft_limiter {
                 parts.push("Limiter".into());
@@ -1023,7 +1087,7 @@ pub struct TrackBookmark {
 }
 
 /// Top-level pluggable modules configuration persisted in preferences.json.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
     #[serde(default)]
     pub dsp: DspConfig,
@@ -1035,6 +1099,28 @@ pub struct PluginConfig {
     pub device_profiles: BTreeMap<String, DeviceProfile>,
     #[serde(default)]
     pub bookmarks: BTreeMap<String, Vec<TrackBookmark>>,
+    #[serde(default)]
+    pub lan_remote_enabled: bool,
+    #[serde(default = "default_remote_port")]
+    pub lan_remote_port: u16,
+}
+
+fn default_remote_port() -> u16 {
+    7878
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            dsp: DspConfig::default(),
+            visualizers: VisualizerPluginConfig::default(),
+            tag_providers: TagProviderConfig::default(),
+            device_profiles: BTreeMap::new(),
+            bookmarks: BTreeMap::new(),
+            lan_remote_enabled: false,
+            lan_remote_port: default_remote_port(),
+        }
+    }
 }
 
 impl PluginConfig {
