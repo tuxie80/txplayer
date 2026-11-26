@@ -330,10 +330,8 @@ mod tests {
     fn ipc_protocol_roundtrips_multiple_paths_and_rejects_wrong_token() {
         let token = "deadbeef12345678";
         let expected_header = format!("{HANDSHAKE_PREFIX}{token}");
-        let sent = vec![
-            PathBuf::from("/tmp/01 track.flac"),
-            PathBuf::from("/tmp/02 track.flac"),
-        ];
+        let base = std::env::temp_dir();
+        let sent = vec![base.join("01 track.flac"), base.join("02 track.flac")];
         let payload = encode_ipc_request(token, &sent);
 
         let mut reader = Cursor::new(payload.as_bytes());
