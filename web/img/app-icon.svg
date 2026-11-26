@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1b262c"/>
+      <stop offset="55%" stop-color="#11171a"/>
+      <stop offset="100%" stop-color="#0b0f11"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="54%" r="48%">
+      <stop offset="0%" stop-color="#56d6a2" stop-opacity="0.22"/>
+      <stop offset="65%" stop-color="#56d6a2" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#56d6a2" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="barGrad" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#228b68"/>
+      <stop offset="52%" stop-color="#56d6a2"/>
+      <stop offset="100%" stop-color="#b8f7dc"/>
+    </linearGradient>
+    <linearGradient id="goldBar" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#2a9c75"/>
+      <stop offset="55%" stop-color="#6ee2b2"/>
+      <stop offset="100%" stop-color="#f2cf7e"/>
+    </linearGradient>
+    <linearGradient id="reflectGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#56d6a2" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#56d6a2" stop-opacity="0.0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS squircle base -->
+  <rect x="44" y="44" width="936" height="936" rx="212" fill="url(#bg)"/>
+  <rect x="44" y="44" width="936" height="936" rx="212" fill="url(#glow)"/>
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="none" stroke="#56d6a2" stroke-opacity="0.22" stroke-width="4"/>
+
+  <!-- Subtle horizon line -->
+  <line x1="168" y1="670" x2="856" y2="670" stroke="#56d6a2" stroke-opacity="0.24" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- Precision 9-bar Concert Visualizer -->
+  <rect x="196" y="510" width="52" height="148" rx="26" fill="url(#barGrad)"/>
+  <rect x="272" y="410" width="52" height="248" rx="26" fill="url(#barGrad)"/>
+  <rect x="348" y="296" width="52" height="362" rx="26" fill="url(#barGrad)"/>
+  <rect x="424" y="362" width="52" height="296" rx="26" fill="url(#barGrad)"/>
+  <rect x="500" y="216" width="52" height="442" rx="26" fill="url(#goldBar)"/>
+  <rect x="576" y="318" width="52" height="340" rx="26" fill="url(#barGrad)"/>
+  <rect x="652" y="264" width="52" height="394" rx="26" fill="url(#goldBar)"/>
+  <rect x="728" y="438" width="52" height="220" rx="26" fill="url(#barGrad)"/>
+  <rect x="804" y="534" width="40" height="124" rx="20" fill="url(#barGrad)"/>
+
+  <!-- Floating peak caps -->
+  <rect x="348" y="264" width="52" height="14" rx="7" fill="#c7fce4"/>
+  <rect x="500" y="182" width="52" height="14" rx="7" fill="#f7dfa0"/>
+  <rect x="652" y="232" width="52" height="14" rx="7" fill="#f7dfa0"/>
+
+  <!-- Soft mirrored acoustic reflection -->
+  <rect x="196" y="684" width="52" height="62" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="272" y="684" width="52" height="92" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="348" y="684" width="52" height="122" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="424" y="684" width="52" height="104" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="500" y="684" width="52" height="142" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="576" y="684" width="52" height="114" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="652" y="684" width="52" height="128" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="728" y="684" width="52" height="84" rx="20" fill="url(#reflectGrad)"/>
+  <rect x="804" y="684" width="40" height="52" rx="16" fill="url(#reflectGrad)"/>
+</svg>
