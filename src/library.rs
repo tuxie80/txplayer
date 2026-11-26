@@ -10,7 +10,7 @@ use crossbeam_channel::{Sender, unbounded};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use crate::cue::read_cue_tracks;
+use crate::cue::{read_cue_tracks, read_embedded_flac_cue_tracks};
 use crate::metadata::{Track, is_cue_file, is_supported, read_track};
 
 #[derive(Debug)]
@@ -716,21 +716,31 @@ pub fn scan(paths: Vec<PathBuf>, events: Sender<ScanEvent>, cover_directory: Pat
         }
     }
 
-    // 2) Scan standalone audio files (skipping raw monolithic images already expanded by a CUE sheet)
+    // 2) Scan standalone audio files (skipping raw monolithic images already expanded by a CUE sheet,
+    //    and auto-expanding FLAC files with embedded CUESHEETs into individual album tracks!)
     let standalone: Vec<PathBuf> = files
         .into_iter()
         .filter(|p| !cue_referenced_images.contains(p))
         .collect();
     let total = standalone.len();
     for (index, path) in standalone.iter().enumerate() {
-        match read_track(path, &cover_directory) {
-            Ok(track) => {
+        if let Some(embedded_tracks) = read_embedded_flac_cue_tracks(path, &cover_directory) {
+            for tr in embedded_tracks {
                 found += 1;
-                if events.send(ScanEvent::Track(Box::new(track))).is_err() {
+                if events.send(ScanEvent::Track(Box::new(tr))).is_err() {
                     return;
                 }
             }
-            Err(_) => failed += 1,
+        } else {
+            match read_track(path, &cover_directory) {
+                Ok(track) => {
+                    found += 1;
+                    if events.send(ScanEvent::Track(Box::new(track))).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => failed += 1,
+            }
         }
         let _ = events.send(ScanEvent::Progress {
             scanned: index + 1,

@@ -65,12 +65,16 @@ pub enum QualityTier {
 
 impl Track {
     pub fn is_lossless(&self) -> bool {
-        matches!(self.codec.as_str(), "FLAC" | "ALAC" | "PCM")
+        matches!(
+            self.codec.as_str(),
+            "FLAC" | "ALAC" | "PCM" | "CD-BE" | "DSD64" | "DSD128" | "DSD256" | "DSD512"
+        )
     }
 
     pub fn is_hires(&self) -> bool {
-        self.is_lossless()
-            && (self.sample_rate.unwrap_or(0) > 48_000 || self.bit_depth.unwrap_or(0) >= 24)
+        self.codec.starts_with("DSD")
+            || (self.is_lossless()
+                && (self.sample_rate.unwrap_or(0) > 48_000 || self.bit_depth.unwrap_or(0) >= 24))
     }
 
     pub fn quality_tier(&self) -> QualityTier {
@@ -143,8 +147,8 @@ struct Tags {
 }
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "flac", "m4a", "mp4", "aac", "mp3", "mp2", "mp1", "wav", "wave", "aif", "aiff", "aifc", "caf",
-    "ogg", "oga", "webm", "mka", "mkv",
+    "flac", "dsf", "dff", "m4a", "mp4", "aac", "mp3", "mp2", "mp1", "wav", "wave", "aif", "aiff",
+    "aifc", "caf", "ogg", "oga", "webm", "mka", "mkv",
 ];
 
 pub fn is_supported(path: &Path) -> bool {
@@ -164,6 +168,55 @@ pub fn is_cue_file(path: &Path) -> bool {
 }
 
 pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
+    if crate::dsd::is_dsd_path(path) {
+        let (info, tags) = crate::dsd::probe_dsd(path)?;
+        let id = track_id(path);
+        let title = tags.title.unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Unknown title")
+                .replace('_', " ")
+        });
+        let cover_path = tags
+            .artwork
+            .and_then(|(data, media_type)| save_cover(cover_directory, id, &data, &media_type).ok())
+            .or_else(|| find_sidecar_cover(path));
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let nominal_kbps = ((info.sample_rate_hz as u64 * info.channels as u64) / 1000) as u32;
+        return Ok(Track {
+            id,
+            path: path.to_path_buf(),
+            title,
+            artist: tags.artist.unwrap_or_else(|| "Unknown Artist".into()),
+            album: tags.album.unwrap_or_else(|| "Unknown Album".into()),
+            album_artist: tags.album_artist,
+            track_number: tags.track_number,
+            disc_number: tags.disc_number,
+            year: tags.year,
+            genre: tags.genre,
+            duration: Some(info.duration_secs),
+            sample_rate: Some(info.sample_rate_hz),
+            bit_depth: Some(1),
+            channels: Some(info.channels.min(u16::MAX as usize) as u16),
+            codec: info.dsd_label.into(),
+            nominal_bitrate: Some(nominal_kbps),
+            cover_path,
+            cue_start: None,
+            cue_end: None,
+            rg_track_gain_db: None,
+            rg_track_peak: None,
+            rg_album_gain_db: None,
+            rg_album_peak: None,
+            lyrics: None,
+            play_count: 0,
+            rating: 0,
+            added_at: now_unix,
+        });
+    }
+
     let file = File::open(path).with_context(|| format!("Opening {}", path.display()))?;
     let source = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
@@ -249,7 +302,7 @@ pub fn read_track(path: &Path, cover_directory: &Path) -> Result<Track> {
     })
 }
 
-fn find_sidecar_cover(audio_path: &Path) -> Option<PathBuf> {
+pub(crate) fn find_sidecar_cover(audio_path: &Path) -> Option<PathBuf> {
     let dir = audio_path.parent()?;
     const CANDIDATES: &[&str] = &[
         "cover.jpg",
@@ -417,7 +470,9 @@ pub fn cue_track_id(audio_path: &Path, track_number: u32, start_secs: f64) -> u6
 }
 
 pub fn format_sample_rate(rate: u32) -> String {
-    if rate.is_multiple_of(1000) {
+    if rate >= 1_000_000 {
+        format!("{:.2} MHz", rate as f64 / 1_000_000.0)
+    } else if rate.is_multiple_of(1000) {
         format!("{} kHz", rate / 1000)
     } else {
         format!("{:.1} kHz", rate as f64 / 1000.0)

@@ -4,6 +4,7 @@ mod analyzer;
 mod app;
 mod audio;
 mod cue;
+mod dsd;
 mod dsp;
 mod icons;
 mod library;

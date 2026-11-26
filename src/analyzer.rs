@@ -57,6 +57,62 @@ pub fn analyze_file(
     cue_start: Option<f64>,
     cue_end: Option<f64>,
 ) -> Result<AudioAnalysis> {
+    if crate::dsd::is_dsd_path(path) {
+        let mut dec = crate::dsd::DsdPcmDecoder::open(path)?;
+        let sr = dec.info.pcm_sample_rate;
+        let ch = dec.info.channels;
+        let start_secs = cue_start.unwrap_or(0.0).max(0.0);
+        if start_secs > 0.05 {
+            let _ = dec.seek(start_secs);
+        }
+        let max_frames = cue_end
+            .map(|e| ((e - start_secs).max(0.0) * sr as f64).round() as u64)
+            .unwrap_or(u64::MAX);
+        let mut acc = StreamAnalyzer::new(sr, ch);
+        let mut pcm = Vec::with_capacity(4096 * ch);
+        let mut total_frames = 0u64;
+        while total_frames < max_frames {
+            let want = 4096.min((max_frames - total_frames) as usize);
+            let n = dec.read_pcm_frames(want, &mut pcm)?;
+            if n == 0 {
+                break;
+            }
+            acc.push_interleaved(&pcm, ch);
+            total_frames += n as u64;
+        }
+        if total_frames == 0 {
+            return Err(anyhow!("DSD track contained no decodable audio frames"));
+        }
+        return Ok(acc.finish(Some(24)));
+    }
+    if crate::dsd::is_raw_cd_bin(path) {
+        let mut dec = crate::dsd::RawCdBinDecoder::open(path, false)?;
+        let sr = 44_100_u32;
+        let start_secs = cue_start.unwrap_or(0.0).max(0.0);
+        if start_secs > 0.05 {
+            let _ = dec.seek(start_secs);
+        }
+        let max_frames = cue_end
+            .map(|e| ((e - start_secs).max(0.0) * sr as f64).round() as u64)
+            .unwrap_or(u64::MAX);
+        let mut acc = StreamAnalyzer::new(sr, 2);
+        let mut pcm = Vec::with_capacity(4096 * 2);
+        let mut total_frames = 0u64;
+        while total_frames < max_frames {
+            let want = 4096.min((max_frames - total_frames) as usize);
+            let n = dec.read_pcm_frames(want, &mut pcm)?;
+            if n == 0 {
+                break;
+            }
+            acc.push_interleaved(&pcm, 2);
+            total_frames += n as u64;
+        }
+        if total_frames == 0 {
+            return Err(anyhow!("CD image contained no decodable audio frames"));
+        }
+        return Ok(acc.finish(Some(16)));
+    }
+
     let file = std::fs::File::open(path).with_context(|| format!("Opening {}", path.display()))?;
     let source = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();

@@ -23,6 +23,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
+use crate::dsd::{DsdPcmDecoder, RawCdBinDecoder, is_dsd_path, is_raw_cd_bin};
 use crate::dsp::{RealtimeDsp, SharedDspParams};
 use crate::plugins::{DspConfig, OversamplingMode, ResamplerQuality};
 
@@ -441,6 +442,41 @@ pub fn default_output_device_name() -> Option<String> {
 /// Fast background acoustic envelope extraction (normalised 0.0..1.0 bins) for waveform seekbar.
 pub fn compute_waveform(path: &Path, bins: usize) -> Option<Vec<f32>> {
     let bins = bins.max(32);
+    if is_dsd_path(path) || is_raw_cd_bin(path) {
+        let mut dec = DecoderState::open(path).ok()?;
+        let mut raw_peaks: Vec<f32> = Vec::with_capacity(bins * 4);
+        let mut decode_buf = None;
+        let mut scratch = Vec::new();
+        let mut errs = 0usize;
+        let mut chunk_i = 0usize;
+        while let Ok(chunk) = dec.decode_chunk(&mut decode_buf, &mut scratch, &mut errs) {
+            match chunk {
+                DecodeChunk::Frames { channels, .. } => {
+                    chunk_i += 1;
+                    if chunk_i.is_multiple_of(2) && dec.duration.unwrap_or(0.0) > 240.0 {
+                        continue;
+                    }
+                    let ch = channels.max(1);
+                    if scratch.is_empty() {
+                        continue;
+                    }
+                    let mut sum_sq = 0.0_f32;
+                    let mut peak = 0.0_f32;
+                    for &s in scratch.iter().step_by(ch) {
+                        let a = s.abs();
+                        sum_sq += a * a;
+                        peak = peak.max(a);
+                    }
+                    let n = (scratch.len() / ch).max(1) as f32;
+                    raw_peaks.push(((sum_sq / n).sqrt() * 0.7 + peak * 0.3).min(1.0));
+                }
+                DecodeChunk::Reset => continue,
+                DecodeChunk::Eof => break,
+            }
+        }
+        return finish_waveform_bins(&raw_peaks, bins);
+    }
+
     let file = std::fs::File::open(path).ok()?;
     let source = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut hint = Hint::new();
@@ -513,6 +549,10 @@ pub fn compute_waveform(path: &Path, bins: usize) -> Option<Vec<f32>> {
         raw_peaks.push((rms * 0.7 + peak * 0.3).min(1.0));
     }
 
+    finish_waveform_bins(&raw_peaks, bins)
+}
+
+fn finish_waveform_bins(raw_peaks: &[f32], bins: usize) -> Option<Vec<f32>> {
     if raw_peaks.is_empty() {
         return None;
     }
@@ -721,19 +761,71 @@ fn run_audio_thread(
     Ok(())
 }
 
+enum DecoderBackend {
+    Symphonia {
+        format: Box<dyn FormatReader>,
+        decoder: Box<dyn Decoder>,
+        track_id: u32,
+    },
+    Dsd(DsdPcmDecoder),
+    RawCdBin(RawCdBinDecoder),
+}
+
+enum DecodeChunk {
+    Frames {
+        channels: usize,
+        packet_bytes: usize,
+        packet_dur: u64,
+    },
+    Reset,
+    Eof,
+}
+
 struct DecoderState {
-    format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
-    track_id: u32,
+    backend: DecoderBackend,
     source_sample_rate: u32,
     source_channels: usize,
     bit_depth: Option<u32>,
     duration: Option<f64>,
     time_base: Option<TimeBase>,
+    is_variable_bitrate: bool,
+    nominal_kbps: Option<u32>,
 }
 
 impl DecoderState {
     fn open(path: &Path) -> Result<Self> {
+        if is_dsd_path(path) {
+            let dec = DsdPcmDecoder::open(path)?;
+            let sr = dec.info.pcm_sample_rate;
+            let ch = dec.info.channels;
+            let dur = dec.info.duration_secs;
+            let kbps = ((dec.info.sample_rate_hz as u64 * ch as u64) / 1000) as u32;
+            return Ok(Self {
+                backend: DecoderBackend::Dsd(dec),
+                source_sample_rate: sr,
+                source_channels: ch,
+                bit_depth: Some(24),
+                duration: Some(dur),
+                time_base: Some(TimeBase::new(1, sr)),
+                is_variable_bitrate: false,
+                nominal_kbps: Some(kbps),
+            });
+        }
+        if is_raw_cd_bin(path) {
+            let dec = RawCdBinDecoder::open(path, false)?;
+            let dur = dec.duration_secs();
+            return Ok(Self {
+                backend: DecoderBackend::RawCdBin(dec),
+                source_sample_rate: 44_100,
+                source_channels: 2,
+                bit_depth: Some(16),
+                duration: Some(dur),
+                time_base: Some(TimeBase::new(1, 44_100)),
+                is_variable_bitrate: false,
+                nominal_kbps: Some(1411),
+            });
+        }
+
         let file =
             std::fs::File::open(path).with_context(|| format!("Opening {}", path.display()))?;
         let source = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
@@ -773,45 +865,155 @@ impl DecoderState {
                 time.seconds as f64 + time.frac
             })
         });
+        let is_vbr = is_variable_lossless(params.codec);
         let decoder = symphonia::default::get_codecs()
             .make(&params, &DecoderOptions::default())
             .context("Creating audio decoder")?;
         Ok(Self {
-            format,
-            decoder,
-            track_id,
+            backend: DecoderBackend::Symphonia {
+                format,
+                decoder,
+                track_id,
+            },
             source_sample_rate,
             source_channels,
             bit_depth,
             duration,
             time_base,
+            is_variable_bitrate: is_vbr,
+            nominal_kbps: None,
         })
     }
 
     fn seek(&mut self, seconds: f64) -> Result<()> {
         let clamped = seconds.max(0.0);
-        let time = Time::new(clamped.trunc() as u64, clamped.fract());
-        if self
-            .format
-            .seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time,
-                    track_id: Some(self.track_id),
-                },
-            )
-            .is_err()
-        {
-            self.format.seek(
-                SeekMode::Coarse,
-                SeekTo::Time {
-                    time,
-                    track_id: Some(self.track_id),
-                },
-            )?;
+        match &mut self.backend {
+            DecoderBackend::Symphonia {
+                format,
+                decoder,
+                track_id,
+            } => {
+                let time = Time::new(clamped.trunc() as u64, clamped.fract());
+                if format
+                    .seek(
+                        SeekMode::Accurate,
+                        SeekTo::Time {
+                            time,
+                            track_id: Some(*track_id),
+                        },
+                    )
+                    .is_err()
+                {
+                    format.seek(
+                        SeekMode::Coarse,
+                        SeekTo::Time {
+                            time,
+                            track_id: Some(*track_id),
+                        },
+                    )?;
+                }
+                decoder.reset();
+                Ok(())
+            }
+            DecoderBackend::Dsd(dec) => dec.seek(clamped),
+            DecoderBackend::RawCdBin(dec) => dec.seek(clamped),
         }
-        self.decoder.reset();
-        Ok(())
+    }
+
+    /// Decodes the next chunk of interleaved `f32` PCM into `pcm_out`.
+    fn decode_chunk(
+        &mut self,
+        decode_buf: &mut Option<(usize, SampleBuffer<f32>)>,
+        pcm_out: &mut Vec<f32>,
+        packet_errors: &mut usize,
+    ) -> Result<DecodeChunk> {
+        pcm_out.clear();
+        match &mut self.backend {
+            DecoderBackend::Dsd(dec) => {
+                let frames = dec.read_pcm_frames(2048, pcm_out)?;
+                if frames == 0 {
+                    Ok(DecodeChunk::Eof)
+                } else {
+                    let bytes = (frames * dec.info.decimation_factor / 8) * dec.info.channels;
+                    Ok(DecodeChunk::Frames {
+                        channels: dec.info.channels,
+                        packet_bytes: bytes,
+                        packet_dur: frames as u64,
+                    })
+                }
+            }
+            DecoderBackend::RawCdBin(dec) => {
+                let frames = dec.read_pcm_frames(2048, pcm_out)?;
+                if frames == 0 {
+                    Ok(DecodeChunk::Eof)
+                } else {
+                    Ok(DecodeChunk::Frames {
+                        channels: 2,
+                        packet_bytes: frames * 4,
+                        packet_dur: frames as u64,
+                    })
+                }
+            }
+            DecoderBackend::Symphonia {
+                format,
+                decoder,
+                track_id,
+            } => loop {
+                let packet = match format.next_packet() {
+                    Ok(packet) => packet,
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                    {
+                        return Ok(DecodeChunk::Eof);
+                    }
+                    Err(SymphoniaError::ResetRequired) => {
+                        decoder.reset();
+                        return Ok(DecodeChunk::Reset);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if packet.track_id() != *track_id {
+                    continue;
+                }
+                let packet_bytes = packet.buf().len();
+                let packet_dur = packet.dur();
+                match decoder.decode(&packet) {
+                    Ok(audio) => {
+                        *packet_errors = 0;
+                        let spec_audio = *audio.spec();
+                        let channels = spec_audio.channels.count().max(1);
+                        let cap = audio.capacity();
+                        let buf = match decode_buf {
+                            Some((cur_cap, sb)) if *cur_cap >= cap => sb,
+                            slot => {
+                                *slot =
+                                    Some((cap, SampleBuffer::<f32>::new(cap as u64, spec_audio)));
+                                &mut slot.as_mut().unwrap().1
+                            }
+                        };
+                        buf.copy_interleaved_ref(audio);
+                        pcm_out.extend_from_slice(buf.samples());
+                        return Ok(DecodeChunk::Frames {
+                            channels,
+                            packet_bytes,
+                            packet_dur,
+                        });
+                    }
+                    Err(SymphoniaError::DecodeError(_)) => {
+                        *packet_errors += 1;
+                        if *packet_errors >= MAX_PACKET_ERROR_STREAK {
+                            return Err(anyhow!("Repeated decoder errors; playback stopped"));
+                        }
+                    }
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                    {
+                        return Ok(DecodeChunk::Eof);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            },
+        }
     }
 }
 
@@ -849,36 +1051,45 @@ enum RamLoadOutcome {
     Interrupted(AudioCommand),
 }
 
-/// Pre-decodes a full track into RAM when it fits under `max_bytes`.
-/// Checks `commands` every 64 packets so skipping or stopping during preload is instantaneous.
+/// Pre-decodes a full track (including virtual CUE tracks!) into RAM when it fits under `max_bytes`.
+/// Checks `commands` every 64 chunks so skipping or stopping during preload is instantaneous.
 fn try_load_track_to_ram(
     decoder: &mut DecoderState,
     max_bytes: usize,
     commands: &Receiver<AudioCommand>,
-    initial_file_pos: f64,
+    spec: &PlaybackSpec,
 ) -> RamLoadOutcome {
     let ch = decoder.source_channels.max(1);
     let sr = decoder.source_sample_rate.max(1);
     let max_samples = max_bytes / std::mem::size_of::<f32>();
-    if let Some(dur) = decoder.duration {
+    let track_dur = spec.effective_duration(decoder.duration);
+    if let Some(dur) = track_dur {
         let est_bytes = (dur * sr as f64 * ch as f64 * 4.0) as usize;
         if est_bytes > max_bytes || dur > 3600.0 {
             return RamLoadOutcome::SkippedTooLarge;
         }
     }
-    let prealloc = decoder
-        .duration
+    if spec.cue_start > 0.05 && decoder.seek(spec.cue_start).is_err() {
+        return RamLoadOutcome::SkippedTooLarge;
+    }
+    let max_track_frames: Option<usize> = spec
+        .cue_end
+        .map(|end| ((end - spec.cue_start).max(0.0) * sr as f64).round() as usize);
+
+    let prealloc = track_dur
         .map(|d| ((d * sr as f64 * ch as f64) as usize).min(max_samples))
         .unwrap_or(sr as usize * ch * 60);
     let mut samples: Vec<f32> = Vec::with_capacity(prealloc.min(16 * 1024 * 1024));
     let mut sample_buf: Option<(usize, SampleBuffer<f32>)> = None;
+    let mut pcm_scratch: Vec<f32> = Vec::with_capacity(8192);
+    let mut packet_errors = 0usize;
     let mut pkt_count: usize = 0;
     let mut timeline: Vec<u32> = Vec::new();
     let mut acc_bytes: usize = 0;
     let mut acc_frames: u64 = 0;
     let mut min_kbps: Option<u32> = None;
     let mut max_kbps: Option<u32> = None;
-    let mut variable = is_variable_lossless(decoder.decoder.codec_params().codec);
+    let mut variable = decoder.is_variable_bitrate;
 
     loop {
         pkt_count += 1;
@@ -892,81 +1103,81 @@ fn try_load_track_to_ram(
                 _ => {}
             }
         }
-        let packet = match decoder.format.next_packet() {
-            Ok(p) => p,
-            Err(SymphoniaError::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(SymphoniaError::ResetRequired) => {
-                decoder.decoder.reset();
-                continue;
-            }
-            Err(_) => return RamLoadOutcome::SkippedTooLarge,
-        };
-        if packet.track_id() != decoder.track_id {
-            continue;
-        }
-        // Record 0.5s bitrate buckets for live VBR telemetry during RAM playback
-        acc_bytes += packet.buf().len();
-        acc_frames += packet.dur();
-        if let Some(tb) = decoder.time_base
-            && acc_frames > 0
+        if let Some(limit_f) = max_track_frames
+            && samples.len() / ch >= limit_f
         {
-            let t = tb.calc_time(acc_frames);
-            let secs = t.seconds as f64 + t.frac;
-            if secs >= STATS_WINDOW_SECONDS {
-                let kbps = ((acc_bytes as f64 * 8.0 / secs) / 1000.0)
-                    .round()
-                    .max(1.0) as u32;
-                timeline.push(kbps);
-                min_kbps = Some(min_kbps.map_or(kbps, |m| m.min(kbps)));
-                max_kbps = Some(max_kbps.map_or(kbps, |m| m.max(kbps)));
-                if let (Some(lo), Some(hi)) = (min_kbps, max_kbps) {
-                    variable |= hi > lo.saturating_add((lo / 20).max(8));
-                }
-                acc_bytes = 0;
-                acc_frames = 0;
-            }
+            break;
         }
-        let Ok(audio) = decoder.decoder.decode(&packet) else {
-            continue;
-        };
-        let spec_audio = *audio.spec();
-        let pkt_ch = spec_audio.channels.count().max(1);
-        let cap = audio.capacity();
-        let buf = match &mut sample_buf {
-            Some((cur_cap, sb)) if *cur_cap >= cap => sb,
-            slot => {
-                *slot = Some((cap, SampleBuffer::<f32>::new(cap as u64, spec_audio)));
-                &mut slot.as_mut().unwrap().1
-            }
-        };
-        buf.copy_interleaved_ref(audio);
-        let raw = buf.samples();
-        if samples.len() + raw.len() > max_samples {
-            // Rewind file so streaming decoder can take over cleanly
-            let _ = decoder.seek(initial_file_pos);
-            return RamLoadOutcome::SkippedTooLarge;
-        }
-        if pkt_ch == ch {
-            samples.extend_from_slice(raw);
-        } else {
-            for frame in raw.chunks_exact(pkt_ch) {
-                for c in 0..ch {
-                    samples.push(frame.get(c).copied().unwrap_or(frame[0]));
+        match decoder.decode_chunk(&mut sample_buf, &mut pcm_scratch, &mut packet_errors) {
+            Ok(DecodeChunk::Frames {
+                channels: pkt_ch,
+                packet_bytes,
+                packet_dur,
+            }) => {
+                acc_bytes += packet_bytes;
+                acc_frames += packet_dur;
+                if let Some(tb) = decoder.time_base
+                    && acc_frames > 0
+                {
+                    let t = tb.calc_time(acc_frames);
+                    let secs = t.seconds as f64 + t.frac;
+                    if secs >= STATS_WINDOW_SECONDS {
+                        let kbps = decoder.nominal_kbps.unwrap_or_else(|| {
+                            ((acc_bytes as f64 * 8.0 / secs) / 1000.0)
+                                .round()
+                                .max(1.0) as u32
+                        });
+                        timeline.push(kbps);
+                        min_kbps = Some(min_kbps.map_or(kbps, |m| m.min(kbps)));
+                        max_kbps = Some(max_kbps.map_or(kbps, |m| m.max(kbps)));
+                        if let (Some(lo), Some(hi)) = (min_kbps, max_kbps) {
+                            variable |= hi > lo.saturating_add((lo / 20).max(8));
+                        }
+                        acc_bytes = 0;
+                        acc_frames = 0;
+                    }
                 }
+                let raw = pcm_scratch.as_slice();
+                let mut take_frames = raw.len() / pkt_ch.max(1);
+                if let Some(limit_f) = max_track_frames {
+                    let cur_f = samples.len() / ch;
+                    take_frames = take_frames.min(limit_f.saturating_sub(cur_f));
+                }
+                let raw_slice = &raw[..take_frames * pkt_ch.max(1)];
+                if samples.len() + take_frames * ch > max_samples {
+                    let _ = decoder.seek(spec.file_start_secs());
+                    return RamLoadOutcome::SkippedTooLarge;
+                }
+                if pkt_ch == ch {
+                    samples.extend_from_slice(raw_slice);
+                } else {
+                    for frame in raw_slice.chunks_exact(pkt_ch.max(1)) {
+                        for c in 0..ch {
+                            samples.push(frame.get(c).copied().unwrap_or(frame[0]));
+                        }
+                    }
+                }
+            }
+            Ok(DecodeChunk::Reset) => continue,
+            Ok(DecodeChunk::Eof) => break,
+            Err(_) => {
+                let _ = decoder.seek(spec.file_start_secs());
+                return RamLoadOutcome::SkippedTooLarge;
             }
         }
     }
 
     if samples.is_empty() {
-        let _ = decoder.seek(initial_file_pos);
+        let _ = decoder.seek(spec.file_start_secs());
         return RamLoadOutcome::SkippedTooLarge;
     }
+    if timeline.is_empty()
+        && let Some(nom) = decoder.nominal_kbps
+    {
+        timeline.push(nom);
+    }
     let total_frames = samples.len() / ch;
-    let start_frame = ((initial_file_pos * sr as f64).round() as usize).min(total_frames);
+    let start_frame = ((spec.start_offset.max(0.0) * sr as f64).round() as usize).min(total_frames);
     RamLoadOutcome::Loaded(RamTrackBuffer {
         samples,
         channels: ch,
@@ -1007,12 +1218,8 @@ fn play_file(
 ) -> Result<PlaybackExit> {
     let mut decoder = DecoderState::open(&spec.path)?;
     let initial_file_pos = spec.file_start_secs();
-    let mut ram_buf: Option<RamTrackBuffer> = if prefs.ram_playback
-        && spec.cue_start == 0.0
-        && spec.cue_end.is_none()
-        && prefs.ram_max_bytes > 0
-    {
-        match try_load_track_to_ram(&mut decoder, prefs.ram_max_bytes, commands, initial_file_pos) {
+    let mut ram_buf: Option<RamTrackBuffer> = if prefs.ram_playback && prefs.ram_max_bytes > 0 {
+        match try_load_track_to_ram(&mut decoder, prefs.ram_max_bytes, commands, &spec) {
             RamLoadOutcome::Loaded(buf) => Some(buf),
             RamLoadOutcome::SkippedTooLarge => {
                 if initial_file_pos > 0.05 {
@@ -1094,13 +1301,17 @@ fn play_file(
         prefs.speed,
         prefs.resampler_quality,
     )?;
-    let mut stats = BitrateMonitor::new(
-        decoder.time_base,
-        is_variable_lossless(decoder.decoder.codec_params().codec),
-    );
+    let mut stats = BitrateMonitor::new(decoder.time_base, decoder.is_variable_bitrate);
+    if let Some(nom) = decoder.nominal_kbps {
+        let _ = events.send(AudioEvent::Bitrate {
+            kbps: nom,
+            variable: false,
+        });
+    }
     let mut current_block = Vec::new();
     let mut block_offset = 0;
     let mut decode_buf: Option<(usize, SampleBuffer<f32>)> = None;
+    let mut pcm_scratch: Vec<f32> = Vec::with_capacity(8192);
     let mut paused = spec.start_paused;
     let mut decoder_finished = false;
     let mut packet_errors = 0;
@@ -1229,7 +1440,8 @@ fn play_file(
                     let clamped_rel = rel_seconds.max(0.0);
                     let abs_secs = spec.cue_start + clamped_rel;
                     let seek_res = if let Some(ref mut rb) = ram_buf {
-                        let target_f = ((abs_secs * decoder.source_sample_rate as f64).round()
+                        // RAM buffer holds exactly this track (already sliced to cue_start..cue_end)
+                        let target_f = ((clamped_rel * decoder.source_sample_rate as f64).round()
                             as usize)
                             .min(rb.total_frames);
                         rb.frame_cursor = target_f;
@@ -1350,7 +1562,8 @@ fn play_file(
         {
             let abs_a = spec.cue_start + a.max(0.0);
             let seek_ok = if let Some(ref mut rb) = ram_buf {
-                rb.frame_cursor = ((abs_a * decoder.source_sample_rate as f64).round() as usize)
+                rb.frame_cursor = ((a.max(0.0) * decoder.source_sample_rate as f64).round()
+                    as usize)
                     .min(rb.total_frames);
                 true
             } else {
@@ -1445,16 +1658,12 @@ fn play_file(
                         prefs.speed,
                         prefs.resampler_quality,
                     ) {
-                        let next_ram = if prefs.ram_playback
-                            && next_s.cue_start == 0.0
-                            && next_s.cue_end.is_none()
-                            && prefs.ram_max_bytes > 0
-                        {
+                        let next_ram = if prefs.ram_playback && prefs.ram_max_bytes > 0 {
                             match try_load_track_to_ram(
                                 &mut next_dec,
                                 prefs.ram_max_bytes,
                                 commands,
-                                start_f,
+                                &next_s,
                             ) {
                                 RamLoadOutcome::Loaded(buf) => Some(buf),
                                 RamLoadOutcome::SkippedTooLarge => None,
@@ -1469,7 +1678,7 @@ fn play_file(
                         let next_ram_dur = next_ram.as_ref().map(|rb| {
                             rb.total_frames as f64 / next_dec.source_sample_rate.max(1) as f64
                         });
-                        let next_dur = next_s.effective_duration(next_dec.duration.or(next_ram_dur));
+                        let next_dur = next_ram_dur.or_else(|| next_s.effective_duration(next_dec.duration));
                         pending_gapless = Some(PendingGapless {
                             boundary_frame: written_frames,
                             spec: next_s,
@@ -1488,10 +1697,13 @@ fn play_file(
                         ram_buf = next_ram;
                         decoder = next_dec;
                         resampler = next_resampler;
-                        stats = BitrateMonitor::new(
-                            decoder.time_base,
-                            is_variable_lossless(decoder.decoder.codec_params().codec),
-                        );
+                        stats = BitrateMonitor::new(decoder.time_base, decoder.is_variable_bitrate);
+                        if let Some(nom) = decoder.nominal_kbps {
+                            let _ = events.send(AudioEvent::Bitrate {
+                                kbps: nom,
+                                variable: false,
+                            });
+                        }
                         decoded_source_frames =
                             (start_f * decoder.source_sample_rate as f64).round() as u64;
                         decoder_finished = false;
@@ -1565,41 +1777,16 @@ fn play_file(
             }
         }
 
-        let packet = match decoder.format.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::IoError(error))
-                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                resampler.finish();
-                decoder_finished = true;
-                continue;
-            }
-            Err(SymphoniaError::ResetRequired) => {
-                decoder.decoder.reset();
-                resampler.reset();
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if packet.track_id() != decoder.track_id {
-            continue;
-        }
-        stats.push(packet.buf().len(), packet.dur(), events);
-        match decoder.decoder.decode(&packet) {
-            Ok(audio) => {
-                packet_errors = 0;
-                let spec_audio = *audio.spec();
-                let channels = spec_audio.channels.count();
-                let cap = audio.capacity();
-                let buf = match &mut decode_buf {
-                    Some((cur_cap, sb)) if *cur_cap >= cap => sb,
-                    slot => {
-                        *slot = Some((cap, SampleBuffer::<f32>::new(cap as u64, spec_audio)));
-                        &mut slot.as_mut().unwrap().1
-                    }
-                };
-                buf.copy_interleaved_ref(audio);
-                let raw_samples = buf.samples();
+        match decoder.decode_chunk(&mut decode_buf, &mut pcm_scratch, &mut packet_errors)? {
+            DecodeChunk::Frames {
+                channels,
+                packet_bytes,
+                packet_dur,
+            } => {
+                if decoder.nominal_kbps.is_none() {
+                    stats.push(packet_bytes, packet_dur, events);
+                }
+                let raw_samples = pcm_scratch.as_slice();
                 let frames_in_pkt = raw_samples.len() / channels.max(1);
 
                 // Optional smooth fade-out near end of track when crossfade is enabled (zero copy otherwise!)
@@ -1630,19 +1817,13 @@ fn play_file(
 
                 decoded_source_frames += frames_in_pkt as u64;
             }
-            Err(SymphoniaError::DecodeError(_)) => {
-                packet_errors += 1;
-                if packet_errors >= MAX_PACKET_ERROR_STREAK {
-                    return Err(anyhow!("Repeated decoder errors; playback stopped"));
-                }
+            DecodeChunk::Reset => {
+                resampler.reset();
             }
-            Err(SymphoniaError::IoError(error))
-                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
+            DecodeChunk::Eof => {
                 resampler.finish();
                 decoder_finished = true;
             }
-            Err(error) => return Err(error.into()),
         }
     }
 }
