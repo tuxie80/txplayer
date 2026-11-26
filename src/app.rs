@@ -482,6 +482,8 @@ pub struct TxPlayerApp {
     show_signal_path: bool,
     signal_btn_rect: Option<Rect>,
     always_on_top: bool,
+    #[cfg(target_os = "macos")]
+    macos_window_drag: Option<(Pos2, Pos2)>,
     stream_info: Option<StreamInfo>,
     bitrate: Option<u32>,
     variable_bitrate: bool,
@@ -715,6 +717,8 @@ impl TxPlayerApp {
             show_signal_path: false,
             signal_btn_rect: None,
             always_on_top: false,
+            #[cfg(target_os = "macos")]
+            macos_window_drag: None,
             stream_info: None,
             bitrate: None,
             variable_bitrate: false,
@@ -3333,8 +3337,8 @@ impl TxPlayerApp {
             });
         } else if drag_resp.double_clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
-        } else if should_begin_window_drag(ctx, &drag_resp) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        } else if drag_resp.drag_started_by(egui::PointerButton::Primary) {
+            self.begin_window_drag(ctx);
         }
     }
 
@@ -7808,8 +7812,8 @@ impl TxPlayerApp {
         } else if classic_clicked || hdr_resp.double_clicked() {
             self.set_compact_mode(ctx, false);
             return;
-        } else if should_begin_window_drag(ctx, &hdr_resp) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        } else if hdr_resp.drag_started_by(egui::PointerButton::Primary) {
+            self.begin_window_drag(ctx);
         }
 
         // 2) Main Compact Player Deck
@@ -9480,6 +9484,8 @@ impl eframe::App for TxPlayerApp {
 
         self.process_background_events(&context);
         self.process_input(&context);
+        #[cfg(target_os = "macos")]
+        self.update_macos_window_drag(&context);
 
         // Reset per-frame drop targets ONLY while the primary button is held down;
         // on the release frame we keep the last valid target so the drop commits cleanly!
@@ -9716,26 +9722,75 @@ fn paint_drop_insertion_line(painter: &egui::Painter, x0: f32, x1: f32, y: f32, 
     painter.circle_filled(pos2(x1, y), 1.6, p.panel);
 }
 
-/// Platform-accurate window drag trigger:
-/// - On macOS, `winit`'s `drag_window()` forwards `NSApp.currentEvent` to
-///   `[NSWindow performWindowDragWithEvent:]`, which requires an `NSLeftMouseDown` event.
-///   Sending `StartDrag` after egui's drag threshold (during `NSLeftMouseDragged`) causes
-///   AppKit to log `Warning: Window move completed without beginning` when the drag finishes.
-///   Triggering on the primary press frame (excluding double-clicks) passes `NSLeftMouseDown` cleanly.
-/// - On Windows/Linux, `drag_started_by(Primary)` avoids intercepting clicks/double-clicks.
-fn should_begin_window_drag(ctx: &egui::Context, resp: &egui::Response) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        resp.is_pointer_button_down_on()
-            && ctx.input(|i| {
-                i.pointer.primary_pressed()
-                    && !i.pointer.button_double_clicked(egui::PointerButton::Primary)
-            })
+impl TxPlayerApp {
+    /// Initiates a smooth, warning-free window drag:
+    /// - On macOS, `winit`'s `drag_window()` (`[NSWindow performWindowDragWithEvent:]`) runs deferred
+    ///   inside `RedrawRequested` in `eframe`, causing AppKit to spam
+    ///   `Warning: Window move completed without beginning`. Moving via `OuterPosition` anchored to
+    ///   Quartz global cursor coordinates (`CGEventGetLocation`) tracks 1:1 with zero drift and zero AppKit warnings.
+    /// - On Windows/Linux, delegates directly to native OS window dragging via `StartDrag`.
+    fn begin_window_drag(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        {
+            if let (Some(outer), Some(mouse)) = (
+                ctx.input(|i| i.viewport().outer_rect),
+                macos_global_mouse_pos(),
+            ) {
+                self.macos_window_drag = Some((outer.min, mouse));
+                ctx.request_repaint();
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = ctx;
-        resp.drag_started_by(egui::PointerButton::Primary)
+
+    #[cfg(target_os = "macos")]
+    fn update_macos_window_drag(&mut self, ctx: &egui::Context) {
+        let Some((win_start, mouse_start)) = self.macos_window_drag else {
+            return;
+        };
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            self.macos_window_drag = None;
+            return;
+        }
+        if let Some(mouse_now) = macos_global_mouse_pos() {
+            let delta = mouse_now - mouse_start;
+            let target = pos2((win_start.x + delta.x).round(), (win_start.y + delta.y).round());
+            let cur = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min);
+            if cur.is_none_or(|c| (c - target).length_sq() > 0.25) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target));
+            }
+        }
+        ctx.request_repaint();
+    }
+}
+
+/// Returns live macOS global cursor coordinates in Quartz logical points (top-left primary screen origin).
+/// Uses a null-source `CGEventCreate`, which requires no Accessibility or Input Monitoring permissions.
+#[cfg(target_os = "macos")]
+fn macos_global_mouse_pos() -> Option<Pos2> {
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreate(source: *const std::ffi::c_void) -> *const std::ffi::c_void;
+        fn CGEventGetLocation(event: *const std::ffi::c_void) -> CGPoint;
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+    unsafe {
+        let ev = CGEventCreate(std::ptr::null());
+        if ev.is_null() {
+            return None;
+        }
+        let pt = CGEventGetLocation(ev);
+        CFRelease(ev);
+        Some(pos2(pt.x as f32, pt.y as f32))
     }
 }
 
