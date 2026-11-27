@@ -314,12 +314,67 @@ struct Preferences {
     window_pos: Option<[f32; 2]>,
 }
 
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+enum PersistedView {
+    #[default]
+    Library,
+    Favorites,
+    Queue,
+    Playlist(u64),
+    Collection(u64),
+    SavedView(u64),
+}
+
+impl PersistedView {
+    fn from_view(v: View) -> Self {
+        match v {
+            View::Library | View::Smart(_) => PersistedView::Library,
+            View::Favorites => PersistedView::Favorites,
+            View::Queue => PersistedView::Queue,
+            View::Playlist(id) => PersistedView::Playlist(id),
+            View::Collection(id) => PersistedView::Collection(id),
+            View::SavedView(id) => PersistedView::SavedView(id),
+        }
+    }
+
+    fn to_view(self, lib: &crate::library::Library) -> View {
+        match self {
+            PersistedView::Library => View::Library,
+            PersistedView::Favorites => View::Favorites,
+            PersistedView::Queue => View::Queue,
+            PersistedView::Playlist(id) => {
+                if lib.playlist(id).is_some() {
+                    View::Playlist(id)
+                } else {
+                    View::Library
+                }
+            }
+            PersistedView::Collection(id) => {
+                if lib.collection(id).is_some() {
+                    View::Collection(id)
+                } else {
+                    View::Library
+                }
+            }
+            PersistedView::SavedView(id) => {
+                if lib.saved_view(id).is_some() {
+                    View::SavedView(id)
+                } else {
+                    View::Library
+                }
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct SessionState {
     active_library_id: u64,
     queue_ids: Vec<u64>,
     current_index: Option<usize>,
     position_secs: f64,
+    #[serde(default)]
+    view: PersistedView,
 }
 
 impl SessionState {
@@ -1131,9 +1186,9 @@ impl TxPlayerApp {
         } else if !app.ephemeral_session
             && let Some(sess) = SessionState::load()
             && sess.active_library_id == app.store.active_id
-            && !sess.queue_ids.is_empty()
         {
-            // Restore previous playback session (paused at exact saved position, ready to hit Space!)
+            // Restore the exact view & playback queue state the user exited with!
+            app.view = sess.view.to_view(app.store.active());
             let valid_queue: Vec<u64> = sess
                 .queue_ids
                 .into_iter()
@@ -1160,6 +1215,7 @@ impl TxPlayerApp {
                     app.preload_next_track();
                 }
             }
+            app.mark_library_dirty();
         }
         app
     }
@@ -1360,6 +1416,16 @@ impl TxPlayerApp {
             }
         }
         self.last_external_open_at = Some(Instant::now());
+        if !self.ephemeral_session {
+            SessionState {
+                active_library_id: self.store.active_id,
+                queue_ids: self.current_queue.clone(),
+                current_index: self.current_index,
+                position_secs: self.position,
+                view: PersistedView::from_view(self.view),
+            }
+            .save();
+        }
     }
 
     fn set_theme(&mut self, ctx: &egui::Context, theme_id: ThemeId) {
@@ -4634,8 +4700,8 @@ impl TxPlayerApp {
         let set_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
         rx = set_r.left() - 2.0;
         let lyr_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
-        rx = lyr_r.left() - 2.0;
-        let vis_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
+        rx = lyr_r.left() - 4.0;
+        let vis_r = Rect::from_center_size(pos2(rx - 42.0, cy), vec2(84.0, 22.0));
         rx = vis_r.left() - 4.0;
         let cmd_r = Rect::from_center_size(pos2(rx - 26.0, cy), vec2(52.0, 22.0));
 
@@ -4678,13 +4744,14 @@ impl TxPlayerApp {
             if cmd_resp.hovered() { p.text } else { p.muted },
         );
 
-        let vis_clicked = paint_topbar_icon_btn(
+        let vis_clicked = paint_topbar_pill_toggle(
             ui,
             vis_r,
             "cls_vis",
+            "Visualizer",
             Icon::Visualizer,
             self.show_concert_visualizer,
-            "Toggle Visualizer (V)",
+            "Toggle 88-Key Piano & Acoustic Visualizer (V)",
             &p,
         );
         let lyr_clicked = paint_topbar_icon_btn(
@@ -9262,14 +9329,16 @@ impl TxPlayerApp {
         let p = self.palette;
         let track = self.current_track().cloned();
         let total_width = ui.available_width();
-        let left_w = (total_width * 0.28).max(205.0);
-        let right_w = (total_width * 0.28).max(215.0);
-        let center_w = (total_width - left_w - right_w - 16.0).max(280.0);
+        let col_gap = 12.0;
+        let left_w = (total_width * 0.24).clamp(210.0, 320.0);
+        let right_w = (total_width * 0.25).clamp(250.0, 340.0);
+        let center_w = (total_width - left_w - right_w - col_gap * 2.0).max(260.0);
 
-        ui.horizontal_centered(|ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = col_gap;
             // LEFT: Framed Album Art + Metadata + Directory Indicator + Quick Favorite
             ui.allocate_ui_with_layout(
-                vec2(left_w, 76.0),
+                vec2(left_w, 84.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     if let Some(track) = &track {
@@ -9573,16 +9642,19 @@ impl TxPlayerApp {
                 },
             );
 
-            // RIGHT: Clickable Signal Path Telemetry + Compact Output Icon + Volume
+            // RIGHT: Clickable Signal Path Telemetry + Visualizer + Output Device + Volume (flush right!)
             ui.allocate_ui_with_layout(
-                vec2(right_w, 76.0),
+                vec2(right_w, 84.0),
                 Layout::top_down(Align::RIGHT),
                 |ui| {
-                    ui.add_space(12.0);
+                    ui.set_width(right_w);
+                    ui.add_space(14.0);
                     ui.style_mut().spacing.item_spacing.y = 8.0;
 
-                    ui.horizontal(|ui| {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.allocate_ui_with_layout(
+                        vec2(right_w, 22.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
                             if let Some(info) = &self.stream_info {
                                 let native = info.source_rate == info.output_rate;
                                 let dsp_on = self.plugins.dsp.is_actively_processing();
@@ -9718,11 +9790,13 @@ impl TxPlayerApp {
                                     self.show_device_picker = false;
                                 }
                             }
-                        });
-                    });
+                        },
+                    );
 
-                    ui.horizontal(|ui| {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.allocate_ui_with_layout(
+                        vec2(right_w, 26.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
                             if self.plugins.dsp.direct_volume_lock {
                                 let (lr, lresp) =
                                     ui.allocate_exact_size(vec2(114.0, 22.0), Sense::click());
@@ -9810,8 +9884,27 @@ impl TxPlayerApp {
                                     self.show_signal_path = false;
                                 }
                             }
-                        });
-                    });
+                            ui.add_space(2.0);
+                            if icons::icon_button(
+                                ui,
+                                Vec2::splat(24.0),
+                                Icon::Visualizer,
+                                14.0,
+                                if self.show_concert_visualizer {
+                                    p.accent
+                                } else {
+                                    p.text_secondary
+                                },
+                                p.accent_bright,
+                                p.hover,
+                                "Toggle Visualizer (V)",
+                            )
+                            .clicked()
+                            {
+                                self.show_concert_visualizer = !self.show_concert_visualizer;
+                            }
+                        },
+                    );
                 },
             );
         });
@@ -11850,9 +11943,14 @@ impl TxPlayerApp {
         let btn_set_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
         rx = btn_set_r.left() - 2.0;
         let btn_lyr_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
-        rx = btn_lyr_r.left() - 2.0;
-        let btn_vis_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
-        rx = btn_vis_r.left() - 2.0;
+        let show_vis_label = hdr_rect.width() >= 430.0;
+        rx = btn_lyr_r.left() - if show_vis_label { 4.0 } else { 2.0 };
+        let btn_vis_r = if show_vis_label {
+            Rect::from_center_size(pos2(rx - 24.0, cy), vec2(48.0, 22.0))
+        } else {
+            Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0))
+        };
+        rx = btn_vis_r.left() - if show_vis_label { 4.0 } else { 2.0 };
         let btn_list_r = Rect::from_center_size(pos2(rx - 10.5, cy), Vec2::splat(21.0));
 
         let pin_clicked = paint_topbar_pin_btn(ui, btn_pin_r, "cmp_pin", self.always_on_top, &p);
@@ -11865,15 +11963,28 @@ impl TxPlayerApp {
             "Toggle Lyrics (L)",
             &p,
         );
-        let vis_clicked = paint_topbar_icon_btn(
-            ui,
-            btn_vis_r,
-            "cmp_vis",
-            Icon::Visualizer,
-            self.show_concert_visualizer,
-            "Toggle Visualizer (V)",
-            &p,
-        );
+        let vis_clicked = if show_vis_label {
+            paint_topbar_pill_toggle(
+                ui,
+                btn_vis_r,
+                "cmp_vis",
+                "Vis",
+                Icon::Visualizer,
+                self.show_concert_visualizer,
+                "Toggle 88-Key Piano & Acoustic Visualizer (V)",
+                &p,
+            )
+        } else {
+            paint_topbar_icon_btn(
+                ui,
+                btn_vis_r,
+                "cmp_vis",
+                Icon::Visualizer,
+                self.show_concert_visualizer,
+                "Toggle 88-Key Piano & Acoustic Visualizer (V)",
+                &p,
+            )
+        };
         let list_clicked = paint_topbar_icon_btn(
             ui,
             btn_list_r,
@@ -12452,6 +12563,25 @@ impl TxPlayerApp {
                             if self.show_device_picker {
                                 self.show_signal_path = false;
                             }
+                        }
+                        if icons::icon_button(
+                            ui,
+                            Vec2::splat(22.0),
+                            Icon::Visualizer,
+                            13.5,
+                            if self.show_concert_visualizer {
+                                p.accent
+                            } else {
+                                p.text_secondary
+                            },
+                            p.accent_bright,
+                            p.hover,
+                            "Toggle Visualizer (V)",
+                        )
+                        .clicked()
+                        {
+                            self.show_concert_visualizer = !self.show_concert_visualizer;
+                            self.sync_compact_height(ctx);
                         }
                     });
                 });
@@ -13894,6 +14024,7 @@ impl Drop for TxPlayerApp {
             queue_ids: self.current_queue.clone(),
             current_index: self.current_index,
             position_secs: self.position,
+            view: PersistedView::from_view(self.view),
         }
         .save();
         Preferences {
@@ -14103,6 +14234,61 @@ fn paint_traffic_dot(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_topbar_pill_toggle(
+    ui: &mut Ui,
+    rect: Rect,
+    id: &str,
+    label: &str,
+    icon: Icon,
+    active: bool,
+    tip: &str,
+    p: &Palette,
+) -> bool {
+    let resp = ui
+        .interact(rect, ui.scope_id().with(id), Sense::click())
+        .on_hover_text(tip);
+    let fill = if active {
+        p.accent_subtle
+    } else if resp.hovered() {
+        p.hover
+    } else {
+        p.surface
+    };
+    let border = if active {
+        p.accent
+    } else if resp.hovered() {
+        p.border_strong
+    } else {
+        p.border
+    };
+    let fg = if active {
+        p.accent
+    } else if resp.hovered() {
+        p.text
+    } else {
+        p.text_secondary
+    };
+    ui.painter().rect_filled(rect, 5.0, fill);
+    ui.painter()
+        .rect_stroke(rect, 5.0, Stroke::new(1.0, border), StrokeKind::Inside);
+    let cy = rect.center().y;
+    icons::paint_icon(
+        ui.painter(),
+        Rect::from_center_size(pos2(rect.left() + 11.0, cy), Vec2::splat(11.5)),
+        icon,
+        fg,
+    );
+    ui.painter().text(
+        pos2(rect.left() + 21.0, cy),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(10.5),
+        fg,
+    );
+    resp.clicked()
 }
 
 fn paint_topbar_icon_btn(

@@ -6,7 +6,7 @@
 
 **Fast, 100% free native Rust audiophile music player, 88-key piano &amp; spectrogram visualizer, and offline master music library.**
 
-[![Version](https://img.shields.io/badge/version-1.12.3-2dd4bf)](https://github.com/tuxie80/txplayer/releases/latest) [![License](https://img.shields.io/badge/license-MIT-0f8c7d)](LICENSE) [![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey)](#download) [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white)](Cargo.toml) [![Audio](https://img.shields.io/badge/audio-Bit--Perfect%20%C2%B7%20DoP%20%C2%B7%2064--bit%20DSP-2aa198)](docs/USER_GUIDE.md) [![Built with Gemini 4 Neon](https://img.shields.io/badge/Built%20with-Gemini%204%20Neon-4285F4?logo=googlegemini&logoColor=white)](https://gemini.google.com/)
+[![Version](https://img.shields.io/badge/version-1.12.4-2dd4bf)](https://github.com/tuxie80/txplayer/releases/latest) [![License](https://img.shields.io/badge/license-MIT-0f8c7d)](LICENSE) [![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey)](#download) [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white)](Cargo.toml) [![Audio](https://img.shields.io/badge/audio-Bit--Perfect%20%C2%B7%20DoP%20%C2%B7%2064--bit%20DSP-2aa198)](docs/USER_GUIDE.md) [![Built with Gemini 4 Neon](https://img.shields.io/badge/Built%20with-Gemini%204%20Neon-4285F4?logo=googlegemini&logoColor=white)](https://gemini.google.com/)
 
 **[Website &amp; Tour (tuxie.eu/txplayer)](https://tuxie.eu/txplayer)** · **[Download Installers](https://github.com/tuxie80/txplayer/releases/latest)** · **[5-Min Quick Start](docs/QUICK_START.md)** · **[Full User Guide](docs/USER_GUIDE.md)**
 
@@ -29,13 +29,13 @@
 
 ## Download
 
-Grab ready-to-run native installers from **[GitHub Releases (`v1.12.3`)](https://github.com/tuxie80/txplayer/releases/latest)**:
+Grab ready-to-run native installers from **[GitHub Releases (`v1.12.4`)](https://github.com/tuxie80/txplayer/releases/latest)**:
 
 | Platform | Installer | Portable |
 | :--- | :--- | :--- |
-| **macOS (Apple Silicon)** | [`TxPlayer-v1.12.3-macos-arm64.dmg`](https://github.com/tuxie80/txplayer/releases/download/v1.12.3/TxPlayer-v1.12.3-macos-arm64.dmg) | [`txplayer-v1.12.3-macos-arm64.tar.gz`](https://github.com/tuxie80/txplayer/releases/download/v1.12.3/txplayer-v1.12.3-macos-arm64.tar.gz) |
-| **Windows (x64)** | [`TxPlayer-v1.12.3-windows-x86_64-setup.exe`](https://github.com/tuxie80/txplayer/releases/download/v1.12.3/TxPlayer-v1.12.3-windows-x86_64-setup.exe) | [`txplayer-v1.12.3-windows-x86_64.zip`](https://github.com/tuxie80/txplayer/releases/download/v1.12.3/txplayer-v1.12.3-windows-x86_64.zip) |
-| **Linux (x86_64)** | [`txplayer_1.12.3_amd64.deb`](https://github.com/tuxie80/txplayer/releases/download/v1.12.3/txplayer_1.12.3_amd64.deb) | [`txplayer-v1.12.3-linux-x86_64.tar.gz`](https://github.com/tuxie80/txplayer/releases/download/v1.12.3/txplayer-v1.12.3-linux-x86_64.tar.gz) |
+| **macOS (Apple Silicon)** | [`TxPlayer-v1.12.4-macos-arm64.dmg`](https://github.com/tuxie80/txplayer/releases/download/v1.12.4/TxPlayer-v1.12.4-macos-arm64.dmg) | [`txplayer-v1.12.4-macos-arm64.tar.gz`](https://github.com/tuxie80/txplayer/releases/download/v1.12.4/txplayer-v1.12.4-macos-arm64.tar.gz) |
+| **Windows (x64)** | [`TxPlayer-v1.12.4-windows-x86_64-setup.exe`](https://github.com/tuxie80/txplayer/releases/download/v1.12.4/TxPlayer-v1.12.4-windows-x86_64-setup.exe) | [`txplayer-v1.12.4-windows-x86_64.zip`](https://github.com/tuxie80/txplayer/releases/download/v1.12.4/txplayer-v1.12.4-windows-x86_64.zip) |
+| **Linux (x86_64)** | [`txplayer_1.12.4_amd64.deb`](https://github.com/tuxie80/txplayer/releases/download/v1.12.4/txplayer_1.12.4_amd64.deb) | [`txplayer-v1.12.4-linux-x86_64.tar.gz`](https://github.com/tuxie80/txplayer/releases/download/v1.12.4/txplayer-v1.12.4-linux-x86_64.tar.gz) |
 
 ---
 
@@ -51,7 +51,7 @@ Grab ready-to-run native installers from **[GitHub Releases (`v1.12.3`)](https:/
 - **Compact &amp; Classic Layouts:** Instant toggle (`⌘⇧M` / `Ctrl+Shift+M`) between the minimal **Compact Mini-Player** and the full **Classic Studio** workspace, remembering independent window sizes and positions.
 - **9 Built-In Themes:** Obsidian Studio, Studio Reference, Tokyo Night, Tokyo Night Storm, Solarized Dark, Solarized Light, Nord, Catppuccin Mocha, and Gruvbox Dark.
 - **Fast Navigation &amp; Built-In Help:** Drag &amp; drop folders or files, 3 acoustic waveform scrubber styles, `⌘K` Command Palette, built-in `F1` Quick Guide overlay, OS media keys / MPRIS / macOS Now Playing, and system tray controls.
-- **100% Free, Native &amp; Local:** Pure Rust (~8.5 MB binary), zero Electron, zero accounts, zero cloud, zero telemetry, 61/61 unit tests passing.
+- **100% Free, Native &amp; Local:** Pure Rust (~8.5 MB binary), zero Electron, zero accounts, zero cloud, zero telemetry, 62/62 unit tests passing.
 
 ### Bit-Perfect Audio Engine &amp; DAC Output
 - **Exclusive DAC &amp; Clock Sync:** CoreAudio Hog Mode (macOS), WASAPI (Windows), and ALSA / PipeWire (Linux) exclusive access with automatic hardware sample-rate switching.

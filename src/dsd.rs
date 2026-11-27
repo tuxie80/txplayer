@@ -485,8 +485,8 @@ impl SacdIsoPcmDecoder {
             }
             let acc_l = self.fir.convolve_ring(&self.hist_l, self.hist_pos);
             let acc_r = self.fir.convolve_ring(&self.hist_r, self.hist_pos);
-            out.push(acc_l.clamp(-1.0, 1.0) as f32);
-            out.push(acc_r.clamp(-1.0, 1.0) as f32);
+            out.push(acc_l.clamp(-1.0, 1.0));
+            out.push(acc_r.clamp(-1.0, 1.0));
         }
         Ok(frames)
     }
@@ -723,13 +723,13 @@ fn parse_dff_header(file: &mut File, file_len: u64) -> Result<DsdInfo> {
     })
 }
 
-/// High-order Blackman-Harris linear-phase FIR decimation filter with 8-bit LUT tables.
-/// Uses 512 taps (64 bytes = 16 PCM samples) for DSD64/128, 1024 taps for DSD256, and
-/// 2048 taps for DSD512 — achieving >92 dB ultrasonic sigma-delta noise rejection before
-/// decimation so zero quantization noise folds back into the audible band.
+/// High-order Blackman-Harris linear-phase FIR decimation filter with 8-bit `f32` LUT tables.
+/// Uses 768 taps (96 bytes) for DSD64, 1536 taps for DSD128, and 3072 taps for DSD256/512 —
+/// achieving >92 dB ultrasonic sigma-delta noise rejection before decimation while keeping
+/// the lookup tables compact in L1/L2 cache for fast real-time & RAM decoding.
 struct DsdFirLut {
     /// `lut[byte_pos][byte_value]` for `num_bytes` consecutive DSD bytes.
-    lut: Vec<[f64; 256]>,
+    lut: Vec<[f32; 256]>,
 }
 
 impl DsdFirLut {
@@ -768,7 +768,7 @@ impl DsdFirLut {
             *v *= norm;
         }
 
-        let mut lut = vec![[0.0_f64; 256]; num_bytes];
+        let mut lut = vec![[0.0_f32; 256]; num_bytes];
         for (byte_pos, table) in lut.iter_mut().enumerate() {
             let base = byte_pos * 8;
             for (val, slot) in table.iter_mut().enumerate() {
@@ -782,7 +782,7 @@ impl DsdFirLut {
                     let sign = if is_one { 1.0 } else { -1.0 };
                     acc += sign * h[base + bit];
                 }
-                *slot = acc;
+                *slot = acc as f32;
             }
         }
         Self { lut }
@@ -793,20 +793,18 @@ impl DsdFirLut {
         self.lut.len()
     }
 
-    /// Convolves a circular byte history ring starting at `oldest_pos` in two branchless slices.
+    /// Convolves a circular byte history ring starting at `oldest_pos` in two bounds-check-free slices.
     #[inline(always)]
-    fn convolve_ring(&self, ring: &[u8], oldest_pos: usize) -> f64 {
-        let mut acc = 0.0_f64;
+    fn convolve_ring(&self, ring: &[u8], oldest_pos: usize) -> f32 {
+        let mut acc = 0.0_f32;
         let tail = &ring[oldest_pos..];
         let head = &ring[..oldest_pos];
-        let mut idx = 0usize;
-        for &b in tail {
-            acc += self.lut[idx][b as usize];
-            idx += 1;
+        let (lut_a, lut_b) = self.lut.split_at(tail.len());
+        for (&b, table) in tail.iter().zip(lut_a.iter()) {
+            acc += table[b as usize];
         }
-        for &b in head {
-            acc += self.lut[idx][b as usize];
-            idx += 1;
+        for (&b, table) in head.iter().zip(lut_b.iter()) {
+            acc += table[b as usize];
         }
         acc
     }
@@ -925,7 +923,7 @@ impl DsdPcmDecoder {
                     }
                     for h in &self.hist[..ch] {
                         let acc = self.lut.convolve_ring(h, self.hist_pos);
-                        out.push(acc.clamp(-1.0, 1.0) as f32);
+                        out.push(acc.clamp(-1.0, 1.0));
                     }
                 }
             }
@@ -958,7 +956,7 @@ impl DsdPcmDecoder {
                     }
                     for h in &self.hist[..ch] {
                         let acc = self.lut.convolve_ring(h, self.hist_pos);
-                        out.push(acc.clamp(-1.0, 1.0) as f32);
+                        out.push(acc.clamp(-1.0, 1.0));
                     }
                 }
             }
@@ -1420,7 +1418,7 @@ mod tests {
                     pos = 0;
                 }
             }
-            pcm.push(fir.convolve_ring(&ring, pos));
+            pcm.push(fir.convolve_ring(&ring, pos) as f64);
         }
 
         // Skip filter warmup (first 64 samples), fit exact 1 kHz sine (cos+sin projection) and measure residual noise!

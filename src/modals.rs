@@ -643,32 +643,30 @@ pub fn themed_modal_window(
         .id(egui::Id::unique(id))
         .title_bar(false)
         .collapsible(false)
+        .movable(true)
         .resizable(resizable && !is_tight)
         .frame(frame)
         .constrain_to(screen.shrink(6.0))
-        .max_size([max_w, max_h]);
+        .max_size([max_w, max_h])
+        .default_pos(pos2(pos_x, pos_y));
 
     if is_tight || !resizable {
         win = win.fixed_size([win_w, win_h]);
-        if is_tight {
-            win = win.fixed_pos(pos2(pos_x, pos_y));
-        } else {
-            win = win.default_pos(pos2(pos_x, pos_y));
-        }
     } else {
-        win = win
-            .default_pos(pos2(pos_x, pos_y))
-            .default_size([win_w, win_h]);
+        win = win.default_size([win_w, win_h]);
         if let Some(ms) = min_size {
             win = win.min_size([ms[0].min(max_w), ms[1].min(max_h)]);
         }
     }
 
     win.show(context, |ui| {
-        // Slim 28px custom title strip
+        // Slim 28px custom draggable title strip
         let hdr_h = 28.0;
         let avail_w = ui.available_width();
-        let (hdr_rect, _) = ui.allocate_exact_size(vec2(avail_w, hdr_h), Sense::hover());
+        let (hdr_rect, hdr_resp) = ui.allocate_exact_size(vec2(avail_w, hdr_h), Sense::hover());
+        if hdr_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
         let p = ui.painter();
         p.rect_filled(
             hdr_rect,
@@ -1562,7 +1560,7 @@ pub fn show_settings_window(
                     aligned_checkbox_row(
                         ui,
                         &mut plugins.dsp.ram_playback,
-                        "Play from RAM (pre-decode full track to memory · zero disk I/O & instant seeking)",
+                        "Play from RAM (instant-start async buffering + background next-track preload · auto-capped to free RAM)",
                         palette,
                     );
                     if plugins.dsp.ram_playback {
@@ -4321,11 +4319,13 @@ fn anchored_popover(
     let left_x = (anchor_cx - width * 0.5)
         .clamp(screen.left() + margin, (screen.right() - width - margin).max(screen.left() + margin));
 
-    // Anchor bottom-left of the Area directly at (left_x, bottom_y) using `pivot(Align2::LEFT_BOTTOM)`
+    // Position initially above the trigger button via `default_pos` + `pivot`, while remaining freely movable!
     let mut close_clicked = false;
     let resp = egui::Area::new(egui::Id::unique(id))
-        .fixed_pos(pos2(left_x, bottom_y))
+        .default_pos(pos2(left_x, bottom_y))
         .pivot(Align2::LEFT_BOTTOM)
+        .movable(true)
+        .constrain_to(screen.shrink(6.0))
         .order(egui::Order::Foreground)
         .interactable(true)
         .show(context, |ui| {
@@ -4347,8 +4347,11 @@ fn anchored_popover(
                 })
                 .show(ui, |ui| {
                     ui.set_width(width);
-                    // Slim 26px popover header
-                    let (hdr_rect, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+                    // Slim 26px draggable popover header
+                    let (hdr_rect, hdr_resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+                    if hdr_resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
                     ui.painter().rect_filled(
                         hdr_rect,
                         egui::CornerRadius {
@@ -6853,8 +6856,12 @@ pub fn show_command_palette(
 
     let screen = context.content_rect();
     let palette_w = (screen.width() - 32.0).clamp(300.0, 540.0);
+    let init_x = (screen.center().x - palette_w * 0.5).max(screen.left() + 8.0);
+    let init_y = screen.top() + 48.0;
     egui::Area::new(egui::Id::unique("command_palette_area"))
-        .anchor(Align2::CENTER_TOP, vec2(0.0, 48.0))
+        .default_pos(pos2(init_x, init_y))
+        .movable(true)
+        .constrain_to(screen.shrink(6.0))
         .order(egui::Order::Foreground)
         .show(context, |ui| {
             Frame::new()

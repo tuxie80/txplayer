@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1179,166 +1179,581 @@ struct OutputStream {
     reopen_needed: Arc<AtomicBool>,
 }
 
-/// Full-track pre-decoded PCM buffer resident in RAM for zero-disk-I/O playback and instant seeking.
-struct RamTrackBuffer {
-    samples: Vec<f32>,
+/// Lightweight immutable stream metadata extracted from an opened `DecoderState`
+/// so the decoder can be moved into an asynchronous background RAM loader thread.
+#[derive(Clone)]
+struct TrackStreamMeta {
+    source_sample_rate: u32,
+    source_channels: usize,
+    bit_depth: Option<u32>,
+    duration: Option<f64>,
+    time_base: Option<TimeBase>,
+    is_variable_bitrate: bool,
+    nominal_kbps: Option<u32>,
+}
+
+impl TrackStreamMeta {
+    fn from_decoder(dec: &DecoderState) -> Self {
+        Self {
+            source_sample_rate: dec.source_sample_rate,
+            source_channels: dec.source_channels,
+            bit_depth: dec.bit_depth,
+            duration: dec.duration,
+            time_base: dec.time_base,
+            is_variable_bitrate: dec.is_variable_bitrate,
+            nominal_kbps: dec.nominal_kbps,
+        }
+    }
+}
+
+/// Queries available physical system RAM in bytes so RAM playback never starves the OS
+/// or forces heavy swap thrashing when playing huge DSD/SACD queues.
+pub fn available_system_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            dw_length: u32,
+            dw_memory_load: u32,
+            ull_total_phys: u64,
+            ull_avail_phys: u64,
+            ull_total_page_file: u64,
+            ull_avail_page_file: u64,
+            ull_total_virtual: u64,
+            ull_avail_virtual: u64,
+            ull_avail_extended_virtual: u64,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+        }
+        let mut status = MemoryStatusEx {
+            dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            dw_memory_load: 0,
+            ull_total_phys: 0,
+            ull_avail_phys: 0,
+            ull_total_page_file: 0,
+            ull_avail_page_file: 0,
+            ull_total_virtual: 0,
+            ull_avail_virtual: 0,
+            ull_avail_extended_virtual: 0,
+        };
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        if ok != 0 && status.ull_avail_phys > 0 {
+            Some(status.ull_avail_phys)
+        } else {
+            None
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let txt = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in txt.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kb.saturating_mul(1024));
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::c_void;
+        unsafe extern "C" {
+            fn sysctlbyname(
+                name: *const std::ffi::c_char,
+                oldp: *mut c_void,
+                oldlenp: *mut usize,
+                newp: *mut c_void,
+                newlen: usize,
+            ) -> i32;
+        }
+        let mut total: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let rc = unsafe {
+            sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&mut total as *mut u64).cast::<c_void>(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && total > 0 {
+            // Conservative half-of-physical-RAM estimate on macOS unified memory
+            Some(total / 2)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Computes a safe per-track RAM budget respecting both the user's configured ceiling
+/// and live free OS memory (always keeping at least 512 MB free headroom for the OS).
+pub fn effective_ram_budget_bytes(
+    user_max_bytes: usize,
+    avail_sys_bytes: Option<u64>,
+    is_next_preload: bool,
+) -> usize {
+    if user_max_bytes == 0 {
+        return 0;
+    }
+    const OS_HEADROOM: u64 = 512 * 1024 * 1024;
+    if let Some(avail) = avail_sys_bytes {
+        let usable = avail.saturating_sub(OS_HEADROOM);
+        let share = if is_next_preload {
+            usable / 6
+        } else {
+            usable / 4
+        };
+        user_max_bytes.min(share.min(usize::MAX as u64) as usize)
+    } else if is_next_preload {
+        user_max_bytes / 2
+    } else {
+        user_max_bytes
+    }
+}
+
+/// Asynchronous progressive RAM PCM buffer filled by a background thread while playback
+/// starts immediately (~15 ms even on 200 MB DSD files!). Once finished, the full track is
+/// resident in memory for zero-disk-I/O playback and instant seeking.
+struct ProgressiveRamBuffer {
+    samples: Mutex<Vec<f32>>,
     channels: usize,
-    total_frames: usize,
+    ready_frames: AtomicUsize,
+    finished: AtomicBool,
+    overflowed: AtomicBool,
+    cancelled: AtomicBool,
+    bitrate_timeline: Mutex<Vec<u32>>,
+    variable_bitrate: AtomicBool,
+    estimated_bytes: usize,
+}
+
+impl ProgressiveRamBuffer {
+    fn ready_frames(&self) -> usize {
+        self.ready_frames.load(Ordering::Acquire)
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn current_byte_len(&self) -> usize {
+        let loaded = self.ready_frames() * self.channels * std::mem::size_of::<f32>();
+        if self.is_finished() {
+            loaded
+        } else {
+            loaded.max(self.estimated_bytes)
+        }
+    }
+
+    /// Copies up to `max_frames` interleaved PCM frames starting at `start_frame` into `dst`.
+    /// Returns the actual number of frames copied.
+    fn copy_frames(&self, start_frame: usize, max_frames: usize, dst: &mut Vec<f32>) -> usize {
+        dst.clear();
+        let avail = self.ready_frames().saturating_sub(start_frame);
+        let take = avail.min(max_frames);
+        if take == 0 {
+            return 0;
+        }
+        let ch = self.channels;
+        if let Ok(guard) = self.samples.lock() {
+            let max_in_vec = guard.len() / ch;
+            let safe_take = max_in_vec.saturating_sub(start_frame).min(take);
+            if safe_take == 0 {
+                return 0;
+            }
+            let s0 = start_frame * ch;
+            let s1 = (start_frame + safe_take) * ch;
+            dst.extend_from_slice(&guard[s0..s1]);
+            safe_take
+        } else {
+            0
+        }
+    }
+
+    fn bitrate_at_bucket(&self, bucket: usize) -> Option<(u32, bool)> {
+        let guard = self.bitrate_timeline.lock().ok()?;
+        if guard.is_empty() {
+            return None;
+        }
+        let idx = bucket.min(guard.len() - 1);
+        Some((guard[idx], self.variable_bitrate.load(Ordering::Relaxed)))
+    }
+}
+
+struct RamPlaybackCursor {
+    buf: Arc<ProgressiveRamBuffer>,
     frame_cursor: usize,
-    /// Per-0.5s bitrate samples so live VBR/CBR kbps telemetry keeps updating during RAM playback.
-    bitrate_timeline: Vec<u32>,
-    variable_bitrate: bool,
     last_emitted_bucket: Option<usize>,
 }
 
-impl RamTrackBuffer {
-    fn byte_len(&self) -> usize {
-        self.samples.len() * std::mem::size_of::<f32>()
+impl RamPlaybackCursor {
+    fn new(buf: Arc<ProgressiveRamBuffer>, start_frame: usize) -> Self {
+        Self {
+            buf,
+            frame_cursor: start_frame,
+            last_emitted_bucket: None,
+        }
     }
 }
 
-enum RamLoadOutcome {
-    Loaded(RamTrackBuffer),
-    SkippedTooLarge,
-    Interrupted(AudioCommand),
+impl Drop for RamPlaybackCursor {
+    fn drop(&mut self) {
+        self.buf.cancel();
+    }
 }
 
-/// Pre-decodes a full track (including virtual CUE tracks!) into RAM when it fits under `max_bytes`.
-/// Checks `commands` every 64 chunks so skipping or stopping during preload is instantaneous.
-fn try_load_track_to_ram(
-    decoder: &mut DecoderState,
+enum ActiveTrackSource {
+    Ram(RamPlaybackCursor),
+    Direct(Box<DecoderState>),
+}
+
+/// Spawns an asynchronous background thread to progressively decode a track into RAM.
+/// Returns `Err(decoder)` immediately (without spawning) if the track exceeds `max_bytes`,
+/// allowing instant zero-overhead fallback to direct streaming.
+fn spawn_progressive_ram_loader(
+    mut decoder: DecoderState,
     max_bytes: usize,
-    commands: &Receiver<AudioCommand>,
-    spec: &PlaybackSpec,
-) -> RamLoadOutcome {
+    spec: PlaybackSpec,
+) -> std::result::Result<Arc<ProgressiveRamBuffer>, Box<DecoderState>> {
     let ch = decoder.source_channels.max(1);
     let sr = decoder.source_sample_rate.max(1);
     let max_samples = max_bytes / std::mem::size_of::<f32>();
+    if max_samples < sr as usize * ch * 2 {
+        return Err(Box::new(decoder));
+    }
     let track_dur = spec.effective_duration(decoder.duration);
-    if let Some(dur) = track_dur {
-        let est_bytes = (dur * sr as f64 * ch as f64 * 4.0) as usize;
-        if est_bytes > max_bytes || dur > 3600.0 {
-            return RamLoadOutcome::SkippedTooLarge;
-        }
+    let est_bytes = track_dur
+        .map(|dur| (dur * sr as f64 * ch as f64 * 4.0) as usize)
+        .unwrap_or(sr as usize * ch * 4 * 180);
+    if let Some(dur) = track_dur
+        && (est_bytes > max_bytes || dur > 3600.0)
+    {
+        return Err(Box::new(decoder));
     }
     if spec.cue_start > 0.05 && decoder.seek(spec.cue_start).is_err() {
-        return RamLoadOutcome::SkippedTooLarge;
+        return Err(Box::new(decoder));
     }
     let max_track_frames: Option<usize> = spec
         .cue_end
         .map(|end| ((end - spec.cue_start).max(0.0) * sr as f64).round() as usize);
 
-    let prealloc = track_dur
+    let prealloc_samples = track_dur
         .map(|d| ((d * sr as f64 * ch as f64) as usize).min(max_samples))
-        .unwrap_or(sr as usize * ch * 60);
-    let mut samples: Vec<f32> = Vec::with_capacity(prealloc.min(16 * 1024 * 1024));
-    let mut sample_buf: Option<(usize, SampleBuffer<f32>)> = None;
-    let mut pcm_scratch: Vec<f32> = Vec::with_capacity(8192);
-    let mut packet_errors = 0usize;
-    let mut pkt_count: usize = 0;
-    let mut timeline: Vec<u32> = Vec::new();
-    let mut acc_bytes: usize = 0;
-    let mut acc_frames: u64 = 0;
-    let mut min_kbps: Option<u32> = None;
-    let mut max_kbps: Option<u32> = None;
-    let mut variable = decoder.is_variable_bitrate;
+        .unwrap_or(sr as usize * ch * 30)
+        .min(8 * 1024 * 1024);
 
-    loop {
-        pkt_count += 1;
-        if pkt_count.is_multiple_of(64)
-            && let Ok(cmd) = commands.try_recv()
-        {
+    let initial_timeline = decoder
+        .nominal_kbps
+        .map(|k| vec![k])
+        .unwrap_or_default();
+    let buf = Arc::new(ProgressiveRamBuffer {
+        samples: Mutex::new(Vec::with_capacity(prealloc_samples)),
+        channels: ch,
+        ready_frames: AtomicUsize::new(0),
+        finished: AtomicBool::new(false),
+        overflowed: AtomicBool::new(false),
+        cancelled: AtomicBool::new(false),
+        bitrate_timeline: Mutex::new(initial_timeline),
+        variable_bitrate: AtomicBool::new(decoder.is_variable_bitrate),
+        estimated_bytes: est_bytes.min(max_bytes),
+    });
+
+    let loader_buf = Arc::clone(&buf);
+    let _ = thread::Builder::new()
+        .name("txplayer-ram-loader".into())
+        .spawn(move || {
+            let mut sample_buf: Option<(usize, SampleBuffer<f32>)> = None;
+            let mut pcm_scratch: Vec<f32> = Vec::with_capacity(8192);
+            let mut batch: Vec<f32> = Vec::with_capacity(16_384 * ch);
+            let mut packet_errors = 0usize;
+            let mut total_samples_written = 0usize;
+            let mut acc_bytes: usize = 0;
+            let mut acc_frames: u64 = 0;
+            let mut min_kbps: Option<u32> = None;
+            let mut max_kbps: Option<u32> = None;
+            let mut variable = decoder.is_variable_bitrate;
+            let flush_threshold_samples = 4096 * ch;
+
+            loop {
+                if loader_buf.cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Some(limit_f) = max_track_frames
+                    && (total_samples_written + batch.len()) / ch >= limit_f
+                {
+                    break;
+                }
+                match decoder.decode_chunk(&mut sample_buf, &mut pcm_scratch, &mut packet_errors) {
+                    Ok(DecodeChunk::Frames {
+                        channels: pkt_ch,
+                        packet_bytes,
+                        packet_dur,
+                    }) => {
+                        acc_bytes += packet_bytes;
+                        acc_frames += packet_dur;
+                        if let Some(tb) = decoder.time_base
+                            && acc_frames > 0
+                        {
+                            let t = tb.calc_time(acc_frames);
+                            let secs = t.seconds as f64 + t.frac;
+                            if secs >= STATS_WINDOW_SECONDS {
+                                let kbps = decoder.nominal_kbps.unwrap_or_else(|| {
+                                    ((acc_bytes as f64 * 8.0 / secs) / 1000.0)
+                                        .round()
+                                        .max(1.0) as u32
+                                });
+                                min_kbps = Some(min_kbps.map_or(kbps, |m| m.min(kbps)));
+                                max_kbps = Some(max_kbps.map_or(kbps, |m| m.max(kbps)));
+                                if let (Some(lo), Some(hi)) = (min_kbps, max_kbps) {
+                                    variable |= hi > lo.saturating_add((lo / 20).max(8));
+                                    loader_buf.variable_bitrate.store(variable, Ordering::Relaxed);
+                                }
+                                if let Ok(mut tl) = loader_buf.bitrate_timeline.lock() {
+                                    tl.push(kbps);
+                                }
+                                acc_bytes = 0;
+                                acc_frames = 0;
+                            }
+                        }
+
+                        let raw = pcm_scratch.as_slice();
+                        let mut take_frames = raw.len() / pkt_ch.max(1);
+                        if let Some(limit_f) = max_track_frames {
+                            let cur_f = (total_samples_written + batch.len()) / ch;
+                            take_frames = take_frames.min(limit_f.saturating_sub(cur_f));
+                        }
+                        if total_samples_written + batch.len() + take_frames * ch > max_samples {
+                            loader_buf.overflowed.store(true, Ordering::Release);
+                            break;
+                        }
+                        let raw_slice = &raw[..take_frames * pkt_ch.max(1)];
+                        if pkt_ch == ch {
+                            batch.extend_from_slice(raw_slice);
+                        } else {
+                            for frame in raw_slice.chunks_exact(pkt_ch.max(1)) {
+                                for c in 0..ch {
+                                    batch.push(frame.get(c).copied().unwrap_or(frame[0]));
+                                }
+                            }
+                        }
+
+                        if batch.len() >= flush_threshold_samples {
+                            if let Ok(mut guard) = loader_buf.samples.lock() {
+                                guard.extend_from_slice(&batch);
+                                total_samples_written = guard.len();
+                            }
+                            batch.clear();
+                            loader_buf
+                                .ready_frames
+                                .store(total_samples_written / ch, Ordering::Release);
+                        }
+                    }
+                    Ok(DecodeChunk::Reset) => continue,
+                    Ok(DecodeChunk::Eof) => break,
+                    Err(_) => {
+                        loader_buf.overflowed.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+
+            if !batch.is_empty() && !loader_buf.cancelled.load(Ordering::Acquire) {
+                if let Ok(mut guard) = loader_buf.samples.lock() {
+                    guard.extend_from_slice(&batch);
+                    total_samples_written = guard.len();
+                }
+                loader_buf
+                    .ready_frames
+                    .store(total_samples_written / ch, Ordering::Release);
+            }
+            loader_buf.finished.store(true, Ordering::Release);
+        });
+
+    Ok(buf)
+}
+
+enum PrimeOutcome {
+    Ready,
+    Interrupted(AudioCommand),
+}
+
+/// Waits briefly until `buf` has decoded at least `target_frames` (typically ~0.25s = ~15 ms)
+/// or finished, checking `commands` every 2 ms so skip/stop remains instantaneous.
+fn wait_for_ram_frames(
+    buf: &ProgressiveRamBuffer,
+    target_frames: usize,
+    commands: &Receiver<AudioCommand>,
+) -> PrimeOutcome {
+    while buf.ready_frames() < target_frames && !buf.is_finished() {
+        if let Ok(cmd) = commands.try_recv() {
             match cmd {
                 AudioCommand::Play(_) | AudioCommand::Stop | AudioCommand::Shutdown => {
-                    return RamLoadOutcome::Interrupted(cmd);
+                    buf.cancel();
+                    return PrimeOutcome::Interrupted(cmd);
                 }
                 _ => {}
             }
         }
-        if let Some(limit_f) = max_track_frames
-            && samples.len() / ch >= limit_f
-        {
-            break;
+        thread::sleep(Duration::from_millis(2));
+    }
+    PrimeOutcome::Ready
+}
+
+#[derive(Clone, PartialEq)]
+struct NextSpecKey {
+    path: PathBuf,
+    cue_start_ms: u64,
+    cue_end_ms: Option<u64>,
+}
+
+impl NextSpecKey {
+    fn from_spec(spec: &PlaybackSpec) -> Self {
+        Self {
+            path: spec.path.clone(),
+            cue_start_ms: (spec.cue_start * 1000.0).round() as u64,
+            cue_end_ms: spec.cue_end.map(|e| (e * 1000.0).round() as u64),
         }
-        match decoder.decode_chunk(&mut sample_buf, &mut pcm_scratch, &mut packet_errors) {
-            Ok(DecodeChunk::Frames {
-                channels: pkt_ch,
-                packet_bytes,
-                packet_dur,
-            }) => {
-                acc_bytes += packet_bytes;
-                acc_frames += packet_dur;
-                if let Some(tb) = decoder.time_base
-                    && acc_frames > 0
-                {
-                    let t = tb.calc_time(acc_frames);
-                    let secs = t.seconds as f64 + t.frac;
-                    if secs >= STATS_WINDOW_SECONDS {
-                        let kbps = decoder.nominal_kbps.unwrap_or_else(|| {
-                            ((acc_bytes as f64 * 8.0 / secs) / 1000.0)
-                                .round()
-                                .max(1.0) as u32
-                        });
-                        timeline.push(kbps);
-                        min_kbps = Some(min_kbps.map_or(kbps, |m| m.min(kbps)));
-                        max_kbps = Some(max_kbps.map_or(kbps, |m| m.max(kbps)));
-                        if let (Some(lo), Some(hi)) = (min_kbps, max_kbps) {
-                            variable |= hi > lo.saturating_add((lo / 20).max(8));
-                        }
-                        acc_bytes = 0;
-                        acc_frames = 0;
+    }
+}
+
+enum PreloadedNextTrack {
+    Ready {
+        spec: PlaybackSpec,
+        meta: TrackStreamMeta,
+        source: ActiveTrackSource,
+    },
+    NeedsRateSwitch,
+    Failed,
+}
+
+/// Background preloader for the upcoming track: opens & starts buffering the next track
+/// ~15 seconds before the current track finishes so gapless & crossfade transitions have
+/// ZERO pause even on huge 200 MB DSD files!
+struct NextPreloadJob {
+    key: NextSpecKey,
+    cancelled: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<PreloadedNextTrack>>>,
+}
+
+impl NextPreloadJob {
+    fn spawn(
+        next_spec: PlaybackSpec,
+        output_rate: u32,
+        bit_perfect: bool,
+        ram_enabled: bool,
+        user_ram_max_bytes: usize,
+    ) -> Self {
+        let key = NextSpecKey::from_spec(&next_spec);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(Mutex::new(None));
+        let bg_cancel = Arc::clone(&cancelled);
+        let bg_res = Arc::clone(&result);
+
+        let _ = thread::Builder::new()
+            .name("txplayer-next-preload".into())
+            .spawn(move || {
+                if bg_cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                let Ok(mut next_dec) = DecoderState::open(&next_spec.path) else {
+                    if let Ok(mut g) = bg_res.lock() {
+                        *g = Some(PreloadedNextTrack::Failed);
                     }
+                    return;
+                };
+                if bg_cancel.load(Ordering::Acquire) {
+                    return;
                 }
-                let raw = pcm_scratch.as_slice();
-                let mut take_frames = raw.len() / pkt_ch.max(1);
-                if let Some(limit_f) = max_track_frames {
-                    let cur_f = samples.len() / ch;
-                    take_frames = take_frames.min(limit_f.saturating_sub(cur_f));
+                let rate_switch_needed =
+                    bit_perfect && next_dec.source_sample_rate != output_rate;
+                if rate_switch_needed {
+                    if let Ok(mut g) = bg_res.lock() {
+                        *g = Some(PreloadedNextTrack::NeedsRateSwitch);
+                    }
+                    return;
                 }
-                let raw_slice = &raw[..take_frames * pkt_ch.max(1)];
-                if samples.len() + take_frames * ch > max_samples {
-                    let _ = decoder.seek(spec.file_start_secs());
-                    return RamLoadOutcome::SkippedTooLarge;
-                }
-                if pkt_ch == ch {
-                    samples.extend_from_slice(raw_slice);
+                let meta = TrackStreamMeta::from_decoder(&next_dec);
+                let budget = if ram_enabled {
+                    effective_ram_budget_bytes(
+                        user_ram_max_bytes,
+                        available_system_ram_bytes(),
+                        true,
+                    )
                 } else {
-                    for frame in raw_slice.chunks_exact(pkt_ch.max(1)) {
-                        for c in 0..ch {
-                            samples.push(frame.get(c).copied().unwrap_or(frame[0]));
+                    0
+                };
+                let start_frame =
+                    (next_spec.start_offset.max(0.0) * meta.source_sample_rate as f64).round()
+                        as usize;
+                let source = if budget > 0 {
+                    match spawn_progressive_ram_loader(next_dec, budget, next_spec.clone()) {
+                        Ok(buf) => {
+                            if bg_cancel.load(Ordering::Acquire) {
+                                buf.cancel();
+                                return;
+                            }
+                            ActiveTrackSource::Ram(RamPlaybackCursor::new(buf, start_frame))
+                        }
+                        Err(mut dec) => {
+                            let start_f = next_spec.file_start_secs();
+                            if start_f > 0.05 {
+                                let _ = dec.seek(start_f);
+                            }
+                            ActiveTrackSource::Direct(dec)
                         }
                     }
+                } else {
+                    let start_f = next_spec.file_start_secs();
+                    if start_f > 0.05 {
+                        let _ = next_dec.seek(start_f);
+                    }
+                    ActiveTrackSource::Direct(Box::new(next_dec))
+                };
+                if bg_cancel.load(Ordering::Acquire) {
+                    return;
                 }
-            }
-            Ok(DecodeChunk::Reset) => continue,
-            Ok(DecodeChunk::Eof) => break,
-            Err(_) => {
-                let _ = decoder.seek(spec.file_start_secs());
-                return RamLoadOutcome::SkippedTooLarge;
-            }
+                if let Ok(mut g) = bg_res.lock() {
+                    *g = Some(PreloadedNextTrack::Ready {
+                        spec: next_spec,
+                        meta,
+                        source,
+                    });
+                }
+            });
+
+        Self {
+            key,
+            cancelled,
+            result,
         }
     }
 
-    if samples.is_empty() {
-        let _ = decoder.seek(spec.file_start_secs());
-        return RamLoadOutcome::SkippedTooLarge;
+    fn take_ready(&self) -> Option<PreloadedNextTrack> {
+        self.result.lock().ok()?.take()
     }
-    if timeline.is_empty()
-        && let Some(nom) = decoder.nominal_kbps
-    {
-        timeline.push(nom);
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Ok(mut g) = self.result.lock() {
+            *g = None;
+        }
     }
-    let total_frames = samples.len() / ch;
-    let start_frame = ((spec.start_offset.max(0.0) * sr as f64).round() as usize).min(total_frames);
-    RamLoadOutcome::Loaded(RamTrackBuffer {
-        samples,
-        channels: ch,
-        total_frames,
-        frame_cursor: start_frame,
-        bitrate_timeline: timeline,
-        variable_bitrate: variable,
-        last_emitted_bucket: None,
-    })
+}
+
+impl Drop for NextPreloadJob {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 struct PendingGapless {
@@ -1389,24 +1804,51 @@ fn play_file(
         return Ok(exit);
     }
 
-    let mut decoder = DecoderState::open(&spec.path)?;
+    let mut initial_decoder = DecoderState::open(&spec.path)?;
+    let mut meta = TrackStreamMeta::from_decoder(&initial_decoder);
     let initial_file_pos = spec.file_start_secs();
-    let mut ram_buf: Option<RamTrackBuffer> = if prefs.ram_playback && prefs.ram_max_bytes > 0 {
-        match try_load_track_to_ram(&mut decoder, prefs.ram_max_bytes, commands, &spec) {
-            RamLoadOutcome::Loaded(buf) => Some(buf),
-            RamLoadOutcome::SkippedTooLarge => {
-                if initial_file_pos > 0.05 {
-                    let _ = decoder.seek(initial_file_pos);
+    let avail_ram = available_system_ram_bytes();
+    let ram_budget = if prefs.ram_playback {
+        effective_ram_budget_bytes(prefs.ram_max_bytes, avail_ram, false)
+    } else {
+        0
+    };
+    let mut source: ActiveTrackSource = if ram_budget > 0 {
+        match spawn_progressive_ram_loader(initial_decoder, ram_budget, spec.clone()) {
+            Ok(buf) => {
+                let start_frame =
+                    (spec.start_offset.max(0.0) * meta.source_sample_rate as f64).round() as usize;
+                let prime_target = start_frame + (meta.source_sample_rate as usize / 4).max(2048);
+                match wait_for_ram_frames(&buf, prime_target, commands) {
+                    PrimeOutcome::Ready => {
+                        crate::debug_log::audio(format!(
+                            "Async RAM buffer primed (~{} MB est, budget {} MB, avail {} MB)",
+                            buf.estimated_bytes / (1024 * 1024),
+                            ram_budget / (1024 * 1024),
+                            avail_ram.unwrap_or(0) / (1024 * 1024)
+                        ));
+                        ActiveTrackSource::Ram(RamPlaybackCursor::new(buf, start_frame))
+                    }
+                    PrimeOutcome::Interrupted(cmd) => return Ok(PlaybackExit::Command(cmd)),
                 }
-                None
             }
-            RamLoadOutcome::Interrupted(cmd) => return Ok(PlaybackExit::Command(cmd)),
+            Err(mut dec) => {
+                crate::debug_log::audio(format!(
+                    "Direct disk streaming (track exceeds safe RAM budget {} MB; avail {} MB)",
+                    ram_budget / (1024 * 1024),
+                    avail_ram.unwrap_or(0) / (1024 * 1024)
+                ));
+                if initial_file_pos > 0.05 {
+                    let _ = dec.seek(initial_file_pos);
+                }
+                ActiveTrackSource::Direct(dec)
+            }
         }
     } else {
         if initial_file_pos > 0.05 {
-            let _ = decoder.seek(initial_file_pos);
+            let _ = initial_decoder.seek(initial_file_pos);
         }
-        None
+        ActiveTrackSource::Direct(Box::new(initial_decoder))
     };
 
     rg_gain.store(spec.rg_gain_linear.clamp(0.1, 4.0).to_bits(), Ordering::Relaxed);
@@ -1419,7 +1861,7 @@ fn play_file(
     let (output, mut producer) = create_output_stream(
         device,
         &device_name,
-        decoder.source_sample_rate,
+        meta.source_sample_rate,
         effective_oversampling,
         prefs.exclusive_mode,
         volume,
@@ -1441,24 +1883,28 @@ fn play_file(
     let mut track_origin_frame: u64 = 0;
     let mut written_frames: u64 = 0;
     let mut decoded_source_frames: u64 =
-        (initial_file_pos * decoder.source_sample_rate as f64).round() as u64;
+        (initial_file_pos * meta.source_sample_rate as f64).round() as u64;
     let mut fade_in_remaining: usize = 0;
     let mut fade_in_total: usize = 0;
     let mut pending_gapless: Option<PendingGapless> = None;
+    let mut next_preload: Option<NextPreloadJob> = None;
+    let mut next_ready: Option<PreloadedNextTrack> = None;
+    let mut did_overlap_crossfade = false;
 
-    let ram_dur = ram_buf
-        .as_ref()
-        .map(|rb| rb.total_frames as f64 / decoder.source_sample_rate.max(1) as f64);
-    let eff_dur = spec.effective_duration(decoder.duration.or(ram_dur));
+    let ram_bytes_now = match &source {
+        ActiveTrackSource::Ram(rb) => Some(rb.buf.current_byte_len()),
+        ActiveTrackSource::Direct(_) => None,
+    };
+    let eff_dur = spec.effective_duration(meta.duration);
     let bp_active = bit_perfect.load(Ordering::Relaxed)
-        && decoder.source_sample_rate == output_rate
+        && meta.source_sample_rate == output_rate
         && (prefs.speed - 1.0).abs() < 0.001;
     let _ = events.send(AudioEvent::Started {
-        source_sample_rate: decoder.source_sample_rate,
+        source_sample_rate: meta.source_sample_rate,
         output_sample_rate: output_rate,
         output_format: output_format_label.clone(),
-        channels: decoder.source_channels.min(u16::MAX as usize) as u16,
-        bit_depth: decoder.bit_depth,
+        channels: meta.source_channels.min(u16::MAX as usize) as u16,
+        bit_depth: meta.bit_depth,
         duration: eff_dur,
         device_name: device_name.clone(),
         bit_perfect: bp_active,
@@ -1469,19 +1915,19 @@ fn play_file(
         } else {
             spec.rg_gain_db
         },
-        ram_bytes: ram_buf.as_ref().map(RamTrackBuffer::byte_len),
+        ram_bytes: ram_bytes_now,
         oversampling: effective_oversampling,
         resampler_quality: prefs.resampler_quality,
     });
     let mut resampler = StreamResampler::new(
-        decoder.source_sample_rate,
+        meta.source_sample_rate,
         output_rate,
         output.channels,
         prefs.speed,
         prefs.resampler_quality,
     )?;
-    let mut stats = BitrateMonitor::new(decoder.time_base, decoder.is_variable_bitrate);
-    if let Some(nom) = decoder.nominal_kbps {
+    let mut stats = BitrateMonitor::new(meta.time_base, meta.is_variable_bitrate);
+    if let Some(nom) = meta.nominal_kbps {
         let _ = events.send(AudioEvent::Bitrate {
             kbps: nom,
             variable: false,
@@ -1491,6 +1937,8 @@ fn play_file(
     let mut block_offset = 0;
     let mut decode_buf: Option<(usize, SampleBuffer<f32>)> = None;
     let mut pcm_scratch: Vec<f32> = Vec::with_capacity(8192);
+    let mut ram_chunk_scratch: Vec<f32> = Vec::with_capacity(8192);
+    let mut xfade_next_scratch: Vec<f32> = Vec::with_capacity(8192);
     let mut paused = spec.start_paused;
     let mut decoder_finished = false;
     let mut packet_errors = 0;
@@ -1620,16 +2068,23 @@ fn play_file(
                 AudioCommand::Seek(rel_seconds) => {
                     let clamped_rel = rel_seconds.max(0.0);
                     let abs_secs = spec.cue_start + clamped_rel;
-                    let seek_res = if let Some(ref mut rb) = ram_buf {
-                        // RAM buffer holds exactly this track (already sliced to cue_start..cue_end)
-                        let target_f = ((clamped_rel * decoder.source_sample_rate as f64).round()
-                            as usize)
-                            .min(rb.total_frames);
-                        rb.frame_cursor = target_f;
-                        rb.last_emitted_bucket = None;
-                        Ok(())
-                    } else {
-                        decoder.seek(abs_secs)
+                    let seek_res = match &mut source {
+                        ActiveTrackSource::Ram(rb) => {
+                            let target_f =
+                                (clamped_rel * meta.source_sample_rate as f64).round() as usize;
+                            if target_f > rb.buf.ready_frames()
+                                && !rb.buf.is_finished()
+                                && let PrimeOutcome::Interrupted(cmd) =
+                                    wait_for_ram_frames(&rb.buf, target_f, commands)
+                            {
+                                visual_tap.set_active(false);
+                                return Ok(PlaybackExit::Command(cmd));
+                            }
+                            rb.frame_cursor = target_f.min(rb.buf.ready_frames());
+                            rb.last_emitted_bucket = None;
+                            Ok(())
+                        }
+                        ActiveTrackSource::Direct(dec) => dec.seek(abs_secs),
                     };
                     match seek_res {
                         Ok(()) => {
@@ -1638,9 +2093,24 @@ fn play_file(
                             block_offset = 0;
                             decoder_finished = false;
                             pending_gapless = None;
+                            if did_overlap_crossfade {
+                                // Rewind preloaded next track if we seeked out of an active crossfade
+                                if let Some(PreloadedNextTrack::Ready {
+                                    spec: ref ns,
+                                    meta: ref nm,
+                                    source: ActiveTrackSource::Ram(ref mut nrb),
+                                }) = next_ready
+                                {
+                                    nrb.frame_cursor = (ns.start_offset.max(0.0)
+                                        * nm.source_sample_rate as f64)
+                                        .round()
+                                        as usize;
+                                }
+                                did_overlap_crossfade = false;
+                            }
                             stats.reset();
                             decoded_source_frames =
-                                (abs_secs * decoder.source_sample_rate as f64).round() as u64;
+                                (abs_secs * meta.source_sample_rate as f64).round() as u64;
                             let cur_played = output.played_frames.load(Ordering::Relaxed);
                             track_origin_frame = cur_played;
                             track_origin_secs = clamped_rel;
@@ -1654,6 +2124,19 @@ fn play_file(
                     }
                 }
                 AudioCommand::PreloadNext(next_s) => {
+                    let new_key = next_s.as_ref().map(NextSpecKey::from_spec);
+                    if next_preload
+                        .as_ref()
+                        .is_some_and(|job| Some(&job.key) != new_key.as_ref())
+                    {
+                        next_preload = None;
+                    }
+                    if let Some(PreloadedNextTrack::Ready { spec: ref rs, .. }) = next_ready
+                        && Some(NextSpecKey::from_spec(rs)) != new_key
+                    {
+                        next_ready = None;
+                        did_overlap_crossfade = false;
+                    }
                     prefs.next_spec = next_s;
                 }
                 AudioCommand::SetSpeed(new_speed) => {
@@ -1665,7 +2148,7 @@ fn play_file(
                         track_origin_frame = cur_played;
                         prefs.speed = new_speed;
                         if let Ok(new_r) = StreamResampler::new(
-                            decoder.source_sample_rate,
+                            meta.source_sample_rate,
                             output_rate,
                             output.channels,
                             prefs.speed,
@@ -1776,13 +2259,13 @@ fn play_file(
             && current_pos >= b
         {
             let abs_a = spec.cue_start + a.max(0.0);
-            let seek_ok = if let Some(ref mut rb) = ram_buf {
-                rb.frame_cursor = ((a.max(0.0) * decoder.source_sample_rate as f64).round()
-                    as usize)
-                    .min(rb.total_frames);
-                true
-            } else {
-                decoder.seek(abs_a).is_ok()
+            let seek_ok = match &mut source {
+                ActiveTrackSource::Ram(rb) => {
+                    let target_f = (a.max(0.0) * meta.source_sample_rate as f64).round() as usize;
+                    rb.frame_cursor = target_f.min(rb.buf.ready_frames());
+                    true
+                }
+                ActiveTrackSource::Direct(dec) => dec.seek(abs_a).is_ok(),
             };
             if seek_ok {
                 resampler.reset();
@@ -1791,7 +2274,7 @@ fn play_file(
                 decoder_finished = false;
                 pending_gapless = None;
                 decoded_source_frames =
-                    (abs_a * decoder.source_sample_rate as f64).round() as u64;
+                    (abs_a * meta.source_sample_rate as f64).round() as u64;
                 let cur_played = output.played_frames.load(Ordering::Relaxed);
                 track_origin_frame = cur_played;
                 track_origin_secs = a.max(0.0);
@@ -1802,20 +2285,52 @@ fn play_file(
             }
         }
 
+        // Poll or trigger background next-track preloader ~15s before current track ends
+        // so even 200 MB DSD transitions & crossfades happen with ZERO pause!
+        if let Some(ref job) = next_preload
+            && let Some(res) = job.take_ready()
+        {
+            next_ready = Some(res);
+            next_preload = None;
+        }
+        if next_preload.is_none()
+            && next_ready.is_none()
+            && pending_gapless.is_none()
+            && (prefs.gapless_enabled || prefs.crossfade_secs > 0.05)
+            && let Some(ref next_s) = prefs.next_spec
+        {
+            let est_dur = spec.effective_duration(meta.duration).or_else(|| match &source {
+                ActiveTrackSource::Ram(rb) if rb.buf.is_finished() => {
+                    Some(rb.buf.ready_frames() as f64 / meta.source_sample_rate.max(1) as f64)
+                }
+                _ => None,
+            });
+            let lead_window = match &source {
+                ActiveTrackSource::Ram(rb) if rb.buf.is_finished() => 25.0,
+                _ => 15.0,
+            };
+            let should_preload = est_dur.is_some_and(|d| (d - current_pos) <= lead_window);
+            if should_preload {
+                next_preload = Some(NextPreloadJob::spawn(
+                    next_s.clone(),
+                    output_rate,
+                    bit_perfect.load(Ordering::Relaxed),
+                    prefs.ram_playback,
+                    prefs.ram_max_bytes,
+                ));
+            }
+        }
+
         if last_position_update.elapsed() >= POSITION_UPDATE_INTERVAL {
             let _ = events.send(AudioEvent::Position(current_pos));
-            // Emit live VBR/CBR kbps telemetry from pre-recorded RAM timeline
-            if let Some(ref mut rb) = ram_buf
-                && !rb.bitrate_timeline.is_empty()
-            {
-                let bucket = ((current_pos / STATS_WINDOW_SECONDS).floor() as usize)
-                    .min(rb.bitrate_timeline.len() - 1);
-                if rb.last_emitted_bucket != Some(bucket) {
+            // Emit live VBR/CBR kbps telemetry from async RAM timeline
+            if let ActiveTrackSource::Ram(ref mut rb) = source {
+                let bucket = (current_pos / STATS_WINDOW_SECONDS).floor().max(0.0) as usize;
+                if rb.last_emitted_bucket != Some(bucket)
+                    && let Some((kbps, variable)) = rb.buf.bitrate_at_bucket(bucket)
+                {
                     rb.last_emitted_bucket = Some(bucket);
-                    let _ = events.send(AudioEvent::Bitrate {
-                        kbps: rb.bitrate_timeline[bucket],
-                        variable: rb.variable_bitrate,
-                    });
+                    let _ = events.send(AudioEvent::Bitrate { kbps, variable });
                 }
             }
             last_position_update = Instant::now();
@@ -1833,7 +2348,7 @@ fn play_file(
         current_block.clear();
         block_offset = 0;
         if let Some(mut block) = resampler.next_block() {
-            // Apply smooth equal-power fade-in right after a crossfade transition
+            // Apply smooth equal-power fade-in right after a non-overlapping crossfade transition
             if fade_in_remaining > 0 && fade_in_total > 0 {
                 let ch = output.channels.max(1);
                 for frame in block.chunks_mut(ch) {
@@ -1853,80 +2368,163 @@ fn play_file(
             continue;
         }
         if decoder_finished {
-            // Attempt seamless gapless splice into the pre-queued next track inside the same open OutputStream!
-            if prefs.gapless_enabled
-                && pending_gapless.is_none()
-                && let Some(next_s) = prefs.next_spec.take()
-                && let Ok(mut next_dec) = DecoderState::open(&next_s.path)
-            {
-                let rate_switch_needed = bit_perfect.load(Ordering::Relaxed)
-                    && next_dec.source_sample_rate != output_rate;
-                if !rate_switch_needed {
-                    let start_f = next_s.file_start_secs();
-                    if start_f > 0.05 {
-                        let _ = next_dec.seek(start_f);
+            // Attempt seamless gapless/crossfade splice into the preloaded next track inside the same OutputStream!
+            if (prefs.gapless_enabled || prefs.crossfade_secs > 0.05) && pending_gapless.is_none() {
+                // If background preloader is still finishing file open, give it a brief window before fallback
+                if next_ready.is_none()
+                    && let Some(ref job) = next_preload
+                {
+                    for _ in 0..40 {
+                        if let Some(res) = job.take_ready() {
+                            next_ready = Some(res);
+                            next_preload = None;
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(2));
                     }
-                    if let Ok(next_resampler) = StreamResampler::new(
-                        next_dec.source_sample_rate,
-                        output_rate,
-                        output.channels,
-                        prefs.speed,
-                        prefs.resampler_quality,
-                    ) {
-                        let next_ram = if prefs.ram_playback && prefs.ram_max_bytes > 0 {
-                            match try_load_track_to_ram(
-                                &mut next_dec,
+                }
+
+                // Fallback open if track had unknown duration and preload didn't start early
+                if next_ready.is_none()
+                    && let Some(next_s) = prefs.next_spec.clone()
+                    && let Ok(mut next_dec) = DecoderState::open(&next_s.path)
+                {
+                    let rate_switch_needed = bit_perfect.load(Ordering::Relaxed)
+                        && next_dec.source_sample_rate != output_rate;
+                    if rate_switch_needed {
+                        next_ready = Some(PreloadedNextTrack::NeedsRateSwitch);
+                    } else {
+                        let next_meta = TrackStreamMeta::from_decoder(&next_dec);
+                        let next_budget = if prefs.ram_playback {
+                            effective_ram_budget_bytes(
                                 prefs.ram_max_bytes,
-                                commands,
-                                &next_s,
+                                available_system_ram_bytes(),
+                                true,
+                            )
+                        } else {
+                            0
+                        };
+                        let start_f = next_s.file_start_secs();
+                        let start_frame = (next_s.start_offset.max(0.0)
+                            * next_meta.source_sample_rate as f64)
+                            .round() as usize;
+                        let next_src = if next_budget > 0 {
+                            match spawn_progressive_ram_loader(
+                                next_dec,
+                                next_budget,
+                                next_s.clone(),
                             ) {
-                                RamLoadOutcome::Loaded(buf) => Some(buf),
-                                RamLoadOutcome::SkippedTooLarge => None,
-                                RamLoadOutcome::Interrupted(cmd) => {
-                                    visual_tap.set_active(false);
-                                    return Ok(PlaybackExit::Command(cmd));
+                                Ok(buf) => {
+                                    let prime = start_frame
+                                        + (next_meta.source_sample_rate as usize / 8).max(1024);
+                                    if let PrimeOutcome::Interrupted(cmd) =
+                                        wait_for_ram_frames(&buf, prime, commands)
+                                    {
+                                        visual_tap.set_active(false);
+                                        return Ok(PlaybackExit::Command(cmd));
+                                    }
+                                    ActiveTrackSource::Ram(RamPlaybackCursor::new(buf, start_frame))
+                                }
+                                Err(mut dec) => {
+                                    if start_f > 0.05 {
+                                        let _ = dec.seek(start_f);
+                                    }
+                                    ActiveTrackSource::Direct(dec)
                                 }
                             }
                         } else {
-                            None
+                            if start_f > 0.05 {
+                                let _ = next_dec.seek(start_f);
+                            }
+                            ActiveTrackSource::Direct(Box::new(next_dec))
                         };
-                        let next_ram_dur = next_ram.as_ref().map(|rb| {
-                            rb.total_frames as f64 / next_dec.source_sample_rate.max(1) as f64
-                        });
-                        let next_dur = next_ram_dur.or_else(|| next_s.effective_duration(next_dec.duration));
-                        pending_gapless = Some(PendingGapless {
-                            boundary_frame: written_frames,
+                        next_ready = Some(PreloadedNextTrack::Ready {
                             spec: next_s,
-                            source_sample_rate: next_dec.source_sample_rate,
-                            channels: next_dec.source_channels.min(u16::MAX as usize) as u16,
-                            bit_depth: next_dec.bit_depth,
-                            duration: next_dur,
-                            ram_bytes: next_ram.as_ref().map(RamTrackBuffer::byte_len),
+                            meta: next_meta,
+                            source: next_src,
                         });
-                        if prefs.crossfade_secs > 0.05 {
-                            let fade_f = ((prefs.crossfade_secs * 0.5) * output_rate as f32).round()
-                                as usize;
-                            fade_in_total = fade_f;
-                            fade_in_remaining = fade_f;
-                        }
-                        ram_buf = next_ram;
-                        decoder = next_dec;
-                        resampler = next_resampler;
-                        stats = BitrateMonitor::new(decoder.time_base, decoder.is_variable_bitrate);
-                        if let Some(nom) = decoder.nominal_kbps {
-                            let _ = events.send(AudioEvent::Bitrate {
-                                kbps: nom,
-                                variable: false,
-                            });
-                        }
-                        decoded_source_frames =
-                            (start_f * decoder.source_sample_rate as f64).round() as u64;
-                        decoder_finished = false;
-                        continue;
                     }
-                } else {
-                    // Put back so the UI advances and reopens the DAC at the new native sample rate!
-                    prefs.next_spec = Some(next_s);
+                }
+
+                if let Some(preloaded) = next_ready.take() {
+                    match preloaded {
+                        PreloadedNextTrack::Ready {
+                            spec: mut next_s,
+                            meta: next_meta,
+                            source: next_src,
+                        } => {
+                            if let Ok(next_resampler) = StreamResampler::new(
+                                next_meta.source_sample_rate,
+                                output_rate,
+                                output.channels,
+                                prefs.speed,
+                                prefs.resampler_quality,
+                            ) {
+                                // Clear prefs.next_spec since we're consuming it now
+                                if prefs.next_spec.as_ref().map(NextSpecKey::from_spec)
+                                    == Some(NextSpecKey::from_spec(&next_s))
+                                {
+                                    prefs.next_spec = None;
+                                }
+                                next_preload = None;
+                                let next_ram_bytes = match &next_src {
+                                    ActiveTrackSource::Ram(rb) => Some(rb.buf.current_byte_len()),
+                                    ActiveTrackSource::Direct(_) => None,
+                                };
+                                // If we already overlap-crossfaded the intro of track 2, advance its
+                                // start_offset so the UI timeline matches the exact audible position!
+                                if did_overlap_crossfade
+                                    && let ActiveTrackSource::Ram(ref rb) = next_src
+                                {
+                                    next_s.start_offset = rb.frame_cursor as f64
+                                        / next_meta.source_sample_rate.max(1) as f64;
+                                }
+                                let next_dur = next_s.effective_duration(next_meta.duration);
+                                pending_gapless = Some(PendingGapless {
+                                    boundary_frame: written_frames,
+                                    spec: next_s.clone(),
+                                    source_sample_rate: next_meta.source_sample_rate,
+                                    channels: next_meta.source_channels.min(u16::MAX as usize)
+                                        as u16,
+                                    bit_depth: next_meta.bit_depth,
+                                    duration: next_dur,
+                                    ram_bytes: next_ram_bytes,
+                                });
+                                if prefs.crossfade_secs > 0.05 && !did_overlap_crossfade {
+                                    let fade_f = ((prefs.crossfade_secs * 0.5)
+                                        * output_rate as f32)
+                                        .round() as usize;
+                                    fade_in_total = fade_f;
+                                    fade_in_remaining = fade_f;
+                                } else {
+                                    fade_in_total = 0;
+                                    fade_in_remaining = 0;
+                                }
+                                did_overlap_crossfade = false;
+                                let start_f = next_s.file_start_secs();
+                                source = next_src;
+                                meta = next_meta;
+                                resampler = next_resampler;
+                                stats = BitrateMonitor::new(
+                                    meta.time_base,
+                                    meta.is_variable_bitrate,
+                                );
+                                if let Some(nom) = meta.nominal_kbps {
+                                    let _ = events.send(AudioEvent::Bitrate {
+                                        kbps: nom,
+                                        variable: false,
+                                    });
+                                }
+                                decoded_source_frames =
+                                    (start_f * meta.source_sample_rate as f64).round() as u64;
+                                decoder_finished = false;
+                                continue;
+                            }
+                        }
+                        PreloadedNextTrack::NeedsRateSwitch | PreloadedNextTrack::Failed => {
+                            // Keep prefs.next_spec intact so the UI advances & reopens the DAC cleanly
+                        }
+                    }
                 }
             }
 
@@ -1939,52 +2537,117 @@ fn play_file(
             continue;
         }
 
-        // Feed directly from RAM PCM buffer when Play-from-RAM is active (zero disk I/O!)
-        if let Some(ref mut rb) = ram_buf {
-            if rb.frame_cursor >= rb.total_frames {
-                resampler.finish();
-                decoder_finished = true;
+        // Feed directly from async RAM PCM buffer when Play-from-RAM is active!
+        if let ActiveTrackSource::Ram(ref mut rb) = source {
+            let ready = rb.buf.ready_frames();
+            let done = rb.buf.is_finished();
+            if rb.frame_cursor >= ready {
+                if done {
+                    resampler.finish();
+                    decoder_finished = true;
+                } else {
+                    // Background loader is still decoding ahead of us (rare on slow storage)
+                    thread::sleep(Duration::from_millis(2));
+                }
                 continue;
             }
-            let chunk_frames = 4096.min(rb.total_frames - rb.frame_cursor);
-            let ch = rb.channels;
-            let start_idx = rb.frame_cursor * ch;
-            let end_idx = (rb.frame_cursor + chunk_frames) * ch;
-            let raw_samples = &rb.samples[start_idx..end_idx];
+            let chunk_frames = rb.buf.copy_frames(rb.frame_cursor, 4096, &mut ram_chunk_scratch);
+            if chunk_frames == 0 {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            let ch = rb.buf.channels;
+            let sr = meta.source_sample_rate.max(1) as f64;
+            let end_secs = if done {
+                Some(ready as f64 / sr)
+            } else {
+                spec.effective_duration(meta.duration)
+            };
 
-            let end_secs = Some(rb.total_frames as f64 / decoder.source_sample_rate.max(1) as f64);
-            let sr = decoder.source_sample_rate.max(1) as f64;
-            let fade_s = (prefs.crossfade_secs * 0.5) as f64;
-            let pkt_end_s = (decoded_source_frames + chunk_frames as u64) as f64 / sr;
+            let xfade_s = prefs.crossfade_secs as f64;
+            let pkt_end_s = (rb.frame_cursor + chunk_frames) as f64 / sr;
             if prefs.crossfade_secs > 0.05
                 && let Some(end_s) = end_secs
-                && pkt_end_s > (end_s - fade_s).max(0.0)
+                && pkt_end_s > (end_s - xfade_s).max(0.0)
             {
-                let fade_start = (end_s - fade_s).max(0.0);
-                let mut faded = raw_samples.to_vec();
-                for f_idx in 0..chunk_frames {
-                    let t_s = (decoded_source_frames + f_idx as u64) as f64 / sr;
-                    if t_s > fade_start {
-                        let rem = ((end_s - t_s) / fade_s).clamp(0.0, 1.0) as f32;
-                        let gain = (rem * std::f32::consts::FRAC_PI_2).sin();
-                        for c in 0..ch {
-                            faded[f_idx * ch + c] *= gain;
+                // True equal-power overlap crossfade if next track is preloaded in RAM at matching rate/channels!
+                let can_overlap = matches!(
+                    next_ready,
+                    Some(PreloadedNextTrack::Ready {
+                        meta: ref nm,
+                        source: ActiveTrackSource::Ram(_),
+                        ..
+                    }) if nm.source_sample_rate == meta.source_sample_rate
+                        && nm.source_channels == ch
+                );
+                if can_overlap {
+                    let fade_start = (end_s - xfade_s).max(0.0);
+                    let overlap_start_idx = (0..chunk_frames)
+                        .find(|&fi| (rb.frame_cursor + fi) as f64 / sr > fade_start)
+                        .unwrap_or(chunk_frames);
+                    let overlap_frames = chunk_frames - overlap_start_idx;
+                    if overlap_frames > 0
+                        && let Some(PreloadedNextTrack::Ready {
+                            source: ActiveTrackSource::Ram(ref mut nrb),
+                            ..
+                        }) = next_ready
+                    {
+                        let copied = nrb.buf.copy_frames(
+                            nrb.frame_cursor,
+                            overlap_frames,
+                            &mut xfade_next_scratch,
+                        );
+                        nrb.frame_cursor += copied;
+                        if copied > 0 {
+                            did_overlap_crossfade = true;
+                        }
+                        for fi in overlap_start_idx..chunk_frames {
+                            let t_s = (rb.frame_cursor + fi) as f64 / sr;
+                            let prog = ((t_s - fade_start) / xfade_s).clamp(0.0, 1.0) as f32;
+                            let g_out = (prog * std::f32::consts::FRAC_PI_2).cos();
+                            let g_in = (prog * std::f32::consts::FRAC_PI_2).sin();
+                            let next_fi = fi - overlap_start_idx;
+                            for c in 0..ch {
+                                let s1 = ram_chunk_scratch[fi * ch + c] * g_out;
+                                let s2 = if next_fi < copied {
+                                    xfade_next_scratch[next_fi * ch + c] * g_in
+                                } else {
+                                    0.0
+                                };
+                                ram_chunk_scratch[fi * ch + c] = (s1 + s2).clamp(-1.0, 1.0);
+                            }
                         }
                     }
+                    resampler.push_interleaved(&ram_chunk_scratch, ch);
+                } else {
+                    let fade_s = xfade_s * 0.5;
+                    let fade_start = (end_s - fade_s).max(0.0);
+                    if pkt_end_s > fade_start {
+                        for fi in 0..chunk_frames {
+                            let t_s = (rb.frame_cursor + fi) as f64 / sr;
+                            if t_s > fade_start {
+                                let rem = ((end_s - t_s) / fade_s).clamp(0.0, 1.0) as f32;
+                                let gain = (rem * std::f32::consts::FRAC_PI_2).sin();
+                                for c in 0..ch {
+                                    ram_chunk_scratch[fi * ch + c] *= gain;
+                                }
+                            }
+                        }
+                    }
+                    resampler.push_interleaved(&ram_chunk_scratch, ch);
                 }
-                resampler.push_interleaved(&faded, ch);
             } else {
-                resampler.push_interleaved(raw_samples, ch);
+                resampler.push_interleaved(&ram_chunk_scratch, ch);
             }
             rb.frame_cursor += chunk_frames;
             decoded_source_frames += chunk_frames as u64;
             continue;
         }
 
-        // Enforce CUE virtual track end boundary cleanly
+        // Enforce CUE virtual track end boundary cleanly for Direct disk streaming
         if let Some(cue_end) = spec.cue_end {
             let decoded_secs =
-                decoded_source_frames as f64 / decoder.source_sample_rate.max(1) as f64;
+                decoded_source_frames as f64 / meta.source_sample_rate.max(1) as f64;
             if decoded_secs >= cue_end {
                 resampler.finish();
                 decoder_finished = true;
@@ -1992,21 +2655,24 @@ fn play_file(
             }
         }
 
+        let ActiveTrackSource::Direct(ref mut decoder) = source else {
+            unreachable!()
+        };
         match decoder.decode_chunk(&mut decode_buf, &mut pcm_scratch, &mut packet_errors)? {
             DecodeChunk::Frames {
                 channels,
                 packet_bytes,
                 packet_dur,
             } => {
-                if decoder.nominal_kbps.is_none() {
+                if meta.nominal_kbps.is_none() {
                     stats.push(packet_bytes, packet_dur, events);
                 }
                 let raw_samples = pcm_scratch.as_slice();
                 let frames_in_pkt = raw_samples.len() / channels.max(1);
 
-                // Optional smooth fade-out near end of track when crossfade is enabled (zero copy otherwise!)
-                let end_secs = spec.cue_end.or(decoder.duration);
-                let sr = decoder.source_sample_rate.max(1) as f64;
+                // Optional smooth fade-out / overlap crossfade near end of track
+                let end_secs = spec.cue_end.or(meta.duration);
+                let sr = meta.source_sample_rate.max(1) as f64;
                 let fade_s = (prefs.crossfade_secs * 0.5) as f64;
                 let pkt_end_s = (decoded_source_frames + frames_in_pkt as u64) as f64 / sr;
                 if prefs.crossfade_secs > 0.05
@@ -3105,6 +3771,28 @@ mod tests {
         assert_eq!(
             choose_target_sample_rate(44_100, dac_96k, OversamplingMode::PowerOf2),
             Some(88_200)
+        );
+    }
+
+    #[test]
+    fn ram_budget_respects_free_system_ram_and_next_preload_cap() {
+        const MB: usize = 1024 * 1024;
+        // Tight system (700 MB free, 512 MB OS headroom -> 188 MB usable -> 47 MB active, 31 MB next)
+        let tight_active = effective_ram_budget_bytes(1024 * MB, Some(700 * MB as u64), false);
+        let tight_next = effective_ram_budget_bytes(1024 * MB, Some(700 * MB as u64), true);
+        assert_eq!(tight_active, 47 * MB);
+        assert_eq!(tight_next, (188 * MB) / 6);
+
+        // Critically low free RAM (<= 512 MB) -> 0 bytes (forces safe direct disk streaming!)
+        assert_eq!(
+            effective_ram_budget_bytes(512 * MB, Some(400 * MB as u64), false),
+            0
+        );
+
+        // Plentiful RAM (16 GB free) -> respects user's 512 MB ceiling
+        assert_eq!(
+            effective_ram_budget_bytes(512 * MB, Some(16 * 1024 * MB as u64), false),
+            512 * MB
         );
     }
 }
